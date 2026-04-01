@@ -5,6 +5,7 @@ namespace App\Services\Agent;
 use App\Services\Api\ApiErrorException;
 use App\Services\Compact\ContextCompactor;
 use App\Services\Cost\CostTracker;
+use App\Services\Hooks\HookExecutor;
 use App\Services\Permissions\PermissionChecker;
 use App\Services\Session\SessionManager;
 use App\Tools\Bash\BashTool;
@@ -15,6 +16,7 @@ class AgentLoop
 {
     private int $maxTurns = 50;
     private bool $aborted = false;
+    private bool $sessionStarted = false;
     private int $totalInputTokens = 0;
     private int $totalOutputTokens = 0;
     private int $totalCacheCreationTokens = 0;
@@ -30,6 +32,7 @@ class AgentLoop
         private readonly ContextCompactor $contextCompactor,
         private readonly CostTracker $costTracker,
         private readonly ToolRegistry $toolRegistry,
+        private readonly ?HookExecutor $hookExecutor = null,
     ) {}
 
     public function setPermissionPromptHandler(callable $handler): void
@@ -65,6 +68,14 @@ class AgentLoop
             'type' => 'user_message',
             'content' => $userInput,
         ]);
+
+        // Fire SessionStart hook on the very first user turn
+        if (!$this->sessionStarted) {
+            $this->sessionStarted = true;
+            $this->hookExecutor?->execute('SessionStart', [
+                'session_id' => $this->sessionManager->getSessionId(),
+            ]);
+        }
 
         $turnCount = 0;
 
@@ -130,6 +141,10 @@ class AgentLoop
 
             // 7. Check if we need to execute tools
             if (!$processor->hasToolUse()) {
+                $this->hookExecutor?->execute('Stop', [
+                    'session_id' => $this->sessionManager->getSessionId(),
+                    'turn' => $turnCount,
+                ]);
                 return $processor->getAccumulatedText();
             }
 

@@ -13,6 +13,9 @@ use App\Services\Agent\MessageHistory;
 use App\Services\Compact\ContextCompactor;
 use App\Services\Cost\CostTracker;
 use App\Services\Hooks\HookExecutor;
+use App\Services\OutputStyle\OutputStyleLoader;
+use App\Services\Session\AwaySummaryService;
+use App\Services\Session\SessionTitleService;
 use App\Services\Memory\SessionMemory;
 use App\Services\Notification\Notifier;
 use App\Services\Permissions\DenialTracker;
@@ -30,9 +33,26 @@ class AgentServiceProvider extends ServiceProvider
     {
         $this->app->singleton(SettingsManager::class);
         $this->app->singleton(SessionManager::class);
+
+        $this->app->singleton(SessionTitleService::class, function ($app) {
+            $settings = $app->make(SettingsManager::class);
+            return new SessionTitleService(
+                apiKey: $settings->getApiKey(),
+                baseUrl: $settings->getBaseUrl(),
+            );
+        });
+
+        $this->app->singleton(AwaySummaryService::class, function ($app) {
+            $settings = $app->make(SettingsManager::class);
+            return new AwaySummaryService(
+                apiKey: $settings->getApiKey(),
+                baseUrl: $settings->getBaseUrl(),
+            );
+        });
         $this->app->singleton(DenialTracker::class);
         $this->app->singleton(PermissionChecker::class);
         $this->app->singleton(HookExecutor::class);
+        $this->app->singleton(OutputStyleLoader::class);
         $this->app->singleton(SessionMemory::class);
         $this->app->singleton(SkillLoader::class);
         $this->app->singleton(CostTracker::class);
@@ -49,6 +69,7 @@ class AgentServiceProvider extends ServiceProvider
                 sessionMemory: $app->make(SessionMemory::class),
                 skillLoader: $app->make(SkillLoader::class),
                 gitContext: $app->make(GitContext::class),
+                outputStyleLoader: $app->make(OutputStyleLoader::class),
             );
         });
 
@@ -77,6 +98,7 @@ class AgentServiceProvider extends ServiceProvider
                 contextCompactor: $app->make(ContextCompactor::class),
                 costTracker: $app->make(CostTracker::class),
                 toolRegistry: $app->make(ToolRegistry::class),
+                hookExecutor: $app->make(HookExecutor::class),
             );
         });
     }

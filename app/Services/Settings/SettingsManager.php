@@ -62,12 +62,19 @@ class SettingsManager
         return config('haocode.session_path', storage_path('app/haocode/sessions'));
     }
 
+    public function getOutputStyle(): ?string
+    {
+        return $this->runtimeOverrides['output_style']
+            ?? $this->loadProjectSettings()['output_style']
+            ?? null;
+    }
+
     /**
      * Set a runtime override for a config key.
      */
     public function set(string $key, mixed $value): void
     {
-        $allowedKeys = ['model', 'api_base_url', 'max_tokens', 'permission_mode'];
+        $allowedKeys = ['model', 'api_base_url', 'max_tokens', 'permission_mode', 'output_style', 'theme'];
         if (in_array($key, $allowedKeys)) {
             $this->runtimeOverrides[$key] = $value;
         }

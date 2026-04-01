@@ -6,6 +6,7 @@ class SessionManager
 {
     private string $sessionId;
     private string $sessionPath;
+    private ?string $title = null;
 
     public function __construct()
     {
@@ -16,6 +17,30 @@ class SessionManager
     public function getSessionId(): string
     {
         return $this->sessionId;
+    }
+
+    public function setTitle(string $title): void
+    {
+        $this->title = $title;
+        $this->recordEntry(['type' => 'session_title', 'title' => $title]);
+    }
+
+    public function getTitle(): ?string
+    {
+        return $this->title;
+    }
+
+    /**
+     * Extract the stored title from a list of JSONL entries.
+     */
+    public static function extractTitleFromEntries(array $entries): ?string
+    {
+        foreach ($entries as $entry) {
+            if (($entry['type'] ?? '') === 'session_title') {
+                return $entry['title'] ?? null;
+            }
+        }
+        return null;
     }
 
     /**

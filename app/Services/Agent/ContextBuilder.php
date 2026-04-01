@@ -4,6 +4,7 @@ namespace App\Services\Agent;
 
 use App\Services\Git\GitContext;
 use App\Services\Memory\SessionMemory;
+use App\Services\OutputStyle\OutputStyleLoader;
 use App\Services\Settings\SettingsManager;
 use App\Tools\Skill\SkillLoader;
 use App\Tools\ToolRegistry;
@@ -16,6 +17,7 @@ class ContextBuilder
         private readonly SessionMemory $sessionMemory,
         private readonly SkillLoader $skillLoader,
         private readonly GitContext $gitContext,
+        private readonly ?OutputStyleLoader $outputStyleLoader = null,
     ) {}
 
     public function buildSystemPrompt(): array
@@ -51,6 +53,15 @@ class ContextBuilder
         $gitContext = $this->gitContext->getDiffContext();
         if ($gitContext) {
             $prompt .= $gitContext;
+        }
+
+        // Inject active output style instructions
+        $activeStyle = $this->settings->getOutputStyle();
+        if ($activeStyle && $this->outputStyleLoader) {
+            $styleContent = $this->outputStyleLoader->getActiveStyleContent($activeStyle);
+            if ($styleContent) {
+                $prompt .= "\n\n# Output Style Instructions\n\n" . $styleContent;
+            }
         }
 
         return [['type' => 'text', 'text' => $prompt, 'cache_control' => ['type' => 'ephemeral']]];

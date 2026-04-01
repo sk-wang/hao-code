@@ -4,6 +4,9 @@ namespace App\Console\Commands;
 
 use App\Services\Agent\AgentLoop;
 use App\Services\Compact\ContextCompactor;
+use App\Services\Hooks\HookExecutor;
+use App\Services\Session\AwaySummaryService;
+use App\Services\Session\SessionTitleService;
 use App\Services\Settings\SettingsManager;
 use App\Tools\Bash\BashTool;
 use Illuminate\Console\Command;
@@ -20,6 +23,7 @@ class HaoCodeCommand extends Command
 
     private bool $shouldExit = false;
     private bool $fastMode = false;
+    private bool $titleGenerated = false;
 
     public function handle(): int
     {
@@ -255,12 +259,14 @@ class HaoCodeCommand extends Command
             '/snapshot' => $this->handleSnapshot($agent, $args),
             '/init' => $this->handleInit($args),
             '/version' => $this->handleVersion(),
+            '/output-style' => $this->handleOutputStyle($args),
             default => $this->line("<fg=yellow>Unknown command: {$command}</>. Type <fg=cyan>/help</> for available commands."),
         };
     }
 
     private function handleExit(): void
     {
+        app(HookExecutor::class)->execute('SessionEnd', []);
         $this->line("<fg=gray>Goodbye!</>");
         $this->shouldExit = true;
     }
@@ -286,10 +292,11 @@ class HaoCodeCommand extends Command
         $this->line("  <fg=green>/skills</>    List available skills");
         $this->line("  <fg=green>/theme</>     Toggle color theme");
         $this->line("  <fg=green>/permissions</> View/manage permission rules");
-        $this->line("  <fg=green>/fast</>       Toggle fast (haiku) model mode");
-        $this->line("  <fg=green>/snapshot</>   Export session to a markdown file");
-        $this->line("  <fg=green>/init</>       Initialize .haocode/settings.json");
-        $this->line("  <fg=green>/version</>    Show version information\n");
+        $this->line("  <fg=green>/fast</>          Toggle fast (haiku) model mode");
+        $this->line("  <fg=green>/snapshot</>      Export session to a markdown file");
+        $this->line("  <fg=green>/init</>          Initialize .haocode/settings.json");
+        $this->line("  <fg=green>/version</>       Show version information");
+        $this->line("  <fg=green>/output-style</>  List or set output style\n");
     }
 
     private function handleClear(AgentLoop $agent): void
@@ -390,6 +397,12 @@ class HaoCodeCommand extends Command
 
         $sessionId = basename($file, '.jsonl');
         $this->line("<fg=green>Resumed session:</> <fg=white>{$sessionId}</> ({$restored} messages restored)");
+
+        // Show away summary
+        $awaySummary = app(AwaySummaryService::class)->generateSummary($entries);
+        if ($awaySummary) {
+            $this->line("\n  <fg=cyan>While you were away:</> <fg=gray>{$awaySummary}</>\n");
+        }
     }
 
     private function listSessions(): void
@@ -418,7 +431,13 @@ class HaoCodeCommand extends Command
             $id = basename($file, '.jsonl');
             $lines = count(file($file));
             $time = date('Y-m-d H:i', filemtime($file));
-            $this->line("  <fg=yellow>{$id}</> <fg=gray>{$time} · {$lines} entries</>");
+
+            // Extract stored title from the session file
+            $entries = array_map(fn($l) => json_decode(trim($l), true) ?: [], file($file));
+            $title = \App\Services\Session\SessionManager::extractTitleFromEntries($entries);
+            $titleStr = $title ? " <fg=white>· {$title}</>" : '';
+
+            $this->line("  <fg=yellow>{$id}</>{$titleStr} <fg=gray>{$time} · {$lines} entries</>");
         }
         $this->line("\n  <fg=gray>Use /resume <session_id> to restore a session</>");
     }
@@ -614,6 +633,10 @@ class HaoCodeCommand extends Command
         $costTracker = app(\App\Services\Cost\CostTracker::class);
         $this->line("\n  <fg=cyan;bold>Session Status:</>");
         $this->line("  Session: <fg=white>{$agent->getSessionManager()->getSessionId()}</>");
+        $title = $agent->getSessionManager()->getTitle();
+        if ($title) {
+            $this->line("  Title:   <fg=white>{$title}</>");
+        }
         $this->line("  Model: <fg=white>{$settings->getModel()}</>");
         $this->line("  Messages: <fg=white>{$agent->getMessageHistory()->count()}</>");
         $this->line("  Permission mode: <fg=white>{$settings->getPermissionMode()->value}</>");
@@ -907,6 +930,46 @@ class HaoCodeCommand extends Command
         $this->line("  CWD:     <fg=white>" . getcwd() . "</>\n");
     }
 
+    private function handleOutputStyle(string $args): void
+    {
+        /** @var \App\Services\OutputStyle\OutputStyleLoader $loader */
+        $loader = app(\App\Services\OutputStyle\OutputStyleLoader::class);
+        $settings = app(SettingsManager::class);
+        $args = trim($args);
+
+        $styles = $loader->listStyles();
+
+        if ($args === '' || $args === 'list') {
+            if (empty($styles)) {
+                $this->line("<fg=gray>No output styles found.</>");
+                $this->line("<fg=gray>Create .md files in ~/.haocode/output-styles/ or .haocode/output-styles/</>");
+                return;
+            }
+            $active = $settings->getOutputStyle();
+            $this->line("\n  <fg=cyan;bold>Output Styles:</>");
+            foreach ($styles as $slug => $style) {
+                $marker = ($slug === $active) ? '<fg=green>✓</>' : ' ';
+                $this->line("  {$marker} <fg=yellow>{$slug}</> <fg=gray>{$style['description']}</>");
+            }
+            $this->line("\n  <fg=gray>Use /output-style <slug> to activate, /output-style off to disable\n</>");
+            return;
+        }
+
+        if ($args === 'off' || $args === 'none') {
+            $settings->set('output_style', null);
+            $this->line("<fg=gray>Output style disabled.</>");
+            return;
+        }
+
+        if (isset($styles[$args])) {
+            $settings->set('output_style', $args);
+            $this->line("<fg=green>Output style set to:</> <fg=white>{$styles[$args]['name']}</>");
+            return;
+        }
+
+        $this->line("<fg=red>Unknown style: {$args}</>. Available: " . implode(', ', array_keys($styles)));
+    }
+
     private function runAgentTurn(AgentLoop $agent, string $input): void
     {
         $this->line('');
@@ -928,6 +991,17 @@ class HaoCodeCommand extends Command
             );
 
             $this->line("\n");
+
+            // Generate session title after the first turn (fire-and-forget best-effort)
+            if (!$this->titleGenerated && $agent->getSessionManager()->getTitle() === null) {
+                $this->titleGenerated = true;
+                $messages = $agent->getMessageHistory()->getMessagesForApi();
+                $title = app(SessionTitleService::class)->generateTitle($messages);
+                if ($title) {
+                    $agent->getSessionManager()->setTitle($title);
+                    $this->line("  <fg=gray>Session: {$title}</>");
+                }
+            }
 
             // Show cost after each turn
             $cost = $agent->getEstimatedCost();
