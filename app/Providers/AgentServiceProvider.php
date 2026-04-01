@@ -13,11 +13,11 @@ use App\Services\Agent\MessageHistory;
 use App\Services\Compact\ContextCompactor;
 use App\Services\Cost\CostTracker;
 use App\Services\Hooks\HookExecutor;
+use App\Services\Notification\Notifier;
 use App\Services\OutputStyle\OutputStyleLoader;
 use App\Services\Session\AwaySummaryService;
 use App\Services\Session\SessionTitleService;
 use App\Services\Memory\SessionMemory;
-use App\Services\Notification\Notifier;
 use App\Services\Permissions\DenialTracker;
 use App\Services\FileHistory\FileHistoryManager;
 use App\Services\Settings\SettingsManager;
@@ -54,6 +54,13 @@ class AgentServiceProvider extends ServiceProvider
         $this->app->singleton(HookExecutor::class);
         $this->app->singleton(OutputStyleLoader::class);
         $this->app->singleton(SessionMemory::class);
+
+        $this->app->singleton(Notifier::class, function ($app) {
+            return new Notifier(
+                channel: null, // auto-detect
+                hookExecutor: $app->make(HookExecutor::class),
+            );
+        });
         $this->app->singleton(SkillLoader::class);
         $this->app->singleton(CostTracker::class);
         $this->app->singleton(Notifier::class);

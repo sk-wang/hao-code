@@ -8,7 +8,25 @@ use App\Services\Hooks\HookExecutor;
 
 class ContextCompactor
 {
-    private const AUTO_COMPACT_THRESHOLD = 80000;
+    /** Claude context window (200k tokens) */
+    private const CONTEXT_WINDOW = 200_000;
+
+    /** Reserve for compaction summary output (~p99 of LLM summary) */
+    private const MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000;
+
+    /** Effective usable context = CONTEXT_WINDOW - MAX_OUTPUT_TOKENS_FOR_SUMMARY */
+    private const EFFECTIVE_CONTEXT_WINDOW = self::CONTEXT_WINDOW - self::MAX_OUTPUT_TOKENS_FOR_SUMMARY;
+
+    /**
+     * Trigger levels (tokens remaining before hitting EFFECTIVE_CONTEXT_WINDOW).
+     * Ported from claude-code autoCompact.ts constants.
+     */
+    private const AUTOCOMPACT_BUFFER_TOKENS  = 13_000; // fire auto-compact
+    private const WARNING_BUFFER_TOKENS      = 30_000; // yellow warning
+    private const ERROR_BUFFER_TOKENS        = 20_000; // red warning (= effective window - this)
+    private const BLOCKING_BUFFER_TOKENS     =  3_000; // hard block if compaction fails
+
+    private const AUTO_COMPACT_THRESHOLD = self::EFFECTIVE_CONTEXT_WINDOW - self::AUTOCOMPACT_BUFFER_TOKENS;
     private const MICRO_COMPACT_THRESHOLD = 40000;
 
     private const COMPACTABLE_TOOLS = ['Read', 'Bash', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Edit', 'Write'];
@@ -93,6 +111,48 @@ class ContextCompactor
     {
         return $totalInputTokens > self::AUTO_COMPACT_THRESHOLD
             && $this->compactFailures < self::MAX_COMPACT_FAILURES;
+    }
+
+    /**
+     * Return a tiered warning state based on current token usage.
+     *
+     * Mirrors claude-code's autoCompact.ts warning threshold logic.
+     *
+     * @return array{
+     *   percentUsed: float,
+     *   isWarning: bool,
+     *   isError: bool,
+     *   isBlocking: bool,
+     *   message: string|null
+     * }
+     */
+    public function getWarningState(int $totalInputTokens): array
+    {
+        $effectiveWindow = self::EFFECTIVE_CONTEXT_WINDOW;
+        $percentUsed = round(($totalInputTokens / $effectiveWindow) * 100, 1);
+
+        $tokensRemaining = $effectiveWindow - $totalInputTokens;
+
+        $isBlocking = $tokensRemaining <= self::BLOCKING_BUFFER_TOKENS;
+        $isError    = $tokensRemaining <= self::ERROR_BUFFER_TOKENS;
+        $isWarning  = $tokensRemaining <= self::WARNING_BUFFER_TOKENS;
+
+        $message = null;
+        if ($isBlocking) {
+            $message = "Context window critically full ({$percentUsed}%). Use /compact immediately.";
+        } elseif ($isError) {
+            $message = "Context window nearly full ({$percentUsed}%). Consider using /compact.";
+        } elseif ($isWarning) {
+            $message = "Context window at {$percentUsed}%. Auto-compact will trigger soon.";
+        }
+
+        return [
+            'percentUsed' => $percentUsed,
+            'isWarning'   => $isWarning,
+            'isError'     => $isError,
+            'isBlocking'  => $isBlocking,
+            'message'     => $message,
+        ];
     }
 
     /**

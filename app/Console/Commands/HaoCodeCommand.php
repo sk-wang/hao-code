@@ -466,20 +466,46 @@ class HaoCodeCommand extends Command
 
     private function handleDiff(): void
     {
-        $output = shell_exec('git diff --stat 2>/dev/null');
-        if (empty(trim($output ?? ''))) {
+        $stat = shell_exec('git diff --stat HEAD 2>/dev/null');
+        if (empty(trim($stat ?? ''))) {
+            // Try staged only
+            $stat = shell_exec('git diff --cached --stat 2>/dev/null');
+        }
+
+        if (empty(trim($stat ?? ''))) {
             $this->line("<fg=gray>No uncommitted changes.</>");
             return;
         }
-        $this->line("\n  <fg=cyan;bold>Uncommitted Changes:</>");
-        $this->line($output);
 
-        // Show full diff if small enough
-        $fullDiff = shell_exec('git diff 2>/dev/null');
-        if ($fullDiff && mb_strlen($fullDiff) < 5000) {
-            $this->line($fullDiff);
-        } else {
-            $this->line("  <fg=gray>Use git diff to see the full changes.</>");
+        $this->line("\n  <fg=cyan;bold>Uncommitted Changes:</>");
+        $this->line("<fg=gray>{$stat}</>");
+
+        // Show colored full diff if not too large
+        $fullDiff = shell_exec('git diff HEAD 2>/dev/null') ?: shell_exec('git diff --cached 2>/dev/null') ?: '';
+
+        if (mb_strlen($fullDiff) > 8000) {
+            $this->line("  <fg=gray>(diff too large to display — run `git diff` in your terminal)</>");
+            return;
+        }
+
+        if (trim($fullDiff) === '') {
+            return;
+        }
+
+        foreach (explode("\n", $fullDiff) as $line) {
+            if (str_starts_with($line, '+++') || str_starts_with($line, '---')) {
+                $this->line("<fg=cyan>{$line}</>");
+            } elseif (str_starts_with($line, '@@')) {
+                $this->line("<fg=magenta>{$line}</>");
+            } elseif (str_starts_with($line, '+')) {
+                $this->line("<fg=green>{$line}</>");
+            } elseif (str_starts_with($line, '-')) {
+                $this->line("<fg=red>{$line}</>");
+            } elseif (str_starts_with($line, 'diff ') || str_starts_with($line, 'index ')) {
+                $this->line("<fg=yellow>{$line}</>");
+            } else {
+                $this->line("<fg=gray>{$line}</>");
+            }
         }
     }
 
@@ -1009,6 +1035,17 @@ class HaoCodeCommand extends Command
             $outTokens = $agent->getTotalOutputTokens();
             $cacheRead = $agent->getCacheReadTokens();
             $this->line("<fg=gray>  [{$inTokens}in/{$outTokens}out" . ($cacheRead > 0 ? "/{$cacheRead}cache" : '') . " tokens · \${$cost}]</>");
+
+            // Show context window warning if applicable
+            $compactor = app(ContextCompactor::class);
+            $warn = $compactor->getWarningState($inTokens);
+            if ($warn['isBlocking']) {
+                $this->line("  <fg=red;bold>⚠  {$warn['message']}</>");
+            } elseif ($warn['isError']) {
+                $this->line("  <fg=red>⚠  {$warn['message']}</>");
+            } elseif ($warn['isWarning']) {
+                $this->line("  <fg=yellow>⚠  {$warn['message']}</>");
+            }
 
         } catch (\App\Services\Api\ApiErrorException $e) {
             $this->line("\n  <fg=red>API Error ({$e->getErrorType()}): {$e->getMessage()}</>\n");
