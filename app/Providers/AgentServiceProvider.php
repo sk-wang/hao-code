@@ -4,6 +4,7 @@ namespace App\Providers;
 
 use App\Services\Api\StreamingClient;
 use App\Services\Agent\StreamProcessor;
+use App\Services\Git\GitContext;
 use App\Services\Agent\AgentLoop;
 use App\Services\Agent\QueryEngine;
 use App\Services\Agent\ToolOrchestrator;
@@ -38,6 +39,7 @@ class AgentServiceProvider extends ServiceProvider
         $this->app->singleton(Notifier::class);
         $this->app->singleton(\App\Services\FileHistory\FileHistoryManager::class);
         $this->app->singleton(\App\Services\Task\TaskManager::class);
+        $this->app->singleton(GitContext::class);
 
         // Register ContextBuilder with its dependencies
         $this->app->singleton(ContextBuilder::class, function ($app) {
@@ -46,6 +48,7 @@ class AgentServiceProvider extends ServiceProvider
                 toolRegistry: $app->make(ToolRegistry::class),
                 sessionMemory: $app->make(SessionMemory::class),
                 skillLoader: $app->make(SkillLoader::class),
+                gitContext: $app->make(GitContext::class),
             );
         });
 
@@ -56,6 +59,8 @@ class AgentServiceProvider extends ServiceProvider
                 model: $settings->getModel(),
                 baseUrl: $settings->getBaseUrl(),
                 maxTokens: $settings->getMaxTokens(),
+                thinkingEnabled: (bool) env('HAOCODE_THINKING', false),
+                thinkingBudget: (int) env('HAOCODE_THINKING_BUDGET', 10000),
             );
         });
 

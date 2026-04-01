@@ -16,6 +16,8 @@ class StreamingClient
         private readonly string $baseUrl = 'https://api.anthropic.com',
         private readonly int $maxTokens = 16384,
         private readonly string $apiVersion = '2023-06-01',
+        private readonly bool $thinkingEnabled = false,
+        private readonly int $thinkingBudget = 10000,
         ?HttpClientInterface $httpClient = null,
     ) {
         $this->httpClient = $httpClient ?? HttpClient::create([
@@ -71,8 +73,23 @@ class StreamingClient
             'messages' => $messages,
             'stream' => true,
         ];
+
+        // Enable extended thinking if configured
+        if ($this->thinkingEnabled) {
+            $payload['thinking'] = [
+                'type' => 'enabled',
+                'budget_tokens' => $this->thinkingBudget,
+            ];
+            // Extended thinking requires higher max_tokens
+            $payload['max_tokens'] = max($this->maxTokens, $this->thinkingBudget + 4096);
+        }
+
         if (count($tools) > 0) {
-            $payload['tools'] = $tools;
+            // Add cache_control breakpoint on the last tool for prompt caching
+            $toolsWithCache = $tools;
+            $lastIdx = count($toolsWithCache) - 1;
+            $toolsWithCache[$lastIdx]['cache_control'] = ['type' => 'ephemeral'];
+            $payload['tools'] = $toolsWithCache;
         }
 
         $response = $this->httpClient->request('POST', rtrim($this->baseUrl, '/') . '/v1/messages', [

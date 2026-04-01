@@ -1,59 +1,173 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Hao Code
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+基于 Laravel 构建的交互式 CLI 编程助手，通过 Anthropic API 驱动，在终端中提供 AI 辅助编码体验。
 
-## About Laravel
+## 特性
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+- **交互式 REPL** — 支持历史记录、多行输入、斜杠命令
+- **25+ 内置工具** — Bash、文件读写编辑、Grep、Glob、Agent、Web 搜索等
+- **流式响应** — 实时输出 AI 生成内容，工具执行过程可视化
+- **权限控制** — 工具执行前可交互确认，支持多种权限模式
+- **会话管理** — 自动保存会话，支持恢复历史会话
+- **上下文压缩** — 对话过长时自动压缩上下文，延长有效交互轮次
+- **成本追踪** — 实时统计 Token 用量和预估费用
+- **LSP 集成** — 代码智能（跳转定义、查找引用等）
+- **后台任务** — 支持后台执行长时间命令
+- **Cron 调度** — 定时任务和一次性提醒
+- **Skills 扩展** — 通过 `.haocode/skills/` 目录自定义技能
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+## 环境要求
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+- PHP >= 8.2
+- Composer
+- pcntl 扩展（推荐，用于信号处理）
+- ripgrep（推荐，用于代码搜索）
 
-## Learning Laravel
+## 安装
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+```bash
+git clone <repository-url> hao-code
+cd hao-code
+composer install
+cp .env.example .env
+php artisan key:generate
+```
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+## 配置
 
-## Laravel Sponsors
+编辑 `.env` 文件：
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+```env
+ANTHROPIC_API_KEY=sk-ant-...        # 必填：Anthropic API 密钥
+HAOCODE_MODEL=claude-sonnet-4-20250514  # 可选：模型选择
+HAOCODE_MAX_TOKENS=16384              # 可选：最大输出 Token
+HAOCODE_PERMISSION_MODE=default        # 可选：权限模式
+```
 
-### Premium Partners
+也可通过全局配置文件 `~/.haocode/settings.json` 管理。
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+## 使用
 
-## Contributing
+### 启动交互式 REPL
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+```bash
+php artisan hao-code
+```
 
-## Code of Conduct
+### 单次执行（非交互）
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+```bash
+php artisan hao-code --prompt="解释 app/Services/Agent/AgentLoop.php 的作用"
+```
 
-## Security Vulnerabilities
+### 命令行选项
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+| 选项 | 说明 |
+|------|------|
+| `--prompt=` | 非交互模式，执行单条指令 |
+| `--model=` | 覆盖默认模型 |
+| `--permission-mode=` | 覆盖权限模式 |
+
+### REPL 斜杠命令
+
+| 命令 | 说明 |
+|------|------|
+| `/help` | 显示帮助信息 |
+| `/exit` | 退出 REPL |
+| `/clear` | 清空对话历史 |
+| `/compact` | 压缩上下文 |
+| `/cost` | 显示 Token 用量和费用 |
+| `/model [name]` | 查看/切换模型 |
+| `/status` | 显示会话状态 |
+| `/context` | 显示上下文使用情况 |
+| `/resume [id]` | 恢复历史会话 |
+| `/memory` | 管理会话记忆 |
+| `/tasks` | 列出后台任务 |
+| `/diff` | 查看未提交的变更 |
+| `/rewind` | 撤销上一轮对话 |
+| `/doctor` | 运行诊断检查 |
+| `/theme` | 切换终端主题 |
+| `/skills` | 列出可用技能 |
+
+## 项目结构
+
+```
+app/
+├── Console/Commands/
+│   └── HaoCodeCommand.php       # CLI 入口命令（REPL + 斜杠命令）
+├── Contracts/
+│   └── ToolInterface.php         # 工具接口定义
+├── Services/
+│   ├── Agent/                    # Agent 核心循环
+│   │   ├── AgentLoop.php         # 主循环：接收输入 → 调用 API → 执行工具
+│   │   ├── QueryEngine.php       # API 查询引擎
+│   │   ├── StreamProcessor.php   # 流式响应处理
+│   │   ├── ToolOrchestrator.php  # 工具编排与执行
+│   │   ├── ContextBuilder.php    # 上下文构建
+│   │   └── MessageHistory.php    # 消息历史管理
+│   ├── Api/                      # Anthropic API 客户端
+│   │   ├── StreamingClient.php   # 流式 HTTP 客户端
+│   │   └── StreamEvent.php       # SSE 事件解析
+│   ├── Compact/                  # 上下文压缩
+│   ├── Cost/                     # 成本追踪
+│   ├── FileHistory/              # 文件变更记录
+│   ├── Hooks/                    # Hook 系统
+│   ├── Lsp/                      # LSP 客户端
+│   ├── Memory/                   # 会话记忆
+│   ├── Permissions/              # 权限检查
+│   ├── Session/                  # 会话管理
+│   ├── Settings/                 # 设置管理
+│   └── Task/                     # 后台任务管理
+├── Tools/                        # 25+ 内置工具
+│   ├── BaseTool.php              # 工具基类
+│   ├── ToolRegistry.php          # 工具注册表
+│   ├── Bash/                     # Shell 命令执行
+│   ├── FileRead/                 # 文件读取
+│   ├── FileEdit/                 # 文件编辑
+│   ├── FileWrite/                # 文件写入
+│   ├── Grep/                     # 内容搜索
+│   ├── Glob/                     # 文件匹配
+│   ├── Agent/                    # 子 Agent
+│   ├── WebSearch/                # Web 搜索
+│   ├── WebFetch/                 # URL 内容抓取
+│   ├── Lsp/                      # LSP 操作
+│   ├── Cron/                     # 定时任务
+│   ├── Task/                     # 后台任务
+│   ├── Notebook/                 # Notebook 编辑
+│   ├── TodoWrite/                # 待办管理
+│   ├── Skill/                    # 技能系统
+│   └── ...                       # 更多工具
+└── Providers/                    # Laravel 服务提供者
+```
+
+## Skills 扩展
+
+在项目目录 `.haocode/skills/` 或用户目录 `~/.haocode/skills/` 下创建技能：
+
+```
+.haocode/skills/
+├── commit/SKILL.md
+├── review/SKILL.md
+└── test/SKILL.md
+```
+
+内置技能：`commit`、`review`、`test`。
+
+## 权限模式
+
+| 模式 | 说明 |
+|------|------|
+| `default` | 危险操作需交互确认 |
+| `plan` | 计划模式，只读操作 |
+| `accept_edits` | 自动接受文件编辑 |
+| `bypass_permissions` | 跳过所有权限检查（慎用） |
+
+## 测试
+
+```bash
+composer test
+```
 
 ## License
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+MIT

@@ -139,7 +139,7 @@ class AgentLoop
             // 9. Feed tool results back
             $this->messageHistory->addToolResultMessage($toolResults);
 
-            // 9. Check background tasks and append status if any completed
+            // 10. Check background tasks and append status if any completed
             $bgResults = BashTool::checkAllTasks();
             foreach ($bgResults as $taskId => $bgResult) {
                 $toolResults[] = [
@@ -155,7 +155,7 @@ class AgentLoop
                 ));
             }
 
-            // 10. Record transcript
+            // 11. Record transcript
             $this->sessionManager->recordTurn($assistantMessage, $toolResults);
         }
 

@@ -2,6 +2,7 @@
 
 namespace App\Tools\FileWrite;
 
+use App\Services\Security\SecretScanner;
 use App\Tools\BaseTool;
 use App\Tools\ToolInputSchema;
 use App\Tools\ToolResult;
@@ -82,11 +83,30 @@ DESC;
         $lines = count(explode("\n", $content));
         $bytes = strlen($content);
 
-        return ToolResult::success("Successfully {$action} {$filePath} ({$lines} lines, {$bytes} bytes)");
+        // Scan for secrets and warn
+        $scanner = new SecretScanner();
+        $secrets = $scanner->scan($content);
+        $warning = '';
+        if (!empty($secrets)) {
+            $types = array_map(fn($s) => $s['type'], $secrets);
+            $uniqueTypes = array_unique($types);
+            $warning = "\n\n⚠ WARNING: Potential secrets detected: " . implode(', ', $uniqueTypes)
+                . ". Consider using environment variables instead of hardcoding credentials.";
+        }
+
+        return ToolResult::success("Successfully {$action} {$filePath} ({$lines} lines, {$bytes} bytes){$warning}");
     }
 
     public function isReadOnly(array $input): bool
     {
         return false;
+    }
+
+    public function backfillObservableInput(array $input, ToolUseContext $context): array
+    {
+        if (isset($input['file_path'])) {
+            $input['file_path'] = $this->resolvePath($input['file_path'], $context->workingDirectory);
+        }
+        return $input;
     }
 }

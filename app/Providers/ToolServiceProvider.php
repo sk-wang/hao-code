@@ -30,6 +30,7 @@ use App\Tools\Task\TaskGetTool;
 use App\Tools\Task\TaskListTool;
 use App\Tools\Task\TaskUpdateTool;
 use App\Tools\Task\TaskStopTool;
+use App\Tools\Sleep\SleepTool;
 use App\Tools\ToolSearch\ToolSearchTool;
 use Illuminate\Support\ServiceProvider;
 
@@ -89,6 +90,9 @@ class ToolServiceProvider extends ServiceProvider
 
             // Tool search
             $registry->register($app->make(ToolSearchTool::class));
+
+            // Utility
+            $registry->register($app->make(SleepTool::class));
 
             return $registry;
         });

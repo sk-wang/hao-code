@@ -76,9 +76,22 @@ DESC;
         // Handle binary files (images, PDFs)
         $mimeType = mime_content_type($filePath);
         if ($mimeType && str_starts_with($mimeType, 'image/')) {
-            $base64 = base64_encode(file_get_contents($filePath));
-            $size = filesize($filePath);
-            return ToolResult::success("[Image: {$mimeType}, {$size} bytes, base64 encoded]");
+            $imageData = file_get_contents($filePath);
+            $size = strlen($imageData);
+
+            // Validate image size (max 20MB for API)
+            if ($size > 20 * 1024 * 1024) {
+                return ToolResult::error("Image too large: " . round($size / 1024 / 1024, 1) . " MB (max 20 MB)");
+            }
+
+            $base64 = base64_encode($imageData);
+            return ToolResult::success("[Image: {$mimeType}, " . round($size / 1024, 1) . " KB, base64 encoded]\n[data:image/{$this->getImageFormat($mimeType)};base64,{$base64}]");
+        }
+
+        // Handle PDF files
+        $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+        if ($ext === 'pdf') {
+            return $this->readPdf($filePath);
         }
 
         $lines = file($filePath, FILE_IGNORE_NEW_LINES);
@@ -109,8 +122,52 @@ DESC;
         return true;
     }
 
+    public function backfillObservableInput(array $input, ToolUseContext $context): array
+    {
+        if (isset($input['file_path'])) {
+            $input['file_path'] = $this->resolvePath($input['file_path'], $context->workingDirectory);
+        }
+        return $input;
+    }
+
     public function maxResultSizeChars(): int
     {
         return PHP_INT_MAX; // Never truncate - avoid circular Read->file->Read loop
+    }
+
+    private function getImageFormat(string $mimeType): string
+    {
+        return match ($mimeType) {
+            'image/png' => 'png',
+            'image/jpeg' => 'jpeg',
+            'image/jpg' => 'jpeg',
+            'image/gif' => 'gif',
+            'image/webp' => 'webp',
+            default => 'png',
+        };
+    }
+
+    private function readPdf(string $filePath): ToolResult
+    {
+        $size = filesize($filePath);
+        if ($size > 32 * 1024 * 1024) {
+            return ToolResult::error("PDF too large: " . round($size / 1024 / 1024, 1) . " MB (max 32 MB)");
+        }
+
+        // Try using pdftotext for text extraction
+        $pdftotextOutput = shell_exec("which pdftotext 2>/dev/null");
+        if (!empty(trim($pdftotextOutput ?? ''))) {
+            $text = shell_exec("pdftotext -layout " . escapeshellarg($filePath) . " - 2>/dev/null");
+            if (!empty($text)) {
+                $pageCount = shell_exec("pdfinfo " . escapeshellarg($filePath) . " 2>/dev/null | grep Pages | awk '{print $2}'");
+                $pages = trim($pageCount ?? 'unknown');
+                return ToolResult::success("[PDF: {$filePath}, {$pages} pages, text extracted]\n\n" . $text);
+            }
+        }
+
+        // Fallback: read as base64 for the API to process
+        $data = file_get_contents($filePath);
+        $base64 = base64_encode($data);
+        return ToolResult::success("[PDF: {$filePath}, " . round($size / 1024, 1) . " KB, base64 encoded]\n[data:application/pdf;base64,{$base64}]");
     }
 }

@@ -17,6 +17,11 @@ class StreamProcessor
     /** @var callable|null Callback invoked when a tool_use block completes during streaming */
     private $onToolBlockComplete = null;
 
+    /** @var callable|null Callback for thinking delta display */
+    private $onThinkingDelta = null;
+
+    private string $accumulatedThinking = '';
+
     public function processEvent(StreamEvent $event): void
     {
         $data = $event->data;
@@ -38,6 +43,21 @@ class StreamProcessor
     public function setOnToolBlockComplete(callable $cb): void
     {
         $this->onToolBlockComplete = $cb;
+    }
+
+    public function setOnThinkingDelta(callable $cb): void
+    {
+        $this->onThinkingDelta = $cb;
+    }
+
+    public function getAccumulatedThinking(): string
+    {
+        return $this->accumulatedThinking;
+    }
+
+    public function hasThinking(): bool
+    {
+        return !empty($this->accumulatedThinking);
     }
 
     private function handleMessageStart(array $data): void
@@ -76,7 +96,12 @@ class StreamProcessor
         } elseif ($type === 'tool_use' && ($delta['type'] ?? '') === 'input_json_delta') {
             $this->contentBlocks[$index]['input'] .= $delta['partial_json'];
         } elseif ($type === 'thinking' && ($delta['type'] ?? '') === 'thinking_delta') {
-            $this->contentBlocks[$index]['text'] .= $delta['thinking'];
+            $thinking = $delta['thinking'];
+            $this->contentBlocks[$index]['text'] .= $thinking;
+            $this->accumulatedThinking .= $thinking;
+            if ($this->onThinkingDelta !== null) {
+                ($this->onThinkingDelta)($thinking);
+            }
         }
     }
 
@@ -169,6 +194,11 @@ class StreamProcessor
                     'name' => $block['name'],
                     'input' => $input,
                 ];
+            } elseif ($block['type'] === 'thinking') {
+                $content[] = [
+                    'type' => 'thinking',
+                    'thinking' => $block['text'],
+                ];
             }
         }
 
@@ -181,6 +211,7 @@ class StreamProcessor
         $this->stopReason = null;
         $this->usage = [];
         $this->accumulatedText = '';
+        $this->accumulatedThinking = '';
         $this->messageId = null;
     }
 }

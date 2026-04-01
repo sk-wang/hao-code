@@ -74,6 +74,54 @@ class SettingsManager
     }
 
     /**
+     * Add an allow rule persistently to project settings.
+     */
+    public function addAllowRule(string $rule): void
+    {
+        $this->modifyProjectSettings(function (array &$settings) use ($rule) {
+            $settings['permissions']['allow'][]= $rule;
+        });
+    }
+
+    /**
+     * Add a deny rule persistently to project settings.
+     */
+    public function addDenyRule(string $rule): void
+    {
+        $this->modifyProjectSettings(function (array &$settings) use ($rule) {
+            $settings['permissions']['deny'][]= $rule;
+        });
+    }
+
+    /**
+     * Remove an allow rule from project settings.
+     */
+    public function removeAllowRule(string $rule): void
+    {
+        $this->modifyProjectSettings(function (array &$settings) use ($rule) {
+            $key = array_search($rule, $settings['permissions']['allow'] ?? []);
+            if ($key !== false) {
+                unset($settings['permissions']['allow'][$key]);
+                $settings['permissions']['allow'] = array_values($settings['permissions']['allow']);
+            }
+        });
+    }
+
+    /**
+     * Remove a deny rule from project settings.
+     */
+    public function removeDenyRule(string $rule): void
+    {
+        $this->modifyProjectSettings(function (array &$settings) use ($rule) {
+            $key = array_search($rule, $settings['permissions']['deny'] ?? []);
+            if ($key !== false) {
+                unset($settings['permissions']['deny'][$key]);
+                $settings['permissions']['deny'] = array_values($settings['permissions']['deny']);
+            }
+        });
+    }
+
+    /**
      * Get all current settings as a flat array.
      */
     public function all(): array
@@ -124,5 +172,34 @@ class SettingsManager
         }
 
         return $this->cachedSettings;
+    }
+
+    /**
+     * Modify project settings file and invalidate cache.
+     */
+    private function modifyProjectSettings(callable $modifier): void
+    {
+        $projectPath = getcwd() . '/.haocode/settings.json';
+
+        $settings = [];
+        if (file_exists($projectPath)) {
+            $settings = json_decode(file_get_contents($projectPath), true) ?: [];
+        }
+
+        if (!isset($settings['permissions'])) {
+            $settings['permissions'] = ['allow' => [], 'deny' => []];
+        }
+
+        $modifier($settings);
+
+        $dir = dirname($projectPath);
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+
+        file_put_contents($projectPath, json_encode($settings, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+
+        // Invalidate cache
+        $this->cachedSettings = null;
     }
 }

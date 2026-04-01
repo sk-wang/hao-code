@@ -203,6 +203,9 @@ class ToolOrchestrator
             ];
         }
 
+        // Stage 2b: Normalize input paths before hooks/permissions observe them
+        $input = $tool->backfillObservableInput($input, $context);
+
         // Stage 3: PreToolUse hooks
         $hookResult = $this->hookExecutor->execute('PreToolUse', [
             'tool' => $toolName,

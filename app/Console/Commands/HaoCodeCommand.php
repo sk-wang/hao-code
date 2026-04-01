@@ -19,6 +19,7 @@ class HaoCodeCommand extends Command
     protected $description = 'Hao Code - Interactive CLI Coding Agent';
 
     private bool $shouldExit = false;
+    private bool $fastMode = false;
 
     public function handle(): int
     {
@@ -249,6 +250,11 @@ class HaoCodeCommand extends Command
             '/doctor' => $this->handleDoctor(),
             '/theme' => $this->handleTheme($args),
             '/skills' => $this->handleSkills(),
+            '/permissions', '/perm' => $this->handlePermissions($args),
+            '/fast' => $this->handleFast(),
+            '/snapshot' => $this->handleSnapshot($agent, $args),
+            '/init' => $this->handleInit($args),
+            '/version' => $this->handleVersion(),
             default => $this->line("<fg=yellow>Unknown command: {$command}</>. Type <fg=cyan>/help</> for available commands."),
         };
     }
@@ -278,7 +284,12 @@ class HaoCodeCommand extends Command
         $this->line("  <fg=green>/rewind</>    Undo last change");
         $this->line("  <fg=green>/doctor</>    Run diagnostics");
         $this->line("  <fg=green>/skills</>    List available skills");
-        $this->line("  <fg=green>/theme</>     Toggle color theme\n");
+        $this->line("  <fg=green>/theme</>     Toggle color theme");
+        $this->line("  <fg=green>/permissions</> View/manage permission rules");
+        $this->line("  <fg=green>/fast</>       Toggle fast (haiku) model mode");
+        $this->line("  <fg=green>/snapshot</>   Export session to a markdown file");
+        $this->line("  <fg=green>/init</>       Initialize .haocode/settings.json");
+        $this->line("  <fg=green>/version</>    Show version information\n");
     }
 
     private function handleClear(AgentLoop $agent): void
@@ -708,6 +719,192 @@ class HaoCodeCommand extends Command
             $this->line("  {$userInvocable} <fg=yellow>{$name}</> <fg=gray>{$desc}</>");
         }
         $this->line('');
+    }
+
+    private function handlePermissions(string $args): void
+    {
+        /** @var \App\Services\Settings\SettingsManager $settings */
+        $settings = app(\App\Services\Settings\SettingsManager::class);
+        $mode = $settings->getPermissionMode();
+        $allowRules = $settings->getAllowRules();
+        $denyRules = $settings->getDenyRules();
+
+        $parts = explode(' ', trim($args), 2);
+        $subCommand = $parts[0] ?? '';
+        $ruleArg = $parts[1] ?? '';
+
+        // Sub-commands for managing rules
+        if ($subCommand === 'allow') {
+            if (empty($ruleArg)) {
+                $this->line("<fg=red>Usage: /permissions allow <rule></>  e.g. <fg=white>/permissions allow Bash(git push*)</>");
+                return;
+            }
+            $settings->addAllowRule($ruleArg);
+            $this->line("<fg=green>Added allow rule:</> <fg=white>{$ruleArg}</>");
+            return;
+        }
+
+        if ($subCommand === 'deny') {
+            if (empty($ruleArg)) {
+                $this->line("<fg=red>Usage: /permissions deny <rule></>  e.g. <fg=white>/permissions deny Bash(rm -rf)</>");
+                return;
+            }
+            $settings->addDenyRule($ruleArg);
+            $this->line("<fg=red>Added deny rule:</> <fg=white>{$ruleArg}</>");
+            return;
+        }
+
+        if ($subCommand === 'remove') {
+            if (empty($ruleArg)) {
+                $this->line("<fg=red>Usage: /permissions remove <rule></>");
+                return;
+            }
+            $settings->removeAllowRule($ruleArg);
+            $settings->removeDenyRule($ruleArg);
+            $this->line("<fg=gray>Removed rule:</> <fg=white>{$ruleArg}</>");
+            return;
+        }
+
+        // Default: show current permissions status
+        $this->line("\n  <fg=cyan;bold>Permission Settings:</>");
+        $this->line("  Mode:              <fg=yellow>{$mode->value}</>");
+
+        if (!empty($allowRules)) {
+            $this->line("\n  <fg=green>Allow Rules:</>");
+            foreach ($allowRules as $rule) {
+                $this->line("    <fg=green>+</> <fg=white>{$rule}</>");
+            }
+        }
+
+        if (!empty($denyRules)) {
+            $this->line("\n  <fg=red>Deny Rules:</>");
+            foreach ($denyRules as $rule) {
+                $this->line("    <fg=red>-</> <fg=white>{$rule}</>");
+            }
+        }
+
+        if (empty($allowRules) && empty($denyRules)) {
+            $this->line("  <fg=gray>No custom rules configured.</>");
+        }
+
+        $this->line("\n  <fg=gray>Commands: /permissions allow <rule> | /permissions deny <rule> | /permissions remove <rule></>\n");
+    }
+
+    private function handleFast(): void
+    {
+        $settings = app(SettingsManager::class);
+        $this->fastMode = !$this->fastMode;
+
+        if ($this->fastMode) {
+            $settings->set('model', 'claude-haiku-4-20250514');
+            $this->line("<fg=green>Fast mode ON</> — switched to <fg=white>claude-haiku-4-20250514</> (cheaper & faster)");
+        } else {
+            $settings->set('model', config('haocode.model', 'claude-sonnet-4-20250514'));
+            $this->line("<fg=gray>Fast mode OFF</> — restored <fg=white>" . config('haocode.model', 'claude-sonnet-4-20250514') . "</>");
+        }
+    }
+
+    private function handleSnapshot(AgentLoop $agent, string $args): void
+    {
+        $messages = $agent->getMessageHistory()->getMessagesForApi();
+
+        if (empty($messages)) {
+            $this->line("<fg=gray>Nothing to snapshot — conversation is empty.</>");
+            return;
+        }
+
+        $args = trim($args);
+        $timestamp = date('Y-m-d_H-i-s');
+        $filename = $args ?: "snapshot_{$timestamp}.md";
+        if (!str_ends_with($filename, '.md')) {
+            $filename .= '.md';
+        }
+
+        $snapshotDir = storage_path('app/haocode/snapshots');
+        if (!is_dir($snapshotDir)) {
+            mkdir($snapshotDir, 0755, true);
+        }
+
+        $filepath = $snapshotDir . '/' . $filename;
+
+        $md = "# Hao Code Snapshot\n\n";
+        $md .= "**Date:** " . date('Y-m-d H:i:s') . "\n";
+        $md .= "**Session:** " . $agent->getSessionManager()->getSessionId() . "\n";
+        $md .= "**Model:** " . app(SettingsManager::class)->getModel() . "\n\n---\n\n";
+
+        foreach ($messages as $msg) {
+            $role = $msg['role'] ?? 'unknown';
+            $content = $msg['content'] ?? '';
+
+            if ($role === 'user' && is_string($content)) {
+                $md .= "## User\n\n{$content}\n\n";
+            } elseif ($role === 'assistant') {
+                $text = '';
+                if (is_string($content)) {
+                    $text = $content;
+                } elseif (is_array($content)) {
+                    foreach ($content as $block) {
+                        if (($block['type'] ?? '') === 'text') {
+                            $text .= $block['text'] ?? '';
+                        }
+                    }
+                }
+                if ($text) {
+                    $md .= "## Assistant\n\n{$text}\n\n";
+                }
+            }
+        }
+
+        file_put_contents($filepath, $md);
+        $this->line("<fg=green>Snapshot saved:</> <fg=white>{$filepath}</>");
+    }
+
+    private function handleInit(string $args): void
+    {
+        $projectPath = getcwd() . '/.haocode/settings.json';
+
+        if (file_exists($projectPath) && trim($args) !== '--force') {
+            $this->line("<fg=yellow>Settings already exist at:</> <fg=white>{$projectPath}</>");
+            $this->line("<fg=gray>Use /init --force to overwrite.</>");
+            return;
+        }
+
+        $dir = dirname($projectPath);
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+
+        $defaults = [
+            'model' => config('haocode.model', 'claude-sonnet-4-20250514'),
+            'permissions' => [
+                'allow' => [],
+                'deny' => [],
+            ],
+        ];
+
+        file_put_contents($projectPath, json_encode($defaults, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+        $this->line("<fg=green>Initialized:</> <fg=white>{$projectPath}</>");
+        $this->line("<fg=gray>Edit this file to customise model, permissions, and system prompt.</>");
+    }
+
+    private function handleVersion(): void
+    {
+        $composerJson = base_path('composer.json');
+        $version = 'dev';
+        if (file_exists($composerJson)) {
+            $composer = json_decode(file_get_contents($composerJson), true) ?? [];
+            $version = $composer['version'] ?? $version;
+        }
+
+        $settings = app(SettingsManager::class);
+        $toolCount = count(app(\App\Tools\ToolRegistry::class)->getAllTools());
+
+        $this->line("\n  <fg=cyan;bold>Hao Code</> <fg=white>{$version}</>");
+        $this->line("  PHP:     <fg=white>" . PHP_VERSION . "</>");
+        $this->line("  Laravel: <fg=white>" . app()->version() . "</>");
+        $this->line("  Model:   <fg=white>" . $settings->getModel() . "</>");
+        $this->line("  Tools:   <fg=white>{$toolCount} registered</>");
+        $this->line("  CWD:     <fg=white>" . getcwd() . "</>\n");
     }
 
     private function runAgentTurn(AgentLoop $agent, string $input): void

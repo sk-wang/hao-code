@@ -20,12 +20,16 @@ class QueryEngine
         array $messages,
         ?callable $onTextDelta = null,
         ?callable $onToolBlockComplete = null,
+        ?callable $onThinkingDelta = null,
     ): StreamProcessor {
         $tools = $this->toolRegistry->toApiTools();
         $processor = new StreamProcessor();
 
         if ($onToolBlockComplete) {
             $processor->setOnToolBlockComplete($onToolBlockComplete);
+        }
+        if ($onThinkingDelta) {
+            $processor->setOnThinkingDelta($onThinkingDelta);
         }
 
         foreach ($this->streamingClient->streamMessages(

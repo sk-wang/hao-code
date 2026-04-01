@@ -27,8 +27,10 @@ class StreamingToolExecutor
 
     private bool $contextSet = false;
     private ToolUseContext $context;
-    private ?callable $onToolStart = null;
-    private ?callable $onToolComplete = null;
+    /** @var callable|null */
+    private $onToolStart = null;
+    /** @var callable|null */
+    private $onToolComplete = null;
 
     public function __construct(
         private readonly ToolOrchestrator $toolOrchestrator,

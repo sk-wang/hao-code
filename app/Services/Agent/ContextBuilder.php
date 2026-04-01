@@ -2,6 +2,7 @@
 
 namespace App\Services\Agent;
 
+use App\Services\Git\GitContext;
 use App\Services\Memory\SessionMemory;
 use App\Services\Settings\SettingsManager;
 use App\Tools\Skill\SkillLoader;
@@ -14,6 +15,7 @@ class ContextBuilder
         private readonly ToolRegistry $toolRegistry,
         private readonly SessionMemory $sessionMemory,
         private readonly SkillLoader $skillLoader,
+        private readonly GitContext $gitContext,
     ) {}
 
     public function buildSystemPrompt(): array
@@ -45,7 +47,13 @@ class ContextBuilder
             $prompt .= "\n\n# Skills\n\n" . $skillDescs;
         }
 
-        return [['type' => 'text', 'text' => $prompt]];
+        // Append git context (current diff, branch info)
+        $gitContext = $this->gitContext->getDiffContext();
+        if ($gitContext) {
+            $prompt .= $gitContext;
+        }
+
+        return [['type' => 'text', 'text' => $prompt, 'cache_control' => ['type' => 'ephemeral']]];
     }
 
     private function getDefaultSystemPrompt(): string

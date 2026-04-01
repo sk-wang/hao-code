@@ -33,9 +33,45 @@ class MessageHistory
         $this->messages[] = ['role' => 'user', 'content' => $content];
     }
 
+    /**
+     * Get messages formatted for the Anthropic API.
+     * Adds cache_control breakpoints for prompt caching on the penultimate message.
+     */
     public function getMessagesForApi(): array
     {
-        return $this->messages;
+        $messages = $this->messages;
+        $count = count($messages);
+
+        // Add cache_control breakpoint on the penultimate message (the one before the last user message).
+        // This allows the conversation prefix to be cached while keeping the latest exchange fresh.
+        if ($count >= 3) {
+            $cacheIdx = $count - 2;
+            $messages[$cacheIdx] = $this->addCacheControl($messages[$cacheIdx]);
+        }
+
+        return $messages;
+    }
+
+    /**
+     * Add cache_control to the last content block of a message.
+     */
+    private function addCacheControl(array $message): array
+    {
+        if (is_string($message['content'])) {
+            // Simple text message: convert to content block format
+            $message['content'] = [
+                ['type' => 'text', 'text' => $message['content'], 'cache_control' => ['type' => 'ephemeral']],
+            ];
+            return $message;
+        }
+
+        if (is_array($message['content']) && !empty($message['content'])) {
+            // Content blocks: add cache_control to the last block
+            $lastIdx = count($message['content']) - 1;
+            $message['content'][$lastIdx]['cache_control'] = ['type' => 'ephemeral'];
+        }
+
+        return $message;
     }
 
     public function count(): int

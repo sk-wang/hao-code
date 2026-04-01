@@ -38,4 +38,10 @@ interface ToolInterface
      * Return PHP_INT_MAX to disable truncation.
      */
     public function maxResultSizeChars(): int;
+
+    /**
+     * Normalize tool input in-place before it is observed by hooks, permissions, or transcripts.
+     * Expands ~ and relative paths to absolute paths so that permission patterns cannot be bypassed.
+     */
+    public function backfillObservableInput(array $input, ToolUseContext $context): array;
 }

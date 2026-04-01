@@ -121,6 +121,14 @@ DESC;
         return false;
     }
 
+    public function backfillObservableInput(array $input, ToolUseContext $context): array
+    {
+        if (isset($input['file_path'])) {
+            $input['file_path'] = $this->resolvePath($input['file_path'], $context->workingDirectory);
+        }
+        return $input;
+    }
+
     public function validateInput(array $input, ToolUseContext $context): ?string
     {
         $filePath = $input['file_path'] ?? '';
