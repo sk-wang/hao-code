@@ -176,6 +176,117 @@ class StreamingClientTest extends TestCase
         }
     }
 
+    public function test_it_returns_early_without_request_when_already_aborted(): void
+    {
+        $requests = 0;
+        $httpClient = new MockHttpClient(function () use (&$requests) {
+            $requests++;
+
+            return new MockResponse([
+                "event: message_stop\n",
+                "data: {}\n\n",
+            ], ['http_code' => 200]);
+        });
+
+        $client = new StreamingClient(
+            apiKey: 'test-key',
+            model: 'kimi-for-coding',
+            httpClient: $httpClient,
+        );
+
+        $events = iterator_to_array($client->streamMessages(
+            systemPrompt: [],
+            messages: [['role' => 'user', 'content' => 'hello']],
+            tools: [],
+            shouldAbort: fn(): bool => true,
+        ));
+
+        $this->assertSame(0, $requests);
+        $this->assertSame([], $events);
+    }
+
+    public function test_it_cancels_active_response_when_abort_is_requested_mid_stream(): void
+    {
+        $state = (object) ['abort' => false];
+
+        $response = $this->createMock(\Symfony\Contracts\HttpClient\ResponseInterface::class);
+        $response->method('getStatusCode')->willReturn(200);
+        $response->expects($this->once())->method('cancel');
+
+        $firstChunk = $this->createMock(\Symfony\Contracts\HttpClient\ChunkInterface::class);
+        $firstChunk->method('getContent')->willReturn(
+            "event: message_start\n" .
+            "data: {\"message\":{\"id\":\"msg_1\",\"usage\":[]}}\n\n"
+        );
+
+        $secondChunk = $this->createMock(\Symfony\Contracts\HttpClient\ChunkInterface::class);
+        $secondChunk->expects($this->never())->method('getContent');
+
+        $stream = new class($response, $firstChunk, $secondChunk, $state) implements \Symfony\Contracts\HttpClient\ResponseStreamInterface {
+            /** @var array<int, \Symfony\Contracts\HttpClient\ChunkInterface> */
+            private array $chunks;
+            private int $position = 0;
+
+            public function __construct(
+                private \Symfony\Contracts\HttpClient\ResponseInterface $response,
+                \Symfony\Contracts\HttpClient\ChunkInterface $firstChunk,
+                \Symfony\Contracts\HttpClient\ChunkInterface $secondChunk,
+                private object $state,
+            ) {
+                $this->chunks = [$firstChunk, $secondChunk];
+            }
+
+            public function current(): \Symfony\Contracts\HttpClient\ChunkInterface
+            {
+                if ($this->position === 1) {
+                    $this->state->abort = true;
+                }
+
+                return $this->chunks[$this->position];
+            }
+
+            public function next(): void
+            {
+                $this->position++;
+            }
+
+            public function key(): \Symfony\Contracts\HttpClient\ResponseInterface
+            {
+                return $this->response;
+            }
+
+            public function valid(): bool
+            {
+                return isset($this->chunks[$this->position]);
+            }
+
+            public function rewind(): void
+            {
+                $this->position = 0;
+            }
+        };
+
+        $httpClient = $this->createMock(\Symfony\Contracts\HttpClient\HttpClientInterface::class);
+        $httpClient->method('request')->willReturn($response);
+        $httpClient->method('stream')->willReturn($stream);
+
+        $client = new StreamingClient(
+            apiKey: 'test-key',
+            model: 'kimi-for-coding',
+            httpClient: $httpClient,
+        );
+
+        $events = iterator_to_array($client->streamMessages(
+            systemPrompt: [],
+            messages: [['role' => 'user', 'content' => 'hello']],
+            tools: [],
+            shouldAbort: fn(): bool => $state->abort,
+        ));
+
+        $this->assertCount(1, $events);
+        $this->assertSame('message_start', $events[0]->type);
+    }
+
     public function test_it_retries_transport_errors_before_any_event_is_emitted(): void
     {
         $attempts = 0;

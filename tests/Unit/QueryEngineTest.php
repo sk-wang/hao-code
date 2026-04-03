@@ -15,7 +15,7 @@ class QueryEngineTest extends TestCase
     {
         $client = $this->createMock(StreamingClient::class);
         $client->method('streamMessages')->willReturnCallback(
-            function () use ($events) {
+            function (...$args) use ($events) {
                 yield from $events;
             }
         );
@@ -116,18 +116,22 @@ class QueryEngineTest extends TestCase
         $registry = $this->makeRegistry([$toolDef]);
 
         $capturedTools = null;
+        $capturedShouldAbort = null;
         $client = $this->createMock(StreamingClient::class);
         $client->method('streamMessages')->willReturnCallback(
-            function ($systemPrompt, $messages, $tools) use (&$capturedTools) {
+            function ($systemPrompt, $messages, $tools, $onRawEvent = null, $shouldAbort = null) use (&$capturedTools, &$capturedShouldAbort) {
                 $capturedTools = $tools;
+                $capturedShouldAbort = $shouldAbort;
                 return (function () { yield from []; })();
             }
         );
 
         $qe = new QueryEngine($client, $registry);
-        $qe->query([], []);
+        $abortChecker = fn(): bool => false;
+        $qe->query([], [], shouldAbort: $abortChecker);
 
         $this->assertSame([$toolDef], $capturedTools);
+        $this->assertSame($abortChecker, $capturedShouldAbort);
     }
 
     public function test_query_with_empty_event_stream(): void

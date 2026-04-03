@@ -45,6 +45,18 @@ class MessageHistoryTest extends TestCase
         $this->assertSame(0, $history->count());
     }
 
+    public function test_get_messages_returns_raw_history_without_cache_control_mutation(): void
+    {
+        $history = new MessageHistory;
+        $history->addUserMessage('first');
+        $history->addAssistantMessage(['role' => 'assistant', 'content' => 'response']);
+        $history->addUserMessage('second');
+
+        $messages = $history->getMessages();
+
+        $this->assertSame('response', $messages[1]['content']);
+    }
+
     public function test_get_messages_for_api_returns_all_messages(): void
     {
         $history = new MessageHistory;

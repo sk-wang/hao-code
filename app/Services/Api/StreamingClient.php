@@ -61,19 +61,28 @@ class StreamingClient
         array $messages,
         array $tools,
         ?callable $onRawEvent = null,
+        ?callable $shouldAbort = null,
     ): \Generator {
         $attempt = 0;
 
         while (true) {
+            if ($shouldAbort && $shouldAbort()) {
+                return;
+            }
+
             $hasYieldedEvents = false;
 
             try {
-                foreach ($this->doStreamMessages($systemPrompt, $messages, $tools, $onRawEvent) as $event) {
+                foreach ($this->doStreamMessages($systemPrompt, $messages, $tools, $onRawEvent, $shouldAbort) as $event) {
                     $hasYieldedEvents = true;
                     yield $event;
                 }
                 return;
             } catch (\Throwable $e) {
+                if ($shouldAbort && $shouldAbort()) {
+                    return;
+                }
+
                 // Once a streaming response has started, retrying inside this low-level
                 // client is unsafe because the caller may already have rendered text or
                 // started executing tools from the first attempt.
@@ -98,6 +107,7 @@ class StreamingClient
         array $messages,
         array $tools,
         ?callable $onRawEvent,
+        ?callable $shouldAbort,
     ): \Generator {
         $payload = [
             'model' => $this->resolveModel(),
@@ -139,6 +149,12 @@ class StreamingClient
             'verify_host' => true,
         ]);
 
+        if ($shouldAbort && $shouldAbort()) {
+            $this->cancelResponse($response);
+
+            return;
+        }
+
         $this->throwForHttpError($response);
 
         $currentEvent = null;
@@ -146,6 +162,12 @@ class StreamingClient
         $lineBuffer = '';
 
         foreach ($this->httpClient->stream($response) as $chunk) {
+            if ($shouldAbort && $shouldAbort()) {
+                $this->cancelResponse($response);
+
+                return;
+            }
+
             $content = $chunk->getContent();
 
             $lineBuffer .= $content;
@@ -162,9 +184,21 @@ class StreamingClient
                 );
 
                 foreach ($events as $event) {
+                    if ($shouldAbort && $shouldAbort()) {
+                        $this->cancelResponse($response);
+
+                        return;
+                    }
+
                     yield $event;
                 }
             }
+        }
+
+        if ($shouldAbort && $shouldAbort()) {
+            $this->cancelResponse($response);
+
+            return;
         }
 
         if ($lineBuffer !== '') {
@@ -176,12 +210,24 @@ class StreamingClient
             );
 
             foreach ($events as $event) {
+                if ($shouldAbort && $shouldAbort()) {
+                    $this->cancelResponse($response);
+
+                    return;
+                }
+
                 yield $event;
             }
         }
 
         $event = $this->emitCurrentEvent($currentEvent, $currentDataLines, $onRawEvent);
         if ($event !== null) {
+            if ($shouldAbort && $shouldAbort()) {
+                $this->cancelResponse($response);
+
+                return;
+            }
+
             yield $event;
         }
     }
@@ -365,5 +411,10 @@ class StreamingClient
         }
 
         return $e;
+    }
+
+    private function cancelResponse(ResponseInterface $response): void
+    {
+        $response->cancel();
     }
 }

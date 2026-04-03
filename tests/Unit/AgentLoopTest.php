@@ -116,6 +116,36 @@ class AgentLoopTest extends TestCase
         $this->assertSame('ok', $result);
     }
 
+    public function test_run_returns_aborted_when_query_is_interrupted_mid_turn(): void
+    {
+        $processor = $this->createMock(StreamProcessor::class);
+        $capturedShouldAbort = null;
+
+        $qe = $this->createMock(QueryEngine::class);
+        $loop = null;
+        $qe->method('query')->willReturnCallback(function (
+            array $systemPrompt,
+            array $messages,
+            ?callable $onTextDelta = null,
+            ?callable $onToolBlockComplete = null,
+            ?callable $onThinkingDelta = null,
+            ?callable $shouldAbort = null,
+        ) use (&$loop, $processor, &$capturedShouldAbort) {
+            $capturedShouldAbort = $shouldAbort;
+            $loop->abort();
+
+            return $processor;
+        });
+
+        $loop = $this->makeLoop($qe);
+
+        $result = $loop->run('please stop');
+
+        $this->assertSame('(aborted)', $result);
+        $this->assertNotNull($capturedShouldAbort);
+        $this->assertTrue($capturedShouldAbort());
+    }
+
     // ─── isAborted starts false ────────────────────────────────────────────
 
     public function test_is_aborted_starts_false(): void

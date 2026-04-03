@@ -17,6 +17,7 @@ class StreamingMarkdownOutputTest extends TestCase
             renderer: new MarkdownRenderer(40),
             terminalWidth: 40,
             liveRepaint: $liveRepaint,
+            minRenderIntervalMs: 0,
         );
     }
 
@@ -198,5 +199,34 @@ class StreamingMarkdownOutputTest extends TestCase
 
         $this->assertStringContainsString('Hi', $display);
         $this->assertStringNotContainsString("\r\033[2K", $display);
+    }
+
+    public function test_it_throttles_repaints_and_flushes_the_latest_buffer_on_finalize(): void
+    {
+        $output = new BufferedOutput(OutputInterface::VERBOSITY_NORMAL, true);
+        $timestamps = [0.0, 0.01, 0.03];
+        $stream = new StreamingMarkdownOutput(
+            output: $output,
+            renderer: new MarkdownRenderer(40),
+            terminalWidth: 40,
+            liveRepaint: true,
+            minRenderIntervalMs: 40,
+            timeProvider: function () use (&$timestamps): float {
+                return array_shift($timestamps) ?? 0.03;
+            },
+        );
+
+        $stream->append('# Hi');
+        $firstPaint = $output->fetch();
+
+        $stream->append("\n\nthere");
+        $this->assertSame('', $output->fetch());
+
+        $stream->finalize();
+        $finalPaint = $output->fetch();
+
+        $this->assertStringContainsString('Hi', $firstPaint);
+        $this->assertStringContainsString('there', $finalPaint);
+        $this->assertStringContainsString("\r\033[2K", $finalPaint);
     }
 }

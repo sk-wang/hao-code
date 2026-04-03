@@ -276,6 +276,33 @@ class BashToolTest extends TestCase
         $this->assertTrue($result->metadata['timedOut'] ?? false);
     }
 
+    public function test_call_aborts_long_running_command_when_context_is_interrupted(): void
+    {
+        $checks = 0;
+        $context = new ToolUseContext(
+            workingDirectory: sys_get_temp_dir(),
+            sessionId: 'test-session',
+            shouldAbort: function () use (&$checks): bool {
+                $checks++;
+
+                return $checks >= 2;
+            },
+        );
+
+        $start = microtime(true);
+        $result = $this->tool->call([
+            'command' => 'sleep 10',
+            'timeout' => 30000,
+        ], $context);
+        $elapsed = microtime(true) - $start;
+
+        $this->assertTrue($result->isError);
+        $this->assertStringContainsString('interrupted by user', strtolower($result->output));
+        $this->assertSame(130, $result->metadata['exitCode'] ?? null);
+        $this->assertTrue($result->metadata['aborted'] ?? false);
+        $this->assertLessThan(3.0, $elapsed);
+    }
+
     public function test_call_does_not_time_out_fast_command(): void
     {
         $result = $this->tool->call([

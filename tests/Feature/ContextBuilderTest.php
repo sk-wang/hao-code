@@ -135,6 +135,15 @@ class ContextBuilderTest extends TestCase
         $this->assertStringNotContainsString('# Skills', $result[0]['text']);
     }
 
+    public function test_prompt_contains_haocode_conventions_for_skill_paths(): void
+    {
+        $result = $this->makeBuilder()->buildSystemPrompt();
+
+        $this->assertStringContainsString('# Hao Code Conventions', $result[0]['text']);
+        $this->assertStringContainsString('.haocode/skills/', $result[0]['text']);
+        $this->assertStringContainsString('not `.claude`', $result[0]['text']);
+    }
+
     public function test_git_context_appended(): void
     {
         $gitContext = $this->makeGitContext("Branch: main\n# Git Status\nclean");

@@ -234,6 +234,50 @@ class TurnStatusRendererTest extends TestCase
         $this->assertStringNotContainsString('tokens', $display);
     }
 
+    public function test_set_phase_label_switches_status_to_running_tool(): void
+    {
+        $output = new BufferedOutput(OutputInterface::VERBOSITY_NORMAL, true);
+        $renderer = new TurnStatusRenderer(
+            output: $output,
+            formatter: new ReplFormatter,
+            input: 'hi',
+            timeProvider: static fn (): float => 100.0,
+            enabled: true,
+            verb: 'Thinking',
+        );
+
+        $renderer->start();
+        $output->fetch();
+
+        $renderer->setPhaseLabel('Bash');
+        $display = $output->fetch();
+
+        $this->assertStringContainsString('Running Bash...', $display);
+        $this->assertStringNotContainsString('Thinking...', $display);
+    }
+
+    public function test_clearing_phase_label_restores_normal_loading_status(): void
+    {
+        $output = new BufferedOutput(OutputInterface::VERBOSITY_NORMAL, true);
+        $renderer = new TurnStatusRenderer(
+            output: $output,
+            formatter: new ReplFormatter,
+            input: 'hi',
+            timeProvider: static fn (): float => 100.0,
+            enabled: true,
+            verb: 'Thinking',
+        );
+
+        $renderer->start();
+        $renderer->setPhaseLabel('Bash');
+        $output->fetch();
+
+        $renderer->setPhaseLabel(null);
+        $display = $output->fetch();
+
+        $this->assertStringContainsString('Thinking...', $display);
+    }
+
     // ─── stop ─────────────────────────────────────────────────────────────
 
     public function test_stop_clears_visible_line(): void

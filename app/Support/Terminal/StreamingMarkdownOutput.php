@@ -9,18 +9,29 @@ class StreamingMarkdownOutput
 {
     private string $buffer = '';
 
+    private string $lastRenderedBuffer = '';
+
     private int $renderedLineCount = 0;
 
     private bool $hasReceivedContent = false;
 
     private bool $hasRenderedLiveBlock = false;
 
+    private ?float $lastRenderAt = null;
+
+    /** @var (callable(): float)|null */
+    private $timeProvider;
+
     public function __construct(
         private readonly OutputInterface $output,
         private readonly MarkdownRenderer $renderer,
         private readonly ?int $terminalWidth = null,
         private readonly ?bool $liveRepaint = null,
-    ) {}
+        private readonly int $minRenderIntervalMs = 40,
+        ?callable $timeProvider = null,
+    ) {
+        $this->timeProvider = $timeProvider;
+    }
 
     public function append(string $markdown): void
     {
@@ -35,16 +46,15 @@ class StreamingMarkdownOutput
             return;
         }
 
-        $rendered = $this->renderer->render($this->buffer);
-        $this->clearLiveBlock();
+        $now = $this->currentTime();
 
-        if ($rendered === '') {
+        if ($this->hasRenderedLiveBlock
+            && $this->lastRenderAt !== null
+            && ($now - $this->lastRenderAt) < ($this->minRenderIntervalMs / 1000)) {
             return;
         }
 
-        $this->output->write($rendered);
-        $this->renderedLineCount = $this->countDisplayLines($rendered);
-        $this->hasRenderedLiveBlock = true;
+        $this->renderLiveBlock($now);
     }
 
     public function finalize(): void
@@ -53,7 +63,11 @@ class StreamingMarkdownOutput
             return;
         }
 
-        if (! $this->supportsLiveRepaint()) {
+        if ($this->supportsLiveRepaint()) {
+            if ($this->buffer !== $this->lastRenderedBuffer) {
+                $this->renderLiveBlock();
+            }
+        } else {
             $rendered = $this->renderer->render($this->buffer);
             if ($rendered !== '') {
                 $this->output->write($rendered);
@@ -71,9 +85,11 @@ class StreamingMarkdownOutput
     private function reset(): void
     {
         $this->buffer = '';
+        $this->lastRenderedBuffer = '';
         $this->renderedLineCount = 0;
         $this->hasReceivedContent = false;
         $this->hasRenderedLiveBlock = false;
+        $this->lastRenderAt = null;
     }
 
     private function clearLiveBlock(): void
@@ -109,9 +125,33 @@ class StreamingMarkdownOutput
         return max(1, $lineCount);
     }
 
+    private function renderLiveBlock(?float $timestamp = null): void
+    {
+        $rendered = $this->renderer->render($this->buffer);
+        $this->clearLiveBlock();
+
+        $this->lastRenderedBuffer = $this->buffer;
+        $this->lastRenderAt = $timestamp ?? $this->currentTime();
+
+        if ($rendered === '') {
+            return;
+        }
+
+        $this->output->write($rendered);
+        $this->renderedLineCount = $this->countDisplayLines($rendered);
+        $this->hasRenderedLiveBlock = true;
+    }
+
     private function resolvedTerminalWidth(): int
     {
         return max(20, $this->terminalWidth ?? (new Terminal)->getWidth());
+    }
+
+    private function currentTime(): float
+    {
+        return $this->timeProvider !== null
+            ? ($this->timeProvider)()
+            : microtime(true);
     }
 
     private function supportsLiveRepaint(): bool

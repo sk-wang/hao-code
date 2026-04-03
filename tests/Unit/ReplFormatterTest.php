@@ -55,7 +55,7 @@ class ReplFormatterTest extends TestCase
         $formatter = new ReplFormatter;
 
         $this->assertSame(
-            "  <fg=gray>Type '/help' for commands, '/exit' to quit</>",
+            "  <fg=gray>/help commands · Ctrl+O transcript · Ctrl+R history · Ctrl+C interrupt · Ctrl+D exit · \\ multiline</>",
             $formatter->helpHint(),
         );
     }
@@ -125,6 +125,92 @@ class ReplFormatterTest extends TestCase
         );
     }
 
+    public function test_it_formats_an_aborting_status_line(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $this->assertSame(
+            '  <fg=yellow>⏸ Aborting...</> <fg=gray>(Ctrl+C again to force exit)</>',
+            $formatter->abortingStatus(),
+        );
+    }
+
+    public function test_it_formats_an_interrupted_status_line(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $this->assertSame(
+            '  <fg=yellow>⏸ Interrupted</> <fg=gray>(ready for your next prompt)</>',
+            $formatter->interruptedStatus(),
+        );
+    }
+
+    public function test_it_formats_a_running_tool_status_line(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $this->assertSame(
+            '  <fg=yellow>✻ Running Bash...</> <fg=gray>(3s)</>',
+            $formatter->runningToolStatus('Bash', 3),
+        );
+    }
+
+    public function test_it_formats_a_prompt_footer(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $this->assertSame(
+            '  <fg=gray>Fix interrupt flow · claude-sonnet-4-20250514 · 12 msgs · default · Ctrl+O transcript · Ctrl+R history</>',
+            $formatter->promptFooter(
+                model: 'claude-sonnet-4-20250514',
+                messageCount: 12,
+                permissionMode: 'default',
+                fastMode: false,
+                title: 'Fix interrupt flow',
+            ),
+        );
+    }
+
+    public function test_prompt_footer_includes_fast_badge_when_enabled(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $footer = $formatter->promptFooter(
+            model: 'claude-haiku-4-20250514',
+            messageCount: 3,
+            permissionMode: 'acceptEdits',
+            fastMode: true,
+        );
+
+        $this->assertStringContainsString('fast', $footer);
+    }
+
+    public function test_it_formats_a_transcript_footer(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $this->assertSame(
+            '  <fg=gray>Line 42/100 · 42% · Search: abort · 2/5 · j/k move · space/b page · / search · q quit</>',
+            $formatter->transcriptFooter(
+                line: 42,
+                totalLines: 100,
+                query: 'abort',
+                currentMatch: 2,
+                matchCount: 5,
+            ),
+        );
+    }
+
+    public function test_it_formats_reverse_search_status(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $this->assertSame(
+            '<fg=yellow>(reverse-i-search)</> <fg=gray>`git`:</> <fg=white>git diff --stat</><fg=gray> 1/2</>',
+            $formatter->reverseSearchStatus('git', 'git diff --stat', 1, 2),
+        );
+    }
+
     public function test_it_formats_continuation_prompt(): void
     {
         $formatter = new ReplFormatter;
@@ -150,6 +236,38 @@ class ReplFormatterTest extends TestCase
             '  <fg=magenta>⚙ Read</>',
             $formatter->toolCall('Read', ''),
         );
+    }
+
+    public function test_it_formats_a_panel_with_markup_aware_padding(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $lines = $formatter->panel('Status', [
+            '<fg=green>✓</> <fg=gray>Ready</>',
+            '<fg=yellow>Model</> <fg=white>sonnet</>',
+        ]);
+
+        $this->assertCount(5, $lines);
+        $this->assertStringContainsString('╭', $lines[0]);
+        $this->assertStringContainsString('Status', $lines[1]);
+        $this->assertStringContainsString('Ready', $lines[2]);
+        $this->assertStringContainsString('sonnet', $lines[3]);
+        $this->assertStringContainsString('╰', $lines[4]);
+    }
+
+    public function test_it_formats_the_permission_prompt_panel(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $lines = $formatter->permissionPromptPanel('Write', 'README.md');
+
+        $this->assertCount(5, $lines);
+        $this->assertStringContainsString('╭', $lines[0]);
+        $this->assertStringContainsString('Permission required', $lines[1]);
+        $this->assertStringContainsString('Tool', $lines[2]);
+        $this->assertStringContainsString('Write (README.md)', $lines[2]);
+        $this->assertStringContainsString('allow session', $lines[3]);
+        $this->assertStringContainsString('╰', $lines[4]);
     }
 
     public function test_usage_footer_omits_cache_when_zero(): void

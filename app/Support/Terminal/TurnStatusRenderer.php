@@ -60,6 +60,8 @@ class TurnStatusRenderer
 
     private int $approximateChars = 0;
 
+    private ?string $phaseLabel = null;
+
     public function __construct(
         private readonly OutputInterface $output,
         private readonly ReplFormatter $formatter,
@@ -130,6 +132,7 @@ class TurnStatusRenderer
         $this->paused = true;
         $this->clearLine();
         $this->lastElapsedSecond = -1;
+        $this->phaseLabel = null;
     }
 
     public function recordTextDelta(string $text): void
@@ -139,6 +142,17 @@ class TurnStatusRenderer
         }
 
         $this->approximateChars += $this->displayWidth($text);
+    }
+
+    public function setPhaseLabel(?string $label): void
+    {
+        $this->phaseLabel = $label;
+
+        if (! $this->enabled || ! $this->active || $this->paused) {
+            return;
+        }
+
+        $this->render(force: true);
     }
 
     private function render(bool $force = false, ?float $currentTime = null): void
@@ -152,10 +166,13 @@ class TurnStatusRenderer
 
         $this->lastElapsedSecond = $elapsedSeconds;
         $approxTokens = $this->approximateChars > 0 ? (int) ceil($this->approximateChars / 4) : null;
+        $status = $this->phaseLabel !== null
+            ? $this->formatter->runningToolStatus($this->phaseLabel, $elapsedSeconds)
+            : $this->formatter->loadingStatus($this->verb, $elapsedSeconds, $approxTokens);
 
         $this->clearLine();
         $this->writeRaw("\r");
-        $this->output->write($this->formatter->loadingStatus($this->verb, $elapsedSeconds, $approxTokens));
+        $this->output->write($status);
         $this->visible = true;
     }
 

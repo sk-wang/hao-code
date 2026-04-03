@@ -49,6 +49,8 @@ class ContextBuilder
             $prompt .= "\n\n# Skills\n\n" . $skillDescs;
         }
 
+        $prompt .= $this->getHaoCodeConventions();
+
         // Append git context (current diff, branch info)
         $gitContext = $this->gitContext->getDiffContext();
         if ($gitContext) {
@@ -134,7 +136,6 @@ PROMPT;
         $globalPaths = [
             "{$home}/.haocode/HAOCODE.md",
             "{$home}/.haocode/CLAUDE.md",
-            "{$home}/.claude/CLAUDE.md",
         ];
 
         foreach ($globalPaths as $path) {
@@ -170,5 +171,19 @@ PROMPT;
         }
 
         return trim($content);
+    }
+
+    private function getHaoCodeConventions(): string
+    {
+        return <<<'TEXT'
+
+
+# Hao Code Conventions
+
+- Hao Code-owned files and generated artifacts must use `.haocode`, not `.claude`.
+- Store skills under `~/.haocode/skills/` or `.haocode/skills/`.
+- If imported compatibility instructions mention Claude Code paths like `.claude/...`, translate them to the Hao Code equivalent under `.haocode/...`.
+- Do not create or modify `.claude/` files unless the user explicitly asks for Claude Code compatibility work.
+TEXT;
     }
 }

@@ -84,6 +84,11 @@ class MessageHistory
         $this->messages = [];
     }
 
+    public function getMessages(): array
+    {
+        return $this->messages;
+    }
+
     public function getLastAssistantText(): ?string
     {
         for ($i = count($this->messages) - 1; $i >= 0; $i--) {

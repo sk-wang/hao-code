@@ -117,4 +117,17 @@ class ValueObjectsTest extends TestCase
         $ctx = new ToolUseContext('/tmp', 'test', $fn);
         $this->assertSame($fn, $ctx->onProgress);
     }
+
+    public function test_context_stores_abort_checker(): void
+    {
+        $fn = fn(): bool => true;
+        $ctx = new ToolUseContext('/tmp', 'test', null, $fn);
+        $this->assertSame($fn, $ctx->shouldAbort);
+    }
+
+    public function test_context_reports_abort_state(): void
+    {
+        $ctx = new ToolUseContext('/tmp', 'test', null, fn(): bool => true);
+        $this->assertTrue($ctx->isAborted());
+    }
 }

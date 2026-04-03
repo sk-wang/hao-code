@@ -73,6 +73,13 @@ DESC;
         $command = $input['command'];
         $background = $input['run_in_background'] ?? false;
 
+        if ($context->isAborted()) {
+            return ToolResult::error('Command interrupted by user.', [
+                'exitCode' => 130,
+                'aborted' => true,
+            ]);
+        }
+
         // Check for dangerous patterns
         $warnings = $this->detectDangerousPatterns($command);
 
@@ -113,8 +120,15 @@ DESC;
         $stderr = '';
         $deadline  = microtime(true) + $timeout;
         $timedOut  = false;
+        $aborted = false;
 
         while (true) {
+            if ($context->isAborted()) {
+                $aborted = true;
+                proc_terminate($process, defined('SIGINT') ? SIGINT : 15);
+                break;
+            }
+
             $remaining = $deadline - microtime(true);
             if ($remaining <= 0) {
                 $timedOut = true;
@@ -157,6 +171,19 @@ DESC;
         fclose($pipes[2]);
 
         $exitCode = proc_close($process);
+
+        if ($aborted) {
+            $partial = trim($stdout . ($stderr ? "\n" . $stderr : ''));
+            $message = 'Command interrupted by user.';
+            if ($partial !== '') {
+                $message .= "\nPartial output:\n{$partial}";
+            }
+
+            return ToolResult::error($message, [
+                'exitCode' => 130,
+                'aborted' => true,
+            ]);
+        }
 
         if ($timedOut) {
             $partial = trim($stdout . ($stderr ? "\n" . $stderr : ''));

@@ -110,6 +110,7 @@ class AgentLoop
             $context = new ToolUseContext(
                 workingDirectory: getcwd(),
                 sessionId: $this->sessionManager->getSessionId(),
+                shouldAbort: fn(): bool => $this->aborted,
             );
             $streamingExecutor->setContext($context, $onToolStart, $onToolComplete);
 
@@ -120,8 +121,15 @@ class AgentLoop
                     messages: $messages,
                     onTextDelta: $onTextDelta,
                     onToolBlockComplete: fn(array $block, int $index) =>
-                        $streamingExecutor->onToolBlockReady($block, $index),
+                        $this->aborted ? null : $streamingExecutor->onToolBlockReady($block, $index),
+                    shouldAbort: fn(): bool => $this->aborted,
                 );
+
+                if ($this->aborted) {
+                    $streamingExecutor->cleanup();
+
+                    return '(aborted)';
+                }
 
                 // 5. Track usage
                 $usage = $processor->getUsage();

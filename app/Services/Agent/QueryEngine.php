@@ -21,6 +21,7 @@ class QueryEngine
         ?callable $onTextDelta = null,
         ?callable $onToolBlockComplete = null,
         ?callable $onThinkingDelta = null,
+        ?callable $shouldAbort = null,
     ): StreamProcessor {
         $tools = $this->toolRegistry->toApiTools();
         $processor = new StreamProcessor();
@@ -36,6 +37,7 @@ class QueryEngine
             systemPrompt: $systemPrompt,
             messages: $messages,
             tools: $tools,
+            shouldAbort: $shouldAbort,
         ) as $event) {
             $processor->processEvent($event);
 

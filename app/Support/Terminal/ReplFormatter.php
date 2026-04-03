@@ -56,7 +56,7 @@ class ReplFormatter
 
     public function helpHint(): string
     {
-        return "  <fg=gray>Type '/help' for commands, '/exit' to quit</>";
+        return "  <fg=gray>/help commands · Ctrl+O transcript · Ctrl+R history · Ctrl+C interrupt · Ctrl+D exit · \\ multiline</>";
     }
 
     public function readlinePrompt(string $cwd): string
@@ -67,6 +67,74 @@ class ReplFormatter
     public function readlineContinuationPrompt(): string
     {
         return $this->wrapAnsiForReadline($this->outputFormatter->format($this->continuationPrompt()));
+    }
+
+    public function promptFooter(
+        string $model,
+        int $messageCount,
+        string $permissionMode,
+        bool $fastMode = false,
+        ?string $title = null,
+    ): string {
+        $parts = [];
+
+        if ($title !== null && trim($title) !== '') {
+            $parts[] = $this->truncate($title, 24);
+        }
+
+        $parts[] = $this->truncate($model, 26);
+        $parts[] = $messageCount . ' msgs';
+        $parts[] = $permissionMode;
+
+        if ($fastMode) {
+            $parts[] = 'fast';
+        }
+
+        $parts[] = 'Ctrl+O transcript';
+        $parts[] = 'Ctrl+R history';
+
+        return '  <fg=gray>' . $this->escape(implode(' · ', $parts)) . '</>';
+    }
+
+    public function transcriptFooter(
+        int $line,
+        int $totalLines,
+        ?string $query = null,
+        int $currentMatch = 0,
+        int $matchCount = 0,
+        ?string $status = null,
+    ): string {
+        $parts = [];
+        $percent = $totalLines > 0 ? (int) round(($line / max(1, $totalLines)) * 100) : 100;
+        $parts[] = "Line {$line}/{$totalLines}";
+        $parts[] = "{$percent}%";
+
+        if ($query !== null && trim($query) !== '') {
+            $parts[] = "Search: {$query}";
+            $parts[] = "{$currentMatch}/{$matchCount}";
+        }
+
+        if ($status !== null && trim($status) !== '') {
+            $parts[] = $status;
+        }
+
+        $parts[] = 'j/k move';
+        $parts[] = 'space/b page';
+        $parts[] = '/ search';
+        $parts[] = 'q quit';
+
+        return '  <fg=gray>' . $this->escape(implode(' · ', $parts)) . '</>';
+    }
+
+    public function reverseSearchStatus(string $query, string $match, int $current, int $total): string
+    {
+        $label = $query === '' ? '(type to search)' : $query;
+        $display = $match === '' ? '(no match)' : $this->truncate($match, 120);
+        $suffix = $total > 0 ? " {$current}/{$total}" : '';
+
+        return '<fg=yellow>(reverse-i-search)</> <fg=gray>`' . $this->escape($label) . '`:</>' .
+            ' <fg=white>' . $this->escape($display) . '</>' .
+            '<fg=gray>' . $this->escape($suffix) . '</>';
     }
 
     public function toolCall(string $toolName, string $summary = ''): string
@@ -85,6 +153,70 @@ class ReplFormatter
         return '  <fg=red>✗ '.$this->escape($toolName).' failed:</> <fg=gray>'.$this->escape($message).'</>';
     }
 
+    /**
+     * @param array<int, string> $lines
+     * @return array<int, string>
+     */
+    public function panel(string $title, array $lines, string $color = 'cyan'): array
+    {
+        $plainTitle = $title;
+        $contentWidth = $this->displayWidth($plainTitle);
+
+        foreach ($lines as $line) {
+            $contentWidth = max($contentWidth, $this->displayWidth($this->stripMarkup($line)));
+        }
+
+        $border = str_repeat('─', $contentWidth + 2);
+        $rendered = ["  <fg={$color};bold>╭{$border}╮</>"];
+        $rendered[] = sprintf(
+            '  <fg=%1$s;bold>│</> <fg=white;bold>%2$s</>%3$s<fg=%1$s;bold>│</>',
+            $color,
+            $this->escape($plainTitle),
+            str_repeat(' ', max(0, $contentWidth - $this->displayWidth($plainTitle) + 1)),
+        );
+
+        foreach ($lines as $line) {
+            $plain = $this->stripMarkup($line);
+            $padding = str_repeat(' ', max(0, $contentWidth - $this->displayWidth($plain)));
+            $rendered[] = sprintf(
+                '  <fg=%1$s;bold>│</> %2$s%3$s <fg=%1$s;bold>│</>',
+                $color,
+                $line,
+                $padding,
+            );
+        }
+
+        $rendered[] = "  <fg={$color};bold>╰{$border}╯</>";
+
+        return $rendered;
+    }
+
+    public function keyValue(string $label, string $value, string $labelColor = 'gray', string $valueColor = 'white'): string
+    {
+        return sprintf(
+            '<fg=%s>%s:</> <fg=%s>%s</>',
+            $labelColor,
+            $this->escape($label),
+            $valueColor,
+            $this->escape($value),
+        );
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public function permissionPromptPanel(string $toolName, string $summary): array
+    {
+        $toolLine = $summary === ''
+            ? $this->keyValue('Tool', $toolName)
+            : $this->keyValue('Tool', "{$toolName} ({$summary})");
+
+        return $this->panel('Permission required', [
+            $toolLine,
+            '<fg=green>[y]</> allow once  <fg=green>[a]</> allow session  <fg=red>[n]</> deny',
+        ], 'yellow');
+    }
+
     public function loadingStatus(string $verb, int $elapsedSeconds, ?int $approxTokens = null): string
     {
         $details = "{$elapsedSeconds}s";
@@ -94,6 +226,21 @@ class ReplFormatter
         }
 
         return '  <fg='.self::LOADING_COLOR.'>✻ '.$this->escape($verb).'...</> <fg=gray>('.$details.')</>';
+    }
+
+    public function interruptedStatus(): string
+    {
+        return '  <fg=yellow>⏸ Interrupted</> <fg=gray>(ready for your next prompt)</>';
+    }
+
+    public function abortingStatus(): string
+    {
+        return '  <fg=yellow>⏸ Aborting...</> <fg=gray>(Ctrl+C again to force exit)</>';
+    }
+
+    public function runningToolStatus(string $toolName, int $elapsedSeconds): string
+    {
+        return '  <fg='.self::LOADING_COLOR.'>✻ Running '.$this->escape($toolName).'...</> <fg=gray>('.$elapsedSeconds.'s)</>';
     }
 
     public function usageFooter(
@@ -155,5 +302,19 @@ class ReplFormatter
     private function wrapAnsiForReadline(string $text): string
     {
         return preg_replace('/(\e\[[0-9;]*m)/', "\001$1\002", $text) ?? $text;
+    }
+
+    private function truncate(string $text, int $max): string
+    {
+        if ($this->displayWidth($text) <= $max) {
+            return $text;
+        }
+
+        return mb_substr($text, 0, max(1, $max - 1)) . '…';
+    }
+
+    private function stripMarkup(string $text): string
+    {
+        return preg_replace('/<[^>]+>/', '', $text) ?? $text;
     }
 }
