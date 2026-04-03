@@ -104,7 +104,12 @@ DESC;
         if ($replaceAll) {
             $newContent = str_replace($oldString, $newString, $content);
         } else {
-            $newContent = preg_replace('/' . preg_quote($oldString, '/') . '/', $newString, $content, 1);
+            $pos = strpos($content, $oldString);
+            if ($pos !== false) {
+                $newContent = substr($content, 0, $pos) . $newString . substr($content, $pos + strlen($oldString));
+            } else {
+                $newContent = $content;
+            }
         }
 
         $result = file_put_contents($filePath, $newContent);

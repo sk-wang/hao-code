@@ -45,9 +45,10 @@ class EnterWorktreeTool extends BaseTool
             return ToolResult::error('Not inside a git repository. Worktrees require a git repo.');
         }
 
-        // Check if already in a worktree
-        $isWorktree = exec('cd ' . escapeshellarg($cwd) . ' && git rev-parse --git-common-dir 2>/dev/null');
-        if ($isWorktree && !str_contains(trim($isWorktree), '.git')) {
+        // Check if already in a linked worktree (git-dir differs from git-common-dir)
+        $gitDir = trim(exec('cd ' . escapeshellarg($cwd) . ' && git rev-parse --git-dir 2>/dev/null') ?? '');
+        $commonDir = trim(exec('cd ' . escapeshellarg($cwd) . ' && git rev-parse --git-common-dir 2>/dev/null') ?? '');
+        if ($gitDir !== '' && $commonDir !== '' && $gitDir !== $commonDir) {
             return ToolResult::error('Already in a worktree session.');
         }
 
@@ -58,6 +59,9 @@ class EnterWorktreeTool extends BaseTool
 
         // Sanitize name
         $name = preg_replace('/[^a-zA-Z0-9._-]/', '', $name);
+        if ($name === '') {
+            $name = 'worktree_' . bin2hex(random_bytes(4));
+        }
         if (mb_strlen($name) > 64) {
             $name = mb_substr($name, 0, 64);
         }

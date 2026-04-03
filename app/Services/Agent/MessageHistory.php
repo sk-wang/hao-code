@@ -89,9 +89,16 @@ class MessageHistory
         for ($i = count($this->messages) - 1; $i >= 0; $i--) {
             $msg = $this->messages[$i];
             if ($msg['role'] === 'assistant') {
-                foreach ($msg['content'] as $block) {
-                    if (($block['type'] ?? '') === 'text' && !empty($block['text'])) {
-                        return $block['text'];
+                // Handle string content (simple text messages)
+                if (is_string($msg['content'])) {
+                    return $msg['content'] !== '' ? $msg['content'] : null;
+                }
+                // Handle array content blocks
+                if (is_array($msg['content'])) {
+                    foreach ($msg['content'] as $block) {
+                        if (($block['type'] ?? '') === 'text' && !empty($block['text'])) {
+                            return $block['text'];
+                        }
                     }
                 }
             }

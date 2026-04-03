@@ -20,8 +20,8 @@ class PermissionDecision
         return new self(false, false, $reason);
     }
 
-    public static function ask(): self
+    public static function ask(?string $reason = null): self
     {
-        return new self(false, true, 'Requires user approval');
+        return new self(false, true, $reason ?? 'Requires user approval');
     }
 }

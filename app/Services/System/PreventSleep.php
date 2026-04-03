@@ -57,7 +57,7 @@ class PreventSleep
         return $this->pid !== null && posix_kill($this->pid, 0);
     }
 
-    private function spawnCaffeinate(): void
+    protected function spawnCaffeinate(): void
     {
         // -i: prevent idle sleep, -t 300: 5-minute auto-timeout (crash safety)
         $command = 'caffeinate -i -t 300 2>/dev/null';
@@ -75,7 +75,7 @@ class PreventSleep
         }
     }
 
-    private function killCaffeinate(): void
+    protected function killCaffeinate(): void
     {
         if ($this->pid !== null) {
             posix_kill($this->pid, SIGTERM);

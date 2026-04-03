@@ -42,7 +42,8 @@ class DenialTracker
 
         foreach (array_reverse($this->denials) as $denial) {
             if ($denial['tool'] !== $tool) continue;
-            if (str_starts_with($denial['command'], $commandPrefix)) {
+            $denialPrefix = mb_substr($denial['command'], 0, 50);
+            if (str_starts_with($commandPrefix, $denialPrefix) || str_starts_with($denialPrefix, $commandPrefix)) {
                 $recentCount++;
             }
         }

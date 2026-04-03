@@ -35,6 +35,21 @@ class PermissionChecker
             }
         }
 
+        // Check explicit deny rules first — deny always takes precedence
+        foreach ($this->settings->getDenyRules() as $rule) {
+            if ($this->matchesRule($rule, $tool, $input)) {
+                $this->denialTracker->record($tool->name(), $this->summarizeInput($input), "rule: {$rule}");
+                return PermissionDecision::deny("Denied by rule: {$rule}");
+            }
+        }
+
+        // Check explicit allow rules
+        foreach ($this->settings->getAllowRules() as $rule) {
+            if ($this->matchesRule($rule, $tool, $input)) {
+                return PermissionDecision::allow();
+            }
+        }
+
         // Check Bash-specific dangerous patterns
         if ($tool->name() === 'Bash' && isset($input['command'])) {
             $command = $input['command'];
@@ -55,21 +70,6 @@ class PermissionChecker
             // Check code exec commands
             if (DangerousPatterns::isCodeExecCommand($command)) {
                 return PermissionDecision::ask('Command executes code — requires approval.');
-            }
-        }
-
-        // Check explicit deny rules (deny takes precedence)
-        foreach ($this->settings->getDenyRules() as $rule) {
-            if ($this->matchesRule($rule, $tool, $input)) {
-                $this->denialTracker->record($tool->name(), $this->summarizeInput($input), "rule: {$rule}");
-                return PermissionDecision::deny("Denied by rule: {$rule}");
-            }
-        }
-
-        // Check explicit allow rules
-        foreach ($this->settings->getAllowRules() as $rule) {
-            if ($this->matchesRule($rule, $tool, $input)) {
-                return PermissionDecision::allow();
             }
         }
 
@@ -100,13 +100,15 @@ class PermissionChecker
                 'Read', 'Edit', 'Write' => $input['file_path'] ?? '',
                 'Glob' => $input['pattern'] ?? '',
                 'Grep' => $input['pattern'] ?? '',
-                default => reset($input) ?: '',
+                default => (string) reset($input),
             };
 
             if (is_string($matchField)) {
                 if (str_ends_with($pattern, ':*')) {
                     $prefix = substr($pattern, 0, -2);
-                    return str_starts_with($matchField, $prefix)
+                    // Require exact match or a space after the prefix to avoid
+                    // partial-word false positives (e.g. "git:*" must not match "gitlint")
+                    return $matchField === $prefix
                         || str_starts_with($matchField, $prefix . ' ');
                 }
                 if (str_contains($pattern, '*')) {

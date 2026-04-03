@@ -16,8 +16,15 @@ class SettingsManager
 
     public function getModel(): string
     {
-        return $this->runtimeOverrides['model']
+        $model = $this->runtimeOverrides['model']
             ?? config('haocode.model', 'claude-sonnet-4-20250514');
+
+        // Kimi's Anthropic-compatible coding endpoint expects its own model name.
+        if ($this->isKimiCodingEndpoint() && str_starts_with($model, 'claude-')) {
+            return 'kimi-for-coding';
+        }
+
+        return $model;
     }
 
     public function getBaseUrl(): string
@@ -86,7 +93,9 @@ class SettingsManager
     public function addAllowRule(string $rule): void
     {
         $this->modifyProjectSettings(function (array &$settings) use ($rule) {
-            $settings['permissions']['allow'][]= $rule;
+            if (!in_array($rule, $settings['permissions']['allow'] ?? [], true)) {
+                $settings['permissions']['allow'][] = $rule;
+            }
         });
     }
 
@@ -96,7 +105,9 @@ class SettingsManager
     public function addDenyRule(string $rule): void
     {
         $this->modifyProjectSettings(function (array &$settings) use ($rule) {
-            $settings['permissions']['deny'][]= $rule;
+            if (!in_array($rule, $settings['permissions']['deny'] ?? [], true)) {
+                $settings['permissions']['deny'][] = $rule;
+            }
         });
     }
 
@@ -148,12 +159,20 @@ class SettingsManager
     public static function getAvailableModels(): array
     {
         return [
+            'kimi-for-coding',
             'claude-sonnet-4-20250514',
             'claude-opus-4-20250514',
             'claude-haiku-4-20250514',
             'claude-3-5-sonnet-20241022',
             'claude-3-5-haiku-20241022',
         ];
+    }
+
+    private function isKimiCodingEndpoint(): bool
+    {
+        $baseUrl = strtolower(rtrim($this->getBaseUrl(), '/'));
+
+        return str_contains($baseUrl, 'api.kimi.com/coding');
     }
 
     private function loadProjectSettings(): array
@@ -163,20 +182,33 @@ class SettingsManager
         }
 
         $this->cachedSettings = [];
+        $globalPerms = [];
 
         $globalPath = config('haocode.global_settings_path')
-            ?? ($_SERVER['HOME'] ?? '~') . '/.haocode/settings.json';
+            ?? ($_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir()) . '/.haocode/settings.json';
 
         if (file_exists($globalPath)) {
             $global = json_decode(file_get_contents($globalPath), true) ?: [];
+            $globalPerms = $global['permissions'] ?? [];
+            unset($global['permissions']);
             $this->cachedSettings = array_merge($this->cachedSettings, $global);
         }
 
+        $projectPerms = [];
         $projectPath = getcwd() . '/.haocode/settings.json';
         if (file_exists($projectPath)) {
             $project = json_decode(file_get_contents($projectPath), true) ?: [];
+            $projectPerms = $project['permissions'] ?? [];
+            unset($project['permissions']);
             $this->cachedSettings = array_merge($this->cachedSettings, $project);
         }
+
+        // Permissions accumulate across both files — project rules ADD to global rules
+        // rather than replacing them. This prevents silent loss of global deny/allow rules.
+        $this->cachedSettings['permissions'] = [
+            'allow' => array_merge($globalPerms['allow'] ?? [], $projectPerms['allow'] ?? []),
+            'deny'  => array_merge($globalPerms['deny'] ?? [],  $projectPerms['deny'] ?? []),
+        ];
 
         return $this->cachedSettings;
     }

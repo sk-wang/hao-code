@@ -91,7 +91,7 @@ class SkillLoader
 
     private function getSkillDirectories(): array
     {
-        $home = $_SERVER['HOME'] ?? '~';
+        $home = $_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir();
         $cwd = getcwd();
 
         return [

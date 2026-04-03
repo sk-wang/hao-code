@@ -51,6 +51,10 @@ DESC;
         $pattern = $input['pattern'];
         $path = $input['path'] ?? $context->workingDirectory;
 
+        if (!is_dir($path)) {
+            return ToolResult::error("Directory does not exist: {$path}");
+        }
+
         // Use recursive glob
         $matches = [];
         $this->globRecursive($path, $pattern, $matches);
@@ -75,6 +79,10 @@ DESC;
 
     private function globRecursive(string $dir, string $pattern, array &$matches): void
     {
+        if (!is_dir($dir)) {
+            return;
+        }
+
         // Handle ** patterns by using recursive iterator
         $iterator = new \RecursiveIteratorIterator(
             new \RecursiveDirectoryIterator($dir, \RecursiveDirectoryIterator::SKIP_DOTS),
@@ -93,11 +101,12 @@ DESC;
 
     private function globToRegex(string $pattern): string
     {
-        $regex = preg_quote($pattern, '/');
+        // Use '#' as delimiter so '/' can appear unescaped inside character classes
+        $regex = preg_quote($pattern, '#');
         $regex = str_replace('\*\*', '.*', $regex);
         $regex = str_replace('\*', '[^/]*', $regex);
         $regex = str_replace('\?', '.', $regex);
-        return '/^' . $regex . '$/';
+        return '#^' . $regex . '$#';
     }
 
     public function isReadOnly(array $input): bool

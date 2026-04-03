@@ -172,11 +172,15 @@ DESC;
         bool $caseInsensitive, int $afterLines, int $beforeLines, int $headLimit
     ): ToolResult {
         $flags = $caseInsensitive ? 'i' : '';
-        $regex = '/' . $pattern . '/' . $flags;
+        // Escape the `/` delimiter so patterns like `app/Services` don't break the regex.
+        $safePattern = str_replace('/', '\/', $pattern);
+        $regex = '/' . $safePattern . '/' . $flags;
 
-        try {
-            preg_match($regex, ''); // Validate regex
-        } catch (\Throwable $e) {
+        // Validate regex without emitting a PHP warning (PHPUnit 11 captures them)
+        set_error_handler(fn() => true);
+        $testResult = preg_match($regex, '');
+        restore_error_handler();
+        if ($testResult === false) {
             return ToolResult::error("Invalid regex pattern: {$pattern}");
         }
 
@@ -190,8 +194,11 @@ DESC;
             $files = [];
             foreach ($iterator as $file) {
                 if ($file->isFile()) {
-                    if ($glob && !fnmatch($glob, $file->getFilename())) {
-                        continue;
+                    if ($glob) {
+                        $relPath = ltrim(str_replace($path, '', $file->getPathname()), DIRECTORY_SEPARATOR);
+                        if (!fnmatch($glob, $relPath) && !fnmatch($glob, $file->getFilename())) {
+                            continue;
+                        }
                     }
                     $files[] = $file->getPathname();
                 }
@@ -206,6 +213,9 @@ DESC;
             $lines = @file($file);
             if ($lines === false) continue;
 
+            $totalLines = count($lines);
+            $printedLines = []; // track already-emitted line indices to avoid duplicates
+
             foreach ($lines as $num => $line) {
                 if (preg_match($regex, $line)) {
                     $count++;
@@ -217,8 +227,31 @@ DESC;
                         $fileMatches[$relativePath] = ($fileMatches[$relativePath] ?? 0) + 1;
                     } else {
                         $lineNum = $num + 1;
-                        $entry = "{$relativePath}:{$lineNum}:" . rtrim($line);
-                        $results[] = $entry;
+                        // Emit before-context lines
+                        if ($beforeLines > 0) {
+                            $start = max(0, $num - $beforeLines);
+                            for ($ci = $start; $ci < $num; $ci++) {
+                                if (!isset($printedLines[$ci])) {
+                                    $results[] = "{$relativePath}:" . ($ci + 1) . '-' . rtrim($lines[$ci]);
+                                    $printedLines[$ci] = true;
+                                }
+                            }
+                        }
+                        // Emit the matching line
+                        if (!isset($printedLines[$num])) {
+                            $results[] = "{$relativePath}:{$lineNum}:" . rtrim($line);
+                            $printedLines[$num] = true;
+                        }
+                        // Emit after-context lines
+                        if ($afterLines > 0) {
+                            $end = min($totalLines - 1, $num + $afterLines);
+                            for ($ci = $num + 1; $ci <= $end; $ci++) {
+                                if (!isset($printedLines[$ci])) {
+                                    $results[] = "{$relativePath}:" . ($ci + 1) . '-' . rtrim($lines[$ci]);
+                                    $printedLines[$ci] = true;
+                                }
+                            }
+                        }
                     }
 
                     if ($count >= $headLimit) break 2;

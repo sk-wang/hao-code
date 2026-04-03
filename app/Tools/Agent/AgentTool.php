@@ -2,8 +2,7 @@
 
 namespace App\Tools\Agent;
 
-use App\Services\Agent\AgentLoop;
-use App\Services\Agent\MessageHistory;
+use App\Services\Agent\AgentLoopFactory;
 use App\Tools\BaseTool;
 use App\Tools\ToolInputSchema;
 use App\Tools\ToolResult;
@@ -11,6 +10,10 @@ use App\Tools\ToolUseContext;
 
 class AgentTool extends BaseTool
 {
+    public function __construct(
+        private readonly AgentLoopFactory $agentLoopFactory,
+    ) {}
+
     public function name(): string
     {
         return 'Agent';
@@ -86,13 +89,12 @@ DESC;
     private function runSync(string $prompt, array $systemPrompt, ToolUseContext $context): ToolResult
     {
         try {
-            // Create a fresh sub-agent loop
-            $subLoop = app(AgentLoop::class);
+            $subLoop = $this->agentLoopFactory->createIsolated();
             // Sub-agents don't prompt for permissions
             $subLoop->setPermissionPromptHandler(fn() => true);
 
             $result = $subLoop->run(
-                userInput: $prompt,
+                userInput: $this->buildSubAgentPrompt($prompt, $systemPrompt),
                 onTextDelta: null, // No streaming for sub-agents
             );
 
@@ -125,9 +127,9 @@ DESC;
         if ($pid === 0) {
             // Child process
             try {
-                $subLoop = app(AgentLoop::class);
+                $subLoop = $this->agentLoopFactory->createIsolated();
                 $subLoop->setPermissionPromptHandler(fn() => true);
-                $result = $subLoop->run(userInput: $prompt);
+                $result = $subLoop->run(userInput: $this->buildSubAgentPrompt($prompt, $systemPrompt));
                 file_put_contents($outFile, json_encode([
                     'status' => 'completed',
                     'result' => $result,
@@ -177,11 +179,30 @@ DESC;
 
     public function isConcurrencySafe(array $input): bool
     {
-        return ($input['run_in_background'] ?? false) === true;
+        return $this->isReadOnly($input) && ($input['run_in_background'] ?? false) === true;
     }
 
     public function userFacingName(array $input): string
     {
-        return ($input['description'] ?? $input['subagent_type'] ?? 'Agent') . ' agent';
+        $name = $input['description'] ?? null;
+        if (empty($name)) {
+            $name = $input['subagent_type'] ?? 'Agent';
+        }
+
+        return $name . ' agent';
+    }
+
+    private function buildSubAgentPrompt(string $prompt, array $systemPrompt): string
+    {
+        $instruction = trim(implode("\n\n", array_map(
+            fn(array $block) => (string) ($block['text'] ?? ''),
+            array_filter($systemPrompt, fn(array $block) => ($block['type'] ?? '') === 'text')
+        )));
+
+        if ($instruction === '') {
+            return $prompt;
+        }
+
+        return $instruction . "\n\nTask:\n" . $prompt;
     }
 }

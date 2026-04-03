@@ -75,7 +75,7 @@ class Notifier
         $id = random_int(1000, 9999);
         $encodedTitle = base64_encode($title);
         $encodedBody = base64_encode($message);
-        echo "\033]99;i={$id}:p=title;\033\\";
+        echo "\033]99;i={$id}:p=title;{$encodedTitle}\033\\";
         echo "\033]99;i={$id}:p=body;{$encodedBody}\033\\";
         echo "\033]99;i={$id}:p=actions;\033\\";
     }

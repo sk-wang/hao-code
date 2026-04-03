@@ -10,6 +10,7 @@ class FileHistoryManager
 {
     private string $historyPath;
     private const MAX_SNAPSHOTS = 100;
+    private int $nextId = 0;
 
     /** @var array<int, FileSnapshot> */
     private array $snapshots = [];
@@ -32,12 +33,13 @@ class FileHistoryManager
 
         $content = file_get_contents($filePath);
         $hash = md5($content);
-        $snapshotId = count($this->snapshots);
+        $snapshotId = $this->nextId++;
 
-        // Don't record if content hasn't changed
-        if ($snapshotId > 0) {
-            $last = $this->snapshots[$snapshotId - 1] ?? null;
-            if ($last && $last->filePath === $filePath && $last->contentHash === $hash) {
+        // Don't record if content hasn't changed (check last snapshot for this file)
+        $fileSnapshots = $this->getSnapshotsForFile($filePath);
+        if (!empty($fileSnapshots)) {
+            $lastForFile = end($fileSnapshots);
+            if ($lastForFile && $lastForFile->contentHash === $hash) {
                 return;
             }
         }
@@ -61,12 +63,25 @@ class FileHistoryManager
     }
 
     /**
+     * Find a snapshot by its ID (searches by id field, not array index).
+     */
+    private function findSnapshotById(int $id): ?FileSnapshot
+    {
+        foreach ($this->snapshots as $snapshot) {
+            if ($snapshot->id === $id) {
+                return $snapshot;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Get the diff between two snapshots.
      */
     public function getDiff(int $fromId, int $toId): ?string
     {
-        $from = $this->snapshots[$fromId] ?? null;
-        $to = $this->snapshots[$toId] ?? null;
+        $from = $this->findSnapshotById($fromId);
+        $to = $this->findSnapshotById($toId);
 
         if (!$from || !$to) return null;
 
@@ -92,7 +107,7 @@ class FileHistoryManager
      */
     public function restore(int $snapshotId): bool
     {
-        $snapshot = $this->snapshots[$snapshotId] ?? null;
+        $snapshot = $this->findSnapshotById($snapshotId);
         if (!$snapshot) return false;
 
         return file_put_contents($snapshot->filePath, $snapshot->content) !== false;

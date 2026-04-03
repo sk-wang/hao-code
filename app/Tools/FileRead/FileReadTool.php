@@ -100,6 +100,14 @@ DESC;
         }
 
         $totalLines = count($lines);
+
+        if ($offset > $totalLines && $totalLines > 0) {
+            return ToolResult::error(
+                "Offset {$offset} exceeds file length ({$totalLines} lines). " .
+                "Valid range: 1-{$totalLines}."
+            );
+        }
+
         $selectedLines = array_slice($lines, $offset - 1, $limit);
 
         $output = '';
@@ -110,7 +118,8 @@ DESC;
 
         $header = "File: {$filePath} ({$totalLines} lines total)\n";
         if ($offset > 1 || $limit < $totalLines) {
-            $header .= "Lines {$offset}-" . ($offset + count($selectedLines) - 1) . "\n";
+            $endLine = $offset + count($selectedLines) - 1;
+            $header .= "Lines {$offset}-{$endLine}\n";
         }
         $header .= str_repeat('-', 60) . "\n";
 

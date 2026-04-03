@@ -13,7 +13,7 @@ class SessionMemory
 
     public function __construct()
     {
-        $home = $_SERVER['HOME'] ?? '~';
+        $home = $_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir();
         $this->path = "{$home}/.haocode/memory.json";
     }
 
@@ -73,7 +73,7 @@ class SessionMemory
         $results = [];
         $query = strtolower($query);
 
-        foreach ($this->memories as $key => $entry) {
+        foreach ($this->memories ?? [] as $key => $entry) {
             if (str_contains(strtolower($key), $query) || str_contains(strtolower($entry['value']), $query)) {
                 $results[$key] = $entry;
             }
@@ -118,7 +118,7 @@ class SessionMemory
         }
 
         // Sort by updated_at, keep most recent
-        uasort($this->memories, fn($a, $b) => strtotime($b['updated_at']) - strtotime($a['updated_at']));
+        uasort($this->memories, fn($a, $b) => strtotime($b['updated_at'] ?? '') <=> strtotime($a['updated_at'] ?? ''));
         $this->memories = array_slice($this->memories, 0, $maxEntries, true);
         $this->save();
 

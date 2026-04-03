@@ -23,7 +23,7 @@ class SecretScanner
         '/\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\b/' => 'AWS Access Key',
 
         // AWS Secret Access Key (40-char base64)
-        '/(?<=aws_secret_access_key\s*=\s*)([A-Za-z0-9\/+=]{40})/' => 'AWS Secret Key',
+        '/aws_secret_access_key\s*=\s*\K([A-Za-z0-9\/+=]{40})/' => 'AWS Secret Key',
 
         // GCP API Key
         '/\b(AIza[\w-]{35})/' => 'Google API Key',
@@ -124,7 +124,7 @@ class SecretScanner
         '/\b(PMAK-[a-f0-9]{24}-[a-f0-9]{34})/' => 'Postman API Token',
 
         // Heroku API Key
-        '/(?<=heroku_api_key\s*=\s*)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/' => 'Heroku API Key',
+        '/heroku_api_key\s*=\s*\K([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/' => 'Heroku API Key',
 
         // ── Observability ────────────────────────────────────────────────────
 
@@ -163,7 +163,7 @@ class SecretScanner
         '/-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/' => 'Private Key',
 
         // Generic Bearer Token in Authorization header
-        '/(?<=Authorization:\s*Bearer\s)([A-Za-z0-9\-_.~+\/]+=*)/' => 'Bearer Token',
+        '/Authorization:\s*Bearer\s+\K([A-Za-z0-9\-_.~+\/]+=*)/' => 'Bearer Token',
     ];
 
     /**
@@ -176,12 +176,19 @@ class SecretScanner
         $findings = [];
 
         foreach (self::PATTERNS as $pattern => $type) {
-            if (preg_match($pattern, $content, $matches)) {
-                $findings[] = [
-                    'type' => $type,
-                    'match' => $this->truncateSecret($matches[0]),
-                    'pattern' => $type,
-                ];
+            if (preg_match_all($pattern, $content, $matches)) {
+                foreach ($matches[0] as $i => $match) {
+                    // Prefer the first capture group when present — some patterns wrap the
+                    // secret in surrounding context chars (e.g. the Azure AD pattern uses
+                    // `(?:^|[...])(...secret...)(?:$|[...])`) so $matches[0] would include
+                    // those surrounding characters. $matches[1] isolates just the secret.
+                    $secret = isset($matches[1][$i]) && $matches[1][$i] !== '' ? $matches[1][$i] : $match;
+                    $findings[] = [
+                        'type' => $type,
+                        'match' => $this->truncateSecret($secret),
+                        'pattern' => $pattern,
+                    ];
+                }
             }
         }
 
@@ -207,9 +214,20 @@ class SecretScanner
     public function redact(string $content): string
     {
         foreach (self::PATTERNS as $pattern => $type) {
-            $content = preg_replace(
+            $label = '[REDACTED_' . str_replace(' ', '_', strtoupper($type)) . ']';
+            $content = preg_replace_callback(
                 $pattern,
-                '[REDACTED_' . str_replace(' ', '_', strtoupper($type)) . ']',
+                function (array $m) use ($label): string {
+                    // When the pattern has a capture group ($m[1]), replace only that
+                    // portion — leaving any surrounding context characters (quotes, spaces,
+                    // etc.) intact. This matters for patterns like the Azure AD one that
+                    // anchor on surrounding delimiters. Patterns with no capture group
+                    // (e.g. the PEM header) replace the entire match.
+                    if (isset($m[1]) && $m[1] !== '') {
+                        return str_replace($m[1], $label, $m[0]);
+                    }
+                    return $label;
+                },
                 $content,
             );
         }

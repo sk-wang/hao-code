@@ -87,22 +87,19 @@ class ContextCompactor
         $history->addUserMessage($transcriptNote);
 
         $remaining = array_slice($messages, $removed);
-        foreach ($remaining as $msg) {
-            $role = $msg['role'] ?? '';
-            $content = $msg['content'] ?? '';
 
-            if ($role === 'user') {
-                if (is_string($content)) {
-                    $history->addUserMessage($content);
-                } else {
-                    $history->addToolResultMessage(
-                        array_filter($content, fn($b) => ($b['type'] ?? '') === 'tool_result')
-                    );
-                }
-            } elseif ($role === 'assistant') {
-                $history->addAssistantMessage($msg);
-            }
+        // If the first remaining message is a user message, insert a bridge assistant
+        // acknowledgement so the history never has two consecutive user messages
+        // (which the Anthropic API rejects). This can happen when the history ends
+        // with an un-replied user turn (e.g., the current input in AgentLoop).
+        if (!empty($remaining) && ($remaining[0]['role'] ?? '') === 'user') {
+            $history->addAssistantMessage([
+                'role' => 'assistant',
+                'content' => '[Acknowledged. Continuing from where we left off.]',
+            ]);
         }
+
+        $this->replayMessages($history, $remaining);
 
         return "Compacted {$removed} messages into structured summary. Kept last {$keepLast}.";
     }
@@ -153,6 +150,36 @@ class ContextCompactor
             'isBlocking'  => $isBlocking,
             'message'     => $message,
         ];
+    }
+
+    /**
+     * Replay messages into history, preserving all content block types.
+     */
+    private function replayMessages(MessageHistory $history, array $messages): void
+    {
+        foreach ($messages as $msg) {
+            $role = $msg['role'] ?? '';
+            $content = $msg['content'] ?? '';
+
+            if ($role === 'user') {
+                if (is_string($content)) {
+                    $history->addUserMessage($content);
+                } elseif (is_array($content)) {
+                    $toolResults = array_filter($content, fn($b) => ($b['type'] ?? '') === 'tool_result');
+                    $textBlocks = array_filter($content, fn($b) => ($b['type'] ?? '') === 'text');
+
+                    if (!empty($textBlocks) && empty($toolResults)) {
+                        // Pure text user message
+                        $text = implode("\n", array_map(fn($b) => $b['text'] ?? '', $textBlocks));
+                        $history->addUserMessage($text);
+                    } elseif (!empty($toolResults)) {
+                        $history->addToolResultMessage(array_values($toolResults));
+                    }
+                }
+            } elseif ($role === 'assistant') {
+                $history->addAssistantMessage($msg);
+            }
+        }
     }
 
     /**
@@ -215,21 +242,7 @@ class ContextCompactor
         }
 
         $history->clear();
-        foreach ($newMessages as $msg) {
-            $role = $msg['role'] ?? '';
-            $content = $msg['content'] ?? '';
-            if ($role === 'user') {
-                if (is_string($content)) {
-                    $history->addUserMessage($content);
-                } else {
-                    $history->addToolResultMessage(
-                        array_filter($content, fn($b) => ($b['type'] ?? '') === 'tool_result')
-                    );
-                }
-            } elseif ($role === 'assistant') {
-                $history->addAssistantMessage($msg);
-            }
-        }
+        $this->replayMessages($history, $newMessages);
 
         return "Micro-compacted: cleared {$modified} old tool results, saved ~" . number_format($charsSaved) . " chars.";
     }

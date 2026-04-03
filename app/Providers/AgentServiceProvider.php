@@ -6,6 +6,7 @@ use App\Services\Api\StreamingClient;
 use App\Services\Agent\StreamProcessor;
 use App\Services\Git\GitContext;
 use App\Services\Agent\AgentLoop;
+use App\Services\Agent\AgentLoopFactory;
 use App\Services\Agent\QueryEngine;
 use App\Services\Agent\ToolOrchestrator;
 use App\Services\Agent\ContextBuilder;
@@ -63,7 +64,6 @@ class AgentServiceProvider extends ServiceProvider
         });
         $this->app->singleton(SkillLoader::class);
         $this->app->singleton(CostTracker::class);
-        $this->app->singleton(Notifier::class);
         $this->app->singleton(\App\Services\FileHistory\FileHistoryManager::class);
         $this->app->singleton(\App\Services\Task\TaskManager::class);
         $this->app->singleton(GitContext::class);
@@ -89,10 +89,15 @@ class AgentServiceProvider extends ServiceProvider
                 maxTokens: $settings->getMaxTokens(),
                 thinkingEnabled: (bool) env('HAOCODE_THINKING', false),
                 thinkingBudget: (int) env('HAOCODE_THINKING_BUDGET', 10000),
+                settingsManager: $settings,
             );
         });
 
         $this->app->singleton(MessageHistory::class);
+        $this->app->singleton(QueryEngine::class);
+        $this->app->singleton(ToolOrchestrator::class);
+        $this->app->singleton(ContextCompactor::class);
+        $this->app->singleton(AgentLoopFactory::class);
 
         $this->app->singleton(AgentLoop::class, function ($app) {
             return new AgentLoop(

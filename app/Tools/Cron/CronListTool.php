@@ -6,6 +6,7 @@ use App\Tools\BaseTool;
 use App\Tools\ToolInputSchema;
 use App\Tools\ToolResult;
 use App\Tools\ToolUseContext;
+use App\Tools\Cron\CronScheduler;
 
 class CronListTool extends BaseTool
 {
@@ -37,7 +38,7 @@ class CronListTool extends BaseTool
             $status = ($job['status'] ?? 'active') === 'active' ? 'active' : 'completed';
             $fires = $job['fire_count'] ?? 0;
             $recurring = ($job['recurring'] ?? true) ? 'recurring' : 'one-shot';
-            $prompt = mb_substr($job['prompt'], 0, 60);
+            $prompt = mb_substr($job['prompt'], 0, 60) . (mb_strlen($job['prompt']) > 60 ? '...' : '');
 
             $lines[] = "  {$id} [{$status}] [{$recurring}] [{$fires}x fired]";
             $lines[] = "    cron: {$job['cron']}  prompt: {$prompt}";

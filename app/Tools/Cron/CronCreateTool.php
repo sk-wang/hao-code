@@ -6,6 +6,7 @@ use App\Tools\BaseTool;
 use App\Tools\ToolInputSchema;
 use App\Tools\ToolResult;
 use App\Tools\ToolUseContext;
+use App\Tools\Cron\CronScheduler;
 
 class CronCreateTool extends BaseTool
 {
@@ -99,18 +100,32 @@ class CronCreateTool extends BaseTool
     private function describeCadence(string $cron): string
     {
         $parts = preg_split('/\s+/', trim($cron));
+        [$min, $hour, $dom, $month, $dow] = $parts;
+        // $isPlainMin/$isPlainHour: true when the field is a literal integer (not a wildcard or step expression)
+        $isPlainMin  = $min  !== '*' && !str_contains($min,  '/');
+        $isPlainHour = $hour !== '*' && !str_contains($hour, '/');
         return match (true) {
-            str_starts_with($parts[0], '*/') && $parts[1] === '*' => "every {$this->parseInterval($parts[0])}",
-            $parts[0] !== '*' && $parts[1] !== '*' && $parts[4] === '*' => "daily at {$parts[1]}:{$parts[0]}",
-            $parts[0] !== '*' && $parts[1] !== '*' && $parts[4] !== '*' => "at {$parts[1]}:{$parts[0]} on day {$parts[4]}",
+            // "every N minutes" — e.g. */5 * * * *
+            str_starts_with($min, '*/') && $hour === '*' => "every {$this->parseInterval($min)}",
+            // "every N hours"  — e.g. 0 */2 * * *
+            str_starts_with($hour, '*/') && $min === '0' => "every {$this->parseInterval($hour, isHour: true)}",
+            // "daily at H:M"
+            $isPlainMin && $isPlainHour && $dom === '*' && $month === '*' && $dow === '*' => "daily at {$hour}:{$min}",
+            // "monthly on day D at H:M"
+            $isPlainMin && $isPlainHour && $dom !== '*' && $month === '*' && $dow === '*' => "monthly on day {$dom} at {$hour}:{$min}",
+            // "weekly on day D at H:M"
+            $isPlainMin && $isPlainHour && $dow !== '*' => "weekly on day {$dow} at {$hour}:{$min}",
             default => $cron,
         };
     }
 
-    private function parseInterval(string $field): string
+    private function parseInterval(string $field, bool $isHour = false): string
     {
         if (preg_match('/\*\/(\d+)/', $field, $m)) {
             $n = (int) $m[1];
+            if ($isHour) {
+                return $n === 1 ? '1 hour' : "{$n} hours";
+            }
             if ($n < 60) return "{$n} minutes";
             if ($n % 60 === 0) return ($n / 60) . ' hours';
             return "{$n} minutes";
@@ -120,14 +135,17 @@ class CronCreateTool extends BaseTool
 
     private function persistJob(array $job): void
     {
-        $path = ($_SERVER['HOME'] ?? '~') . '/.haocode/scheduled_tasks.json';
+        $path = ($_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir()) . '/.haocode/scheduled_tasks.json';
+        $dir = dirname($path);
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+
         $jobs = [];
         if (file_exists($path)) {
             $jobs = json_decode(file_get_contents($path), true) ?: [];
         }
         $jobs[$job['id']] = $job;
-        $dir = dirname($path);
-        if (!is_dir($dir)) mkdir($dir, 0755, true);
         file_put_contents($path, json_encode($jobs, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
 

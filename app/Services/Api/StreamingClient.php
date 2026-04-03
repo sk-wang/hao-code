@@ -2,8 +2,10 @@
 
 namespace App\Services\Api;
 
+use JsonException;
 use Symfony\Component\HttpClient\HttpClient;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
+use Symfony\Contracts\HttpClient\ResponseInterface;
 
 class StreamingClient
 {
@@ -12,20 +14,41 @@ class StreamingClient
 
     public function __construct(
         private readonly string $apiKey,
-        private readonly string $model,
+        private string $model,
         private readonly string $baseUrl = 'https://api.anthropic.com',
-        private readonly int $maxTokens = 16384,
+        private int $maxTokens = 16384,
         private readonly string $apiVersion = '2023-06-01',
         private readonly bool $thinkingEnabled = false,
         private readonly int $thinkingBudget = 10000,
         ?HttpClientInterface $httpClient = null,
+        private ?\App\Services\Settings\SettingsManager $settingsManager = null,
     ) {
         $this->httpClient = $httpClient ?? HttpClient::create([
             'timeout' => 300,
             'max_duration' => 600,
-            'verify_peer' => false,
-            'verify_host' => false,
         ]);
+    }
+
+    /**
+     * Resolve the current model from settings (allows runtime changes via /model, /fast).
+     */
+    private function resolveModel(): string
+    {
+        if ($this->settingsManager) {
+            return $this->settingsManager->getModel() ?? $this->model;
+        }
+        return $this->model;
+    }
+
+    /**
+     * Resolve max tokens from settings if available.
+     */
+    private function resolveMaxTokens(): int
+    {
+        if ($this->settingsManager) {
+            return (int) ($this->settingsManager->getMaxTokens() ?? $this->maxTokens);
+        }
+        return $this->maxTokens;
     }
 
     /**
@@ -42,16 +65,26 @@ class StreamingClient
         $attempt = 0;
 
         while (true) {
+            $hasYieldedEvents = false;
+
             try {
                 foreach ($this->doStreamMessages($systemPrompt, $messages, $tools, $onRawEvent) as $event) {
+                    $hasYieldedEvents = true;
                     yield $event;
                 }
                 return;
             } catch (\Throwable $e) {
+                // Once a streaming response has started, retrying inside this low-level
+                // client is unsafe because the caller may already have rendered text or
+                // started executing tools from the first attempt.
+                if ($hasYieldedEvents) {
+                    throw $this->normalizeTransportException($e);
+                }
+
                 $attempt++;
 
                 if (!$this->shouldRetry($e, $attempt)) {
-                    throw $e;
+                    throw $this->normalizeTransportException($e);
                 }
 
                 $delay = $this->getRetryDelay($attempt, $e);
@@ -67,8 +100,8 @@ class StreamingClient
         ?callable $onRawEvent,
     ): \Generator {
         $payload = [
-            'model' => $this->model,
-            'max_tokens' => $this->maxTokens,
+            'model' => $this->resolveModel(),
+            'max_tokens' => $this->resolveMaxTokens(),
             'system' => $systemPrompt,
             'messages' => $messages,
             'stream' => true,
@@ -81,7 +114,7 @@ class StreamingClient
                 'budget_tokens' => $this->thinkingBudget,
             ];
             // Extended thinking requires higher max_tokens
-            $payload['max_tokens'] = max($this->maxTokens, $this->thinkingBudget + 4096);
+            $payload['max_tokens'] = max($this->resolveMaxTokens(), $this->thinkingBudget + 4096);
         }
 
         if (count($tools) > 0) {
@@ -99,47 +132,134 @@ class StreamingClient
                 'content-type' => 'application/json',
                 'accept' => 'text/event-stream',
             ],
-            'body' => json_encode($payload, JSON_UNESCAPED_UNICODE),
+            'body' => $this->encodePayload($payload),
             'buffer' => false,
+            'http_version' => $this->preferredHttpVersion(),
+            'verify_peer' => true,
+            'verify_host' => true,
         ]);
 
+        $this->throwForHttpError($response);
+
         $currentEvent = null;
-        $currentData = '';
+        $currentDataLines = [];
+        $lineBuffer = '';
 
         foreach ($this->httpClient->stream($response) as $chunk) {
-            try {
-                $content = $chunk->getContent();
-            } catch (\Throwable) {
-                continue;
-            }
+            $content = $chunk->getContent();
 
-            foreach (explode("\n", $content) as $line) {
-                $line = rtrim($line);
+            $lineBuffer .= $content;
 
-                if (str_starts_with($line, 'event:')) {
-                    $currentEvent = trim(substr($line, 6));
-                } elseif (str_starts_with($line, 'data:')) {
-                    $currentData .= substr($line, 5);
-                } elseif ($line === '' && $currentEvent !== null && $currentData !== '') {
-                    $event = StreamEvent::fromSse($currentEvent, $currentData);
+            while (($newlinePos = strpos($lineBuffer, "\n")) !== false) {
+                $line = substr($lineBuffer, 0, $newlinePos);
+                $lineBuffer = substr($lineBuffer, $newlinePos + 1);
 
-                    if ($currentEvent === 'error') {
-                        $errorMsg = $event->data['error']['message'] ?? 'Unknown API error';
-                        $errorType = $event->data['error']['type'] ?? 'unknown';
-                        throw new ApiErrorException($errorMsg, $errorType);
-                    }
+                $events = $this->processSseLine(
+                    rtrim($line, "\r"),
+                    $currentEvent,
+                    $currentDataLines,
+                    $onRawEvent,
+                );
 
-                    if ($onRawEvent) {
-                        $onRawEvent($event);
-                    }
-
+                foreach ($events as $event) {
                     yield $event;
-
-                    $currentEvent = null;
-                    $currentData = '';
                 }
             }
         }
+
+        if ($lineBuffer !== '') {
+            $events = $this->processSseLine(
+                rtrim($lineBuffer, "\r"),
+                $currentEvent,
+                $currentDataLines,
+                $onRawEvent,
+            );
+
+            foreach ($events as $event) {
+                yield $event;
+            }
+        }
+
+        $event = $this->emitCurrentEvent($currentEvent, $currentDataLines, $onRawEvent);
+        if ($event !== null) {
+            yield $event;
+        }
+    }
+
+    /**
+     * @param array<int, string> $currentDataLines
+     */
+    private function processSseLine(
+        string $line,
+        ?string &$currentEvent,
+        array &$currentDataLines,
+        ?callable $onRawEvent,
+    ): array {
+        $events = [];
+
+        if (str_starts_with($line, 'event:')) {
+            $pendingEvent = $this->emitCurrentEvent($currentEvent, $currentDataLines, $onRawEvent);
+            if ($pendingEvent !== null) {
+                $events[] = $pendingEvent;
+            }
+
+            $currentEvent = trim(substr($line, 6));
+            return $events;
+        }
+
+        if (str_starts_with($line, 'data:')) {
+            $dataLine = substr($line, 5);
+            if (str_starts_with($dataLine, ' ')) {
+                $dataLine = substr($dataLine, 1);
+            }
+            $currentDataLines[] = $dataLine;
+
+            return $events;
+        }
+
+        if ($line === '') {
+            $event = $this->emitCurrentEvent($currentEvent, $currentDataLines, $onRawEvent);
+            if ($event !== null) {
+                $events[] = $event;
+            }
+
+            return $events;
+        }
+
+        return $events;
+    }
+
+    /**
+     * @param array<int, string> $currentDataLines
+     */
+    private function emitCurrentEvent(
+        ?string &$currentEvent,
+        array &$currentDataLines,
+        ?callable $onRawEvent,
+    ): ?StreamEvent {
+        if ($currentEvent === null || $currentDataLines === []) {
+            $currentEvent = null;
+            $currentDataLines = [];
+
+            return null;
+        }
+
+        $event = StreamEvent::fromSse($currentEvent, implode("\n", $currentDataLines));
+
+        if ($currentEvent === 'error') {
+            $errorMsg = $event->data['error']['message'] ?? 'Unknown API error';
+            $errorType = $event->data['error']['type'] ?? 'unknown';
+            throw new ApiErrorException($errorMsg, $errorType);
+        }
+
+        if ($onRawEvent) {
+            $onRawEvent($event);
+        }
+
+        $currentEvent = null;
+        $currentDataLines = [];
+
+        return $event;
     }
 
     private function shouldRetry(\Throwable $e, int $attempt): bool
@@ -172,5 +292,78 @@ class StreamingClient
             return min(2 ** $attempt, 30);
         }
         return min(2 ** $attempt, 10);
+    }
+
+    private function encodePayload(array $payload): string
+    {
+        try {
+            return json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        } catch (JsonException $e) {
+            throw new ApiErrorException(
+                'Failed to encode request payload: ' . $e->getMessage(),
+                'request_encoding_error',
+                previous: $e,
+            );
+        }
+    }
+
+    private function throwForHttpError(ResponseInterface $response): void
+    {
+        $statusCode = $response->getStatusCode();
+
+        if ($statusCode < 400) {
+            return;
+        }
+
+        $body = trim($response->getContent(false));
+        $url = (string) $response->getInfo('url');
+        $message = $body !== '' ? $body : "HTTP {$statusCode} returned for \"{$url}\".";
+        $errorType = 'http_error';
+
+        $decoded = json_decode($body, true);
+        if (is_array($decoded)) {
+            if (is_array($decoded['error'] ?? null)) {
+                $errorType = is_string($decoded['error']['type'] ?? null)
+                    ? $decoded['error']['type']
+                    : $errorType;
+                $message = is_string($decoded['error']['message'] ?? null)
+                    ? $decoded['error']['message']
+                    : $message;
+            } elseif (is_string($decoded['message'] ?? null)) {
+                $message = $decoded['message'];
+            } elseif (is_string($decoded['error'] ?? null)) {
+                $message = $decoded['error'];
+            }
+        }
+
+        throw new ApiErrorException($message, $errorType, $statusCode);
+    }
+
+    private function preferredHttpVersion(): ?string
+    {
+        $host = (string) parse_url($this->baseUrl, PHP_URL_HOST);
+
+        if ($host === 'api.kimi.com') {
+            return '1.1';
+        }
+
+        return null;
+    }
+
+    private function normalizeTransportException(\Throwable $e): \Throwable
+    {
+        if ($e instanceof ApiErrorException) {
+            return $e;
+        }
+
+        if ($e instanceof \Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface) {
+            return new ApiErrorException(
+                'Network transport error while streaming response: ' . $e->getMessage(),
+                'transport_error',
+                previous: $e,
+            );
+        }
+
+        return $e;
     }
 }

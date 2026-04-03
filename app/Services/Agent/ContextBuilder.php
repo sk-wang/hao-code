@@ -128,7 +128,7 @@ PROMPT;
     {
         $content = '';
         $cwd = getcwd();
-        $home = $_SERVER['HOME'] ?? '~';
+        $home = $_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir();
 
         // Global user instructions
         $globalPaths = [

@@ -21,7 +21,7 @@ class CronScheduler
         unset(self::$jobs[$id]);
 
         // Also remove from disk if durable
-        $path = ($_SERVER['HOME'] ?? '~') . '/.haocode/scheduled_tasks.json';
+        $path = ($_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir()) . '/.haocode/scheduled_tasks.json';
         if (file_exists($path)) {
             $jobs = json_decode(file_get_contents($path), true) ?: [];
             unset($jobs[$id]);
@@ -45,7 +45,7 @@ class CronScheduler
 
     public static function loadDurableJobs(): int
     {
-        $path = ($_SERVER['HOME'] ?? '~') . '/.haocode/scheduled_tasks.json';
+        $path = ($_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir()) . '/.haocode/scheduled_tasks.json';
         if (!file_exists($path)) return 0;
 
         $jobs = json_decode(file_get_contents($path), true) ?: [];
@@ -96,10 +96,29 @@ class CronScheduler
                 }
 
                 self::$jobs[$id] = $job;
+
+                // Persist state changes for durable jobs so restarts
+                // don't re-fire completed one-shot jobs or reset last_fired.
+                if ($job['durable'] ?? false) {
+                    self::persistJobState($job);
+                }
             }
         }
 
         return $due;
+    }
+
+    /**
+     * Persist a single job's state back to the durable store.
+     */
+    private static function persistJobState(array $job): void
+    {
+        $path = ($_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir()) . '/.haocode/scheduled_tasks.json';
+        if (!file_exists($path)) return;
+
+        $jobs = json_decode(file_get_contents($path), true) ?: [];
+        $jobs[$job['id']] = $job;
+        file_put_contents($path, json_encode($jobs, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
 
     private static function isCronDue(string $cron, \DateTime $now): bool

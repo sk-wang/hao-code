@@ -2,7 +2,6 @@
 
 namespace App\Services\Agent;
 
-use App\Services\Agent\ToolOrchestrator;
 use App\Tools\ToolRegistry;
 use App\Tools\ToolUseContext;
 use App\Tools\ToolResult;
@@ -52,6 +51,9 @@ class StreamingToolExecutor
     public function onToolBlockReady(array $block, int $index): void
     {
         if (!$this->contextSet) return;
+        if (isset($this->earlyPids[$index]) || isset($this->queuedBlocks[$index])) {
+            return;
+        }
 
         $tool = $this->toolRegistry->getTool($block['name']);
         $input = $block['input'] ?? [];
@@ -127,7 +129,7 @@ class StreamingToolExecutor
             $results[$index] = $result;
 
             if ($this->onToolComplete) {
-                $toolResult = ToolResult::success($result['content'] ?? '');
+                $toolResult = $this->resultArrayToToolResult($result);
                 ($this->onToolComplete)($info['block']['name'], $toolResult);
             }
         }
@@ -144,6 +146,8 @@ class StreamingToolExecutor
 
         // Sort by original block index and re-index
         ksort($results);
+        $this->earlyPids = [];
+        $this->queuedBlocks = [];
         return array_values($results);
     }
 
@@ -161,13 +165,18 @@ class StreamingToolExecutor
     public function cleanup(): void
     {
         foreach ($this->earlyPids as $info) {
-            posix_kill($info['pid'], SIGKILL);
-            pcntl_waitpid($info['pid'], $status); // reap zombie
+            if (function_exists('posix_kill')) {
+                posix_kill($info['pid'], SIGKILL);
+            }
+            if (function_exists('pcntl_waitpid')) {
+                pcntl_waitpid($info['pid'], $status); // reap zombie
+            }
             if (file_exists($info['temp_file'])) {
                 @unlink($info['temp_file']);
             }
         }
         $this->earlyPids = [];
+        $this->queuedBlocks = [];
     }
 
     /**
@@ -176,5 +185,13 @@ class StreamingToolExecutor
     public function earlyExecutionCount(): int
     {
         return count($this->earlyPids);
+    }
+
+    private function resultArrayToToolResult(array $result): ToolResult
+    {
+        return new ToolResult(
+            output: (string) ($result['content'] ?? ''),
+            isError: (bool) ($result['is_error'] ?? false),
+        );
     }
 }

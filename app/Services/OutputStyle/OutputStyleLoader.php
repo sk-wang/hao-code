@@ -91,7 +91,7 @@ class OutputStyleLoader
         $lines = explode("\n", $content);
         $inFrontmatter = false;
         $metaLines = [];
-        $bodyStart = 0;
+        $bodyStart = null;
 
         foreach ($lines as $i => $line) {
             $trimmed = trim($line);
@@ -106,6 +106,11 @@ class OutputStyleLoader
             if ($inFrontmatter) {
                 $metaLines[] = $line;
             }
+        }
+
+        // No closing delimiter found — treat as no frontmatter
+        if ($bodyStart === null) {
+            return [[], $content];
         }
 
         $meta = [];

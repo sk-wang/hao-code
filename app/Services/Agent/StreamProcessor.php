@@ -10,12 +10,18 @@ class StreamProcessor
     private array $contentBlocks = [];
 
     private ?string $stopReason = null;
+
     private array $usage = [];
+
     private string $accumulatedText = '';
+
     private ?string $messageId = null;
 
     /** @var callable|null Callback invoked when a tool_use block completes during streaming */
     private $onToolBlockComplete = null;
+
+    /** @var array<int, bool> */
+    private array $completedToolBlocks = [];
 
     /** @var callable|null Callback for thinking delta display */
     private $onThinkingDelta = null;
@@ -25,7 +31,9 @@ class StreamProcessor
     public function processEvent(StreamEvent $event): void
     {
         $data = $event->data;
-        if ($data === null) return;
+        if ($data === null) {
+            return;
+        }
 
         match ($event->type) {
             'message_start' => $this->handleMessageStart($data),
@@ -57,7 +65,7 @@ class StreamProcessor
 
     public function hasThinking(): bool
     {
-        return !empty($this->accumulatedThinking);
+        return ! empty($this->accumulatedThinking);
     }
 
     private function handleMessageStart(array $data): void
@@ -77,6 +85,7 @@ class StreamProcessor
             'id' => $block['id'] ?? null,
             'name' => $block['name'] ?? null,
             'input' => '',
+            'signature' => null, // populated by signature_delta for thinking blocks
         ];
     }
 
@@ -85,7 +94,9 @@ class StreamProcessor
         $index = $data['index'];
         $delta = $data['delta'];
 
-        if (!isset($this->contentBlocks[$index])) return;
+        if (! isset($this->contentBlocks[$index])) {
+            return;
+        }
 
         $type = $this->contentBlocks[$index]['type'];
 
@@ -102,6 +113,11 @@ class StreamProcessor
             if ($this->onThinkingDelta !== null) {
                 ($this->onThinkingDelta)($thinking);
             }
+        } elseif ($type === 'thinking' && ($delta['type'] ?? '') === 'signature_delta') {
+            // The Anthropic API provides a signature for thinking blocks that MUST be
+            // included when thinking blocks are passed back in subsequent turns.
+            // Without it, the API rejects the conversation history.
+            $this->contentBlocks[$index]['signature'] = $delta['signature'] ?? null;
         }
     }
 
@@ -111,17 +127,38 @@ class StreamProcessor
         if (isset($data['usage'])) {
             $this->usage = array_merge($this->usage, $data['usage']);
         }
+
+        if ($this->stopReason === 'tool_use') {
+            foreach (array_keys($this->contentBlocks) as $index) {
+                $this->completeToolBlock($index);
+            }
+        }
     }
 
     private function handleContentBlockStop(array $data): void
     {
         $index = $data['index'] ?? null;
-        if ($index === null || !isset($this->contentBlocks[$index])) return;
+        if ($index === null || ! isset($this->contentBlocks[$index])) {
+            return;
+        }
+
+        $this->completeToolBlock($index);
+    }
+
+    private function completeToolBlock(int $index): void
+    {
+        if (($this->completedToolBlocks[$index] ?? false) || ! isset($this->contentBlocks[$index])) {
+            return;
+        }
 
         $block = $this->contentBlocks[$index];
+        if ($block['type'] !== 'tool_use') {
+            return;
+        }
 
-        // When a tool_use block finishes streaming its input, notify the streaming executor
-        if ($block['type'] === 'tool_use' && $this->onToolBlockComplete !== null) {
+        $this->completedToolBlocks[$index] = true;
+
+        if ($this->onToolBlockComplete !== null) {
             $input = json_decode($block['input'], true) ?? [];
             ($this->onToolBlockComplete)(
                 ['id' => $block['id'], 'name' => $block['name'], 'input' => $input],
@@ -146,23 +183,32 @@ class StreamProcessor
      */
     public function getToolUseBlocks(): array
     {
+        return array_values($this->getIndexedToolUseBlocks());
+    }
+
+    /**
+     * @return array<int, array{id: string, name: string, input: array}>
+     */
+    public function getIndexedToolUseBlocks(): array
+    {
         $blocks = [];
-        foreach ($this->contentBlocks as $block) {
+        foreach ($this->contentBlocks as $index => $block) {
             if ($block['type'] === 'tool_use') {
                 $input = json_decode($block['input'], true) ?? [];
-                $blocks[] = [
+                $blocks[$index] = [
                     'id' => $block['id'],
                     'name' => $block['name'],
                     'input' => $input,
                 ];
             }
         }
+
         return $blocks;
     }
 
     public function hasToolUse(): bool
     {
-        return $this->stopReason === 'tool_use' && !empty($this->getToolUseBlocks());
+        return ! empty($this->getToolUseBlocks());
     }
 
     public function getStopReason(): ?string
@@ -195,10 +241,14 @@ class StreamProcessor
                     'input' => $input,
                 ];
             } elseif ($block['type'] === 'thinking') {
-                $content[] = [
+                $thinking = [
                     'type' => 'thinking',
                     'thinking' => $block['text'],
                 ];
+                if ($block['signature'] !== null) {
+                    $thinking['signature'] = $block['signature'];
+                }
+                $content[] = $thinking;
             }
         }
 
@@ -208,6 +258,7 @@ class StreamProcessor
     public function reset(): void
     {
         $this->contentBlocks = [];
+        $this->completedToolBlocks = [];
         $this->stopReason = null;
         $this->usage = [];
         $this->accumulatedText = '';

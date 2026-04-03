@@ -86,6 +86,10 @@ DESC;
             return ToolResult::error("Failed to parse notebook JSON: {$path}");
         }
 
+        if (!isset($notebook['cells']) || !is_array($notebook['cells'])) {
+            return ToolResult::error("Notebook file does not contain a valid cells array: {$path}");
+        }
+
         $cells = &$notebook['cells'];
         $editMode = $input['edit_mode'] ?? 'replace';
         $cellNumber = $input['cell_number'] ?? 0;
@@ -106,7 +110,7 @@ DESC;
                 $newCell = [
                     'cell_type' => $type,
                     'metadata' => [],
-                    'source' => explode("\n", $newSource),
+                    'source' => $this->sourceToLines($newSource),
                 ];
                 if ($type === 'code') {
                     $newCell['execution_count'] = null;
@@ -122,7 +126,7 @@ DESC;
                 }
                 $type = $cellType ?? $cells[$cellNumber]['cell_type'] ?? 'code';
                 $cells[$cellNumber]['cell_type'] = $type;
-                $cells[$cellNumber]['source'] = explode("\n", $newSource);
+                $cells[$cellNumber]['source'] = $this->sourceToLines($newSource);
                 if ($type === 'code' && !isset($cells[$cellNumber]['execution_count'])) {
                     $cells[$cellNumber]['execution_count'] = null;
                     $cells[$cellNumber]['outputs'] = [];
@@ -136,7 +140,14 @@ DESC;
         }
 
         $json = json_encode($notebook, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
-        file_put_contents($path, $json);
+        if ($json === false) {
+            return ToolResult::error("Failed to encode notebook JSON: " . json_last_error_msg());
+        }
+
+        $writeResult = file_put_contents($path, $json);
+        if ($writeResult === false) {
+            return ToolResult::error("Failed to write notebook file: {$path}");
+        }
 
         $action = $editMode;
         $msg = match ($editMode) {
@@ -157,5 +168,42 @@ DESC;
     public function isConcurrencySafe(array $input): bool
     {
         return false;
+    }
+
+    /**
+     * Convert a source string into the nbformat line-array format.
+     *
+     * The nbformat spec requires source to be an array of strings where every
+     * line except the last ends with "\n". Without the terminators, Jupyter
+     * concatenates adjacent lines without any separator, turning "a\nb" stored
+     * as ["a", "b"] into the single string "ab".
+     */
+    private function sourceToLines(string $source): array
+    {
+        $lines = explode("\n", $source);
+
+        // Detect whether the original source ended with "\n".
+        // explode() produces a trailing "" in that case; removing it separately
+        // lets us know to add "\n" back to the (now-)last line.
+        $trailingNewline = $lines[array_key_last($lines)] === '';
+        if ($trailingNewline) {
+            array_pop($lines);
+        }
+
+        if (empty($lines)) {
+            return [''];
+        }
+
+        // Re-attach "\n" to every line except the last when there is no
+        // trailing newline; re-attach to ALL lines when there is one.
+        $last = array_key_last($lines);
+        foreach ($lines as $i => &$line) {
+            if ($i !== $last || $trailingNewline) {
+                $line .= "\n";
+            }
+        }
+        unset($line);
+
+        return $lines;
     }
 }

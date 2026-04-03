@@ -89,9 +89,9 @@ class GitContext
 
         $stat = implode("\n", $statOutput);
 
-        // If diff is very large, just return the stat summary
-        $totalLines = array_sum(array_map(fn($l) => substr_count($l, '|'), $statOutput));
-        if ($totalLines > 50) {
+        // If diff has many files, just return the stat summary
+        $fileCount = count(array_filter($statOutput, fn($l) => str_contains($l, '|')));
+        if ($fileCount > 50) {
             return $stat . "\n(diff truncated — use Bash tool to see full diff)";
         }
 

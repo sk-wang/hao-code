@@ -20,27 +20,41 @@ class HookExecutor
     public function execute(string $event, array $context = []): HookResult
     {
         $hooks = $this->hooks[$event] ?? [];
-        $result = new HookResult(allowed: true);
+        $outputs = [];
+        $modifiedInput = null;
 
         foreach ($hooks as $hook) {
+            // Skip hook if matcher is set and does not match the tool name
+            if ($hook->matcher !== null) {
+                $toolName = $context['tool'] ?? '';
+                if (!fnmatch($hook->matcher, $toolName)) {
+                    continue;
+                }
+            }
+
             $hookResult = $this->runHook($hook, $context);
 
             if (!$hookResult->allowed) {
                 return $hookResult;
             }
 
-            // Merge any modifications
+            // Accumulate outputs from all hooks
+            if ($hookResult->output !== '' && $hookResult->output !== null) {
+                $outputs[] = $hookResult->output;
+            }
+
+            // Merge any modifications - each hook sees previous modifications
             if ($hookResult->modifiedInput !== null) {
-                $context = $hookResult->modifiedInput;
-                $result = new HookResult(
-                    allowed: true,
-                    modifiedInput: $context,
-                    output: $hookResult->output,
-                );
+                $context['input'] = $hookResult->modifiedInput;
+                $modifiedInput = $hookResult->modifiedInput;
             }
         }
 
-        return $result;
+        return new HookResult(
+            allowed: true,
+            modifiedInput: $modifiedInput,
+            output: implode("\n", $outputs),
+        );
     }
 
     private function runHook(HookDefinition $hook, array $context): HookResult
@@ -112,7 +126,7 @@ class HookExecutor
         // Load hooks from settings files
         $paths = [];
 
-        $home = $_SERVER['HOME'] ?? '~';
+        $home = $_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir();
         $paths[] = "{$home}/.haocode/settings.json";
         $paths[] = getcwd() . '/.haocode/settings.json';
 

@@ -132,7 +132,8 @@ DESC;
 
     public function isReadOnly(array $input): bool
     {
-        return true;
+        // Skills can execute shell commands via inline `!command` syntax
+        return false;
     }
 
     public function isConcurrencySafe(array $input): bool

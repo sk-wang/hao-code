@@ -83,17 +83,32 @@ class SessionManager
      */
     public function loadSession(string $sessionId): array
     {
-        $pattern = $this->sessionPath . '/' . $sessionId . '_*.jsonl';
-        $files = glob($pattern);
+        // Try exact match first (file format: {sessionId}.jsonl)
+        $exactPath = $this->sessionPath . '/' . $sessionId . '.jsonl';
+        $files = file_exists($exactPath) ? [$exactPath] : [];
+
+        // Fallback to glob for partial ID matching
+        if (empty($files)) {
+            $pattern = $this->sessionPath . '/' . $sessionId . '*.jsonl';
+            $files = glob($pattern);
+        }
 
         if (empty($files)) {
             return [];
         }
 
+        $lines = file($files[0]);
+        if ($lines === false) {
+            return [];
+        }
+
         $entries = [];
-        foreach (file($files[0]) as $line) {
+        foreach ($lines as $line) {
             if (trim($line)) {
-                $entries[] = json_decode($line, true);
+                $decoded = json_decode($line, true);
+                if (is_array($decoded)) {
+                    $entries[] = $decoded;
+                }
             }
         }
 

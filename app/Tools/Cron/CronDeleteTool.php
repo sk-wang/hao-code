@@ -6,6 +6,7 @@ use App\Tools\BaseTool;
 use App\Tools\ToolInputSchema;
 use App\Tools\ToolResult;
 use App\Tools\ToolUseContext;
+use App\Tools\Cron\CronScheduler;
 
 class CronDeleteTool extends BaseTool
 {

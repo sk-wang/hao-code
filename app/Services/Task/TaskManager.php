@@ -47,7 +47,7 @@ class TaskManager
     /**
      * @return Task[]
      */
-    public function list(string $status = null): array
+    public function list(?string $status = null): array
     {
         $tasks = array_values($this->tasks);
         if ($status) {

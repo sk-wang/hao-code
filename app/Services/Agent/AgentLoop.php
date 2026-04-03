@@ -8,19 +8,21 @@ use App\Services\Cost\CostTracker;
 use App\Services\Hooks\HookExecutor;
 use App\Services\Permissions\PermissionChecker;
 use App\Services\Session\SessionManager;
-use App\Tools\Bash\BashTool;
 use App\Tools\ToolRegistry;
 use App\Tools\ToolUseContext;
 
 class AgentLoop
 {
     private int $maxTurns = 50;
+    private int $maxMalformedToolInputRetries = 4;
     private bool $aborted = false;
     private bool $sessionStarted = false;
     private int $totalInputTokens = 0;
     private int $totalOutputTokens = 0;
     private int $totalCacheCreationTokens = 0;
     private int $totalCacheReadTokens = 0;
+    /** Tracks the most recent API call's input token count for auto-compact decisions. */
+    private int $lastTurnInputTokens = 0;
 
     public function __construct(
         private readonly QueryEngine $queryEngine,
@@ -78,6 +80,7 @@ class AgentLoop
         }
 
         $turnCount = 0;
+        $malformedToolInputRetries = 0;
 
         while ($turnCount < $this->maxTurns && !$this->aborted) {
             $turnCount++;
@@ -86,8 +89,12 @@ class AgentLoop
                 $onTurnStart($turnCount);
             }
 
-            // 1. Auto-compact if context is getting large
-            if ($this->contextCompactor->shouldAutoCompact($this->totalInputTokens)) {
+            // 1. Auto-compact if context is getting large.
+            // Use $lastTurnInputTokens (size of the most recent API call's context), NOT
+            // $totalInputTokens (cumulative across all turns). Cumulative tokens only grow,
+            // so once the threshold is crossed the auto-compact would otherwise fire on
+            // every subsequent turn — even after compaction has already cut the context.
+            if ($this->contextCompactor->shouldAutoCompact($this->lastTurnInputTokens)) {
                 $this->contextCompactor->compact($this->messageHistory);
             }
 
@@ -106,72 +113,86 @@ class AgentLoop
             );
             $streamingExecutor->setContext($context, $onToolStart, $onToolComplete);
 
-            // 4. Call Anthropic API with streaming — tools execute as they arrive
-            $processor = $this->queryEngine->query(
-                systemPrompt: $systemPrompt,
-                messages: $messages,
-                onTextDelta: $onTextDelta,
-                onToolBlockComplete: fn(array $block, int $index) =>
-                    $streamingExecutor->onToolBlockReady($block, $index),
-            );
+            try {
+                // 4. Call Anthropic API with streaming — tools execute as they arrive
+                $processor = $this->queryEngine->query(
+                    systemPrompt: $systemPrompt,
+                    messages: $messages,
+                    onTextDelta: $onTextDelta,
+                    onToolBlockComplete: fn(array $block, int $index) =>
+                        $streamingExecutor->onToolBlockReady($block, $index),
+                );
 
-            // 5. Track usage
-            $usage = $processor->getUsage();
-            $this->totalInputTokens += $usage['input_tokens'] ?? 0;
-            $this->totalOutputTokens += $usage['output_tokens'] ?? 0;
-            $this->totalCacheCreationTokens += $usage['cache_creation_input_tokens'] ?? 0;
-            $this->totalCacheReadTokens += $usage['cache_read_input_tokens'] ?? 0;
+                // 5. Track usage
+                $usage = $processor->getUsage();
+                $this->lastTurnInputTokens = $usage['input_tokens'] ?? 0;
+                $this->totalInputTokens += $this->lastTurnInputTokens;
+                $this->totalOutputTokens += $usage['output_tokens'] ?? 0;
+                $this->totalCacheCreationTokens += $usage['cache_creation_input_tokens'] ?? 0;
+                $this->totalCacheReadTokens += $usage['cache_read_input_tokens'] ?? 0;
 
-            // 5b. Cost tracking
-            $this->costTracker->addUsage(
-                $usage['input_tokens'] ?? 0,
-                $usage['output_tokens'] ?? 0,
-                $usage['cache_creation_input_tokens'] ?? 0,
-                $usage['cache_read_input_tokens'] ?? 0,
-            );
+                // 5b. Cost tracking
+                $this->costTracker->addUsage(
+                    $usage['input_tokens'] ?? 0,
+                    $usage['output_tokens'] ?? 0,
+                    $usage['cache_creation_input_tokens'] ?? 0,
+                    $usage['cache_read_input_tokens'] ?? 0,
+                );
 
-            if ($this->costTracker->shouldStop()) {
+                if ($this->costTracker->shouldStop()) {
+                    $streamingExecutor->cleanup();
+                    return "(Cost limit reached: " . $this->costTracker->getSummary() . ")";
+                }
+
+                $assistantMessage = $processor->toAssistantMessage();
+                $toolUseBlocks = $processor->getIndexedToolUseBlocks();
+
+                // 6. Check if we need to execute tools
+                if ($toolUseBlocks === []) {
+                    $this->messageHistory->addAssistantMessage($assistantMessage);
+                    $this->hookExecutor?->execute('Stop', [
+                        'session_id' => $this->sessionManager->getSessionId(),
+                        'turn' => $turnCount,
+                    ]);
+                    return $processor->getAccumulatedText();
+                }
+
+                $malformedToolUseErrors = $this->findMalformedToolUseErrors($toolUseBlocks, $context);
+                if ($malformedToolUseErrors !== []) {
+                    $streamingExecutor->cleanup();
+
+                    if ($malformedToolInputRetries < $this->maxMalformedToolInputRetries) {
+                        $malformedToolInputRetries++;
+                        $turnCount--;
+                        continue;
+                    }
+
+                    throw new \RuntimeException(
+                        'Model returned malformed tool input repeatedly: ' . implode('; ', $malformedToolUseErrors),
+                    );
+                }
+                $malformedToolInputRetries = 0;
+
+                $this->messageHistory->addAssistantMessage($assistantMessage);
+
+                // Kimi's SSE stream can omit the trailing content_block_stop for the last tool_use block.
+                // Reconcile against the finalized assistant message so every tool_use gets a matching tool_result.
+                foreach ($toolUseBlocks as $index => $block) {
+                    $streamingExecutor->onToolBlockReady($block, $index);
+                }
+
+                // 7. Collect tool results (early-forked safe tools + queued unsafe tools)
+                $toolResults = $streamingExecutor->collectResults();
+
+                // 8. Feed tool results back
+                $this->messageHistory->addToolResultMessage($toolResults);
+
+                // 9. Record transcript
+                $this->sessionManager->recordTurn($assistantMessage, $toolResults);
+            } catch (\Throwable $e) {
                 $streamingExecutor->cleanup();
-                return "(Cost limit reached: " . $this->costTracker->getSummary() . ")";
+                throw $e;
             }
-
-            // 6. Store assistant response
-            $assistantMessage = $processor->toAssistantMessage();
-            $this->messageHistory->addAssistantMessage($assistantMessage);
-
-            // 7. Check if we need to execute tools
-            if (!$processor->hasToolUse()) {
-                $this->hookExecutor?->execute('Stop', [
-                    'session_id' => $this->sessionManager->getSessionId(),
-                    'turn' => $turnCount,
-                ]);
-                return $processor->getAccumulatedText();
-            }
-
-            // 8. Collect tool results (early-forked safe tools + queued unsafe tools)
-            $toolResults = $streamingExecutor->collectResults();
-
-            // 9. Feed tool results back
-            $this->messageHistory->addToolResultMessage($toolResults);
-
-            // 10. Check background tasks and append status if any completed
-            $bgResults = BashTool::checkAllTasks();
-            foreach ($bgResults as $taskId => $bgResult) {
-                $toolResults[] = [
-                    'tool_use_id' => "bg_check_{$taskId}",
-                    'content' => $bgResult->output,
-                    'is_error' => $bgResult->isError,
-                ];
-            }
-            if (!empty($bgResults)) {
-                $this->messageHistory->addToolResultMessage(array_map(
-                    fn($r) => $r->toApiFormat("bg_update_" . array_search($r, $bgResults, true)),
-                    $bgResults
-                ));
-            }
-
-            // 11. Record transcript
-            $this->sessionManager->recordTurn($assistantMessage, $toolResults);
         }
 
         if ($this->aborted) {
@@ -219,5 +240,44 @@ class AgentLoop
     public function getSessionManager(): SessionManager
     {
         return $this->sessionManager;
+    }
+
+    /**
+     * @param array<int, array{id: string, name: string, input: array}> $toolUseBlocks
+     * @return array<int, string>
+     */
+    private function findMalformedToolUseErrors(array $toolUseBlocks, ToolUseContext $context): array
+    {
+        $errors = [];
+
+        foreach ($toolUseBlocks as $block) {
+            $tool = $this->toolRegistry->getTool($block['name']);
+            if ($tool === null) {
+                continue;
+            }
+
+            $rawInput = $block['input'] ?? [];
+            if (!is_array($rawInput)) {
+                $errors[] = $block['name'] . ': Tool input must decode to an object.';
+                continue;
+            }
+
+            try {
+                $validatedInput = $tool->inputSchema()->validate($rawInput);
+            } catch (\InvalidArgumentException $e) {
+                $errors[] = $block['name'] . ': ' . $e->getMessage();
+                continue;
+            } catch (\TypeError $e) {
+                $errors[] = $block['name'] . ': ' . $e->getMessage();
+                continue;
+            }
+
+            $semanticError = $tool->validateInput($validatedInput, $context);
+            if ($semanticError !== null) {
+                $errors[] = $block['name'] . ': ' . $semanticError;
+            }
+        }
+
+        return $errors;
     }
 }

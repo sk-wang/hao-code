@@ -57,16 +57,19 @@ class ToolOrchestrator
             return $results;
         }
 
-        // Partition into safe (parallelizable) and unsafe (sequential)
-        $safeBlocks = [];
-        $unsafeBlocks = [];
+        // Partition into safe (parallelizable) and unsafe (sequential).
+        // Preserve original indices so the final results can be re-sorted into
+        // call order.  Without this, interleaved blocks like [safe A, unsafe B,
+        // safe C] would produce [A, C, B] instead of [A, B, C].
+        $safeBlocks = [];   // origIdx => block
+        $unsafeBlocks = []; // origIdx => block
 
-        foreach ($toolUseBlocks as $block) {
+        foreach ($toolUseBlocks as $origIdx => $block) {
             $tool = $this->toolRegistry->getTool($block['name']);
             if ($tool && $tool->isConcurrencySafe($block['input'] ?? []) && $tool->isReadOnly($block['input'] ?? [])) {
-                $safeBlocks[] = $block;
+                $safeBlocks[$origIdx] = $block;
             } else {
-                $unsafeBlocks[] = $block;
+                $unsafeBlocks[$origIdx] = $block;
             }
         }
 
@@ -75,17 +78,19 @@ class ToolOrchestrator
         // Execute safe tools in parallel using child processes
         if (!empty($safeBlocks)) {
             $parallelResults = $this->executeInParallel($safeBlocks, $context, $onToolStart, $onToolComplete);
-            foreach ($parallelResults as $idx => $result) {
-                $results[$idx] = $result;
+            foreach ($parallelResults as $origIdx => $result) {
+                $results[$origIdx] = $result;
             }
         }
 
         // Execute unsafe tools sequentially
-        foreach ($unsafeBlocks as $block) {
-            $results[] = $this->executeSingleTool($block, $context, $onToolStart, $onToolComplete);
+        foreach ($unsafeBlocks as $origIdx => $block) {
+            $results[$origIdx] = $this->executeSingleTool($block, $context, $onToolStart, $onToolComplete);
         }
 
-        return $results;
+        // Re-sort by original call order and strip keys
+        ksort($results);
+        return array_values($results);
     }
 
     /**
@@ -111,6 +116,7 @@ class ToolOrchestrator
         // Use temp files for IPC
         $tempFiles = [];
         $pids = [];
+        $results = [];
 
         foreach ($blocks as $idx => $block) {
             $tempFile = sys_get_temp_dir() . '/haocode_tool_' . $idx . '_' . getmypid();
@@ -139,7 +145,6 @@ class ToolOrchestrator
         }
 
         // Wait for all children
-        $results = [];
         foreach ($pids as $idx => $pid) {
             pcntl_waitpid($pid, $status);
             if (isset($tempFiles[$idx]) && file_exists($tempFiles[$idx])) {
@@ -153,13 +158,17 @@ class ToolOrchestrator
             }
             if ($onComplete) {
                 $toolName = $blocks[$idx]['name'];
-                $result = ToolResult::success($results[$idx]['content'] ?? '');
+                $result = new ToolResult(
+                    output: (string) ($results[$idx]['content'] ?? ''),
+                    isError: (bool) ($results[$idx]['is_error'] ?? false),
+                );
                 $onComplete($toolName, $result);
             }
         }
 
-        // Re-index sequentially
-        return array_values($results);
+        // Return with original block indices intact so the caller can re-sort them
+        // into the correct call order.
+        return $results;
     }
 
     private function executeSingleTool(
@@ -174,7 +183,7 @@ class ToolOrchestrator
 
         $tool = $this->toolRegistry->getTool($toolName);
 
-        if ($tool === null) {
+        if ($tool === null || !$tool->isEnabled()) {
             return [
                 'tool_use_id' => $toolUseId,
                 'content' => "Unknown tool: {$toolName}",
@@ -228,7 +237,10 @@ class ToolOrchestrator
         $decision = $this->permissionChecker->check($tool, $input, $context);
 
         if (!$decision->allowed) {
-            if ($this->permissionPromptHandler) {
+            // Only prompt the user for "ask" decisions (needsPrompt=true).
+            // Hard "deny" decisions (deny rules, plan-mode writes) must never be
+            // overridden by a permission prompt — they should always fail immediately.
+            if ($decision->needsPrompt && $this->permissionPromptHandler) {
                 $userApproved = ($this->permissionPromptHandler)($toolName, $input);
                 if (!$userApproved) {
                     return [

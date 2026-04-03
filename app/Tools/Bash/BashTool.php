@@ -104,13 +104,68 @@ DESC;
 
         fclose($pipes[0]);
 
-        $stdout = stream_get_contents($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
+        // Enforce timeout using non-blocking stream_select so that commands
+        // which hang cannot exceed the requested limit.
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+
+        $stdout = '';
+        $stderr = '';
+        $deadline  = microtime(true) + $timeout;
+        $timedOut  = false;
+
+        while (true) {
+            $remaining = $deadline - microtime(true);
+            if ($remaining <= 0) {
+                $timedOut = true;
+                proc_terminate($process, 9);
+                break;
+            }
+
+            $read   = array_filter([$pipes[1], $pipes[2]], 'is_resource');
+            $write  = null;
+            $except = null;
+
+            if (empty($read)) {
+                break;
+            }
+
+            // Poll up to 200 ms so we don't burn CPU while also staying responsive.
+            $usec    = (int) min($remaining * 1_000_000, 200_000);
+            $changed = @stream_select($read, $write, $except, 0, $usec);
+
+            if ($changed > 0) {
+                foreach ($read as $stream) {
+                    $chunk = fread($stream, 65536);
+                    if ($chunk !== false && $chunk !== '') {
+                        if ($stream === $pipes[1]) {
+                            $stdout .= $chunk;
+                        } else {
+                            $stderr .= $chunk;
+                        }
+                    }
+                }
+            }
+
+            // Stop when both streams are at EOF (process exited).
+            if (feof($pipes[1]) && feof($pipes[2])) {
+                break;
+            }
+        }
 
         fclose($pipes[1]);
         fclose($pipes[2]);
 
         $exitCode = proc_close($process);
+
+        if ($timedOut) {
+            $partial = trim($stdout . ($stderr ? "\n" . $stderr : ''));
+            $partialNote = $partial ? "\nPartial output:\n{$partial}" : '';
+            return ToolResult::error(
+                "Command timed out after {$timeout}s.{$partialNote}",
+                ['exitCode' => -1, 'timedOut' => true],
+            );
+        }
 
         $output = '';
         if (!empty($stdout)) {
@@ -167,7 +222,7 @@ DESC;
         $taskId = 'bg_' . bin2hex(random_bytes(4));
         $outFile = sys_get_temp_dir() . '/haocode_' . $taskId . '.out';
 
-        $fullCommand = "cd " . escapeshellarg($cwd) . " && {$command} > " . escapeshellarg($outFile) . " 2>&1 & echo $!";
+        $fullCommand = "cd " . escapeshellarg($cwd) . " && bash -c " . escapeshellarg($command) . " > " . escapeshellarg($outFile) . " 2>&1 & echo $!";
 
         $output = shell_exec($fullCommand);
         $pid = (int) trim($output ?? '0');
@@ -377,7 +432,7 @@ DESC;
 
     public function isReadOnly(array $input): bool
     {
-        return false;
+        return $this->isReadOnlyCommand($input['command'] ?? '');
     }
 
     public function isConcurrencySafe(array $input): bool

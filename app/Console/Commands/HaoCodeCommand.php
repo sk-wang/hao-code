@@ -3,12 +3,25 @@
 namespace App\Console\Commands;
 
 use App\Services\Agent\AgentLoop;
+use App\Services\Agent\MessageHistory;
+use App\Services\Api\ApiErrorException;
 use App\Services\Compact\ContextCompactor;
+use App\Services\Cost\CostTracker;
 use App\Services\Hooks\HookExecutor;
+use App\Services\Memory\SessionMemory;
+use App\Services\OutputStyle\OutputStyleLoader;
 use App\Services\Session\AwaySummaryService;
+use App\Services\Session\SessionManager;
 use App\Services\Session\SessionTitleService;
 use App\Services\Settings\SettingsManager;
+use App\Support\Terminal\InputSanitizer;
+use App\Support\Terminal\MarkdownRenderer;
+use App\Support\Terminal\ReplFormatter;
+use App\Support\Terminal\StreamingMarkdownOutput;
+use App\Support\Terminal\TurnStatusRenderer;
 use App\Tools\Bash\BashTool;
+use App\Tools\Skill\SkillLoader;
+use App\Tools\ToolRegistry;
 use Illuminate\Console\Command;
 
 class HaoCodeCommand extends Command
@@ -22,8 +35,12 @@ class HaoCodeCommand extends Command
     protected $description = 'Hao Code - Interactive CLI Coding Agent';
 
     private bool $shouldExit = false;
+
     private bool $fastMode = false;
+
     private bool $titleGenerated = false;
+
+    private ?ReplFormatter $replFormatter = null;
 
     public function handle(): int
     {
@@ -32,6 +49,7 @@ class HaoCodeCommand extends Command
         $settings = app(SettingsManager::class);
         if (empty($settings->getApiKey())) {
             $this->error('ANTHROPIC_API_KEY is not set. Please set it in your environment or .haocode/settings.json');
+
             return 1;
         }
 
@@ -67,11 +85,11 @@ class HaoCodeCommand extends Command
 
     private function printBanner(): void
     {
-        $this->line("\n  <fg=cyan;bold>╔═══════════════════════════════════════╗</>");
-        $this->line(  "  <fg=cyan;bold>║</> <fg=white;bold>Hao Code</> <fg=gray>CLI Coding Agent</>           <fg=cyan;bold>║</>");
-        $this->line(  "  <fg=cyan;bold>║</> <fg=gray>PHP " . PHP_VERSION . " · Laravel Framework</>    <fg=cyan;bold>║</>");
-        $this->line(  "  <fg=cyan;bold>╚═══════════════════════════════════════╝</>");
-        $this->line(  "  <fg=gray>Type '/help' for commands, '/exit' to quit</>\n");
+        foreach ($this->formatter()->banner(PHP_VERSION) as $line) {
+            $this->line($line);
+        }
+        $this->line($this->formatter()->helpHint());
+        $this->line('');
     }
 
     private function runRepl(AgentLoop $agent): int
@@ -84,7 +102,11 @@ class HaoCodeCommand extends Command
         }
         $historyPtr = count($history);
 
-        while (!$this->shouldExit) {
+        if ($this->supportsReadline() && file_exists($historyFile)) {
+            @readline_read_history($historyFile);
+        }
+
+        while (! $this->shouldExit) {
             $input = $this->readInput($history, $historyPtr);
 
             if ($input === null) {
@@ -101,11 +123,17 @@ class HaoCodeCommand extends Command
             if (count($history) > 500) {
                 $history = array_slice($history, -500);
             }
-            @file_put_contents($historyFile, implode("\n", $history));
+            if ($this->supportsReadline()) {
+                readline_add_history($input);
+                @readline_write_history($historyFile);
+            } else {
+                @file_put_contents($historyFile, implode("\n", $history));
+            }
 
             // Handle slash commands
             if (str_starts_with($input, '/')) {
                 $this->handleSlashCommand($input, $agent);
+
                 continue;
             }
 
@@ -117,22 +145,125 @@ class HaoCodeCommand extends Command
 
     private function runSinglePrompt(AgentLoop $agent, string $prompt): int
     {
-        $response = $agent->run(
-            userInput: $prompt,
-            onTextDelta: fn(string $text) => $this->output->write($text),
-        );
+        $streamedOutput = false;
+        $markdownRenderer = app(MarkdownRenderer::class);
+        $markdownOutput = $this->createStreamingMarkdownOutput($markdownRenderer);
+        $turnStatus = $this->createTurnStatusRenderer($prompt);
+        $previousAlarmHandler = $this->startTurnStatusTicker($turnStatus);
 
-        $this->line($response);
-        $this->printUsageStats($agent);
+        try {
+            $turnStatus->start();
+
+            $response = $agent->run(
+                userInput: $prompt,
+                onTextDelta: function (string $text) use (&$streamedOutput, $turnStatus, $markdownOutput) {
+                    $turnStatus->recordTextDelta($text);
+                    $turnStatus->pause();
+                    $streamedOutput = true;
+                    $markdownOutput->append($text);
+                },
+                onToolStart: function (string $toolName, array $toolInput) use (&$streamedOutput, $turnStatus, $markdownOutput) {
+                    $turnStatus->pause();
+                    $streamedOutput = true;
+                    $markdownOutput->finalize();
+                    $args = $this->summarizeToolInput($toolName, $toolInput);
+                    $this->line("\n".$this->formatter()->toolCall($toolName, $args));
+                    $turnStatus->resume();
+                },
+                onToolComplete: function (string $toolName, $result) use ($turnStatus) {
+                    $turnStatus->pause();
+                    if ($result->isError) {
+                        $message = trim((string) $result->output);
+                        $this->line($this->formatter()->toolFailure($toolName, $message === '' ? 'Unknown error' : $message));
+                    }
+                    $turnStatus->resume();
+                },
+            );
+
+            $turnStatus->pause();
+            $markdownOutput->finalize();
+            if (! $streamedOutput && $response !== '') {
+                $this->line($markdownRenderer->render($response));
+            } else {
+                $this->line('');
+            }
+            $this->printUsageStats($agent);
+        } catch (ApiErrorException $e) {
+            $turnStatus->pause();
+            $markdownOutput->finalize();
+            if ($streamedOutput) {
+                $this->line('');
+            }
+            $this->line("  <fg=red>API Error ({$e->getErrorType()}): {$e->getMessage()}</>");
+            return 1;
+        } catch (\Throwable $e) {
+            $turnStatus->pause();
+            $markdownOutput->finalize();
+            if ($streamedOutput) {
+                $this->line('');
+            }
+            $this->line("  <fg=red>Error: {$e->getMessage()}</>");
+            if (config('app.debug')) {
+                $this->line("  <fg=gray>{$e->getFile()}:{$e->getLine()}</>");
+            }
+            return 1;
+        } finally {
+            $this->stopTurnStatusTicker($turnStatus, $previousAlarmHandler);
+        }
+
         return 0;
     }
 
     private function readInput(array &$history, int &$historyPtr): ?string
     {
+        if ($this->supportsReadline()) {
+            return $this->readInputWithReadline();
+        }
+
+        return $this->readInputRaw($history, $historyPtr);
+    }
+
+    private function readInputWithReadline(): ?string
+    {
         $cwd = basename(getcwd());
-        $this->output->write("<fg=green>{$cwd}</> <fg=cyan>❯</> ");
+        $lines = [];
+        $prompt = $this->formatter()->readlinePrompt($cwd);
+
+        while (true) {
+            $line = readline($prompt);
+            if ($line === false) {
+                $this->shouldExit = true;
+
+                return null;
+            }
+
+            $line = InputSanitizer::sanitize($line);
+
+            if (str_ends_with(rtrim($line), '\\')) {
+                $lines[] = rtrim($line, ' \\');
+                $prompt = $this->formatter()->readlineContinuationPrompt();
+
+                continue;
+            }
+
+            $lines[] = $line;
+            break;
+        }
+
+        $fullInput = InputSanitizer::sanitize(implode("\n", $lines));
+
+        return trim($fullInput) !== '' ? trim($fullInput) : '';
+    }
+
+    private function readInputRaw(array &$history, int &$historyPtr): ?string
+    {
+        $cwd = basename(getcwd());
+        $this->output->write($this->formatter()->prompt($cwd));
 
         $handle = fopen('php://stdin', 'r');
+        if ($handle === false) {
+            return null;
+        }
 
         // Raw mode for proper key handling
         $sttyMode = '';
@@ -152,14 +283,17 @@ class HaoCodeCommand extends Command
 
                 if ($char === "\r" || $char === "\n") {
                     // Enter key
-                    if ($sttyMode) echo "\r\n";
+                    if ($sttyMode) {
+                        echo "\r\n";
+                    }
 
                     // Check for backslash continuation
                     if (str_ends_with(rtrim($currentLine), '\\')) {
                         $currentLine = rtrim($currentLine, ' \\');
                         $lines[] = $currentLine;
                         $currentLine = '';
-                        $this->output->write("<fg=gray>…</> ");
+                        $this->output->write($this->formatter()->continuationPrompt());
+
                         continue;
                     }
 
@@ -168,13 +302,19 @@ class HaoCodeCommand extends Command
                 }
 
                 if ($char === "\x03") { // Ctrl+C
-                    if ($sttyMode) echo "\r\n";
+                    if ($sttyMode) {
+                        echo "\r\n";
+                    }
+
                     return null;
                 }
 
                 if ($char === "\x04") { // Ctrl+D
-                    if ($sttyMode) echo "\r\n";
+                    if ($sttyMode) {
+                        echo "\r\n";
+                    }
                     $this->shouldExit = true;
+
                     return null;
                 }
 
@@ -186,9 +326,10 @@ class HaoCodeCommand extends Command
                             // Clear current line
                             echo "\r\033[K";
                             $prompt = "\e[32m{$cwd}\e[0m \e[36m❯\e[0m ";
-                            echo $prompt . $history[$historyPtr];
+                            echo $prompt.$history[$historyPtr];
                             $currentLine = $history[$historyPtr];
                         }
+
                         continue;
                     }
                     if ($seq === '[B') { // Down arrow
@@ -196,11 +337,13 @@ class HaoCodeCommand extends Command
                             $historyPtr++;
                             echo "\r\033[K";
                             $prompt = "\e[32m{$cwd}\e[0m \e[36m❯\e[0m ";
-                            echo $prompt . $history[$historyPtr];
+                            echo $prompt.$history[$historyPtr];
                             $currentLine = $history[$historyPtr];
                         }
+
                         continue;
                     }
+
                     // Ignore other escape sequences (arrow left/right, etc.)
                     continue;
                 }
@@ -210,6 +353,7 @@ class HaoCodeCommand extends Command
                         $currentLine = substr($currentLine, 0, -1);
                         echo "\x08 \x08";
                     }
+
                     continue;
                 }
 
@@ -226,8 +370,14 @@ class HaoCodeCommand extends Command
             fclose($handle);
         }
 
-        $fullInput = implode("\n", $lines);
+        $fullInput = InputSanitizer::sanitize(implode("\n", $lines));
+
         return trim($fullInput) !== '' ? trim($fullInput) : '';
+    }
+
+    private function supportsReadline(): bool
+    {
+        return function_exists('readline') && function_exists('readline_add_history') && stream_isatty(STDIN);
     }
 
     private function handleSlashCommand(string $input, AgentLoop $agent): void
@@ -267,42 +417,42 @@ class HaoCodeCommand extends Command
     private function handleExit(): void
     {
         app(HookExecutor::class)->execute('SessionEnd', []);
-        $this->line("<fg=gray>Goodbye!</>");
+        $this->line('<fg=gray>Goodbye!</>');
         $this->shouldExit = true;
     }
 
     private function handleHelp(): void
     {
         $this->line("\n  <fg=cyan;bold>Available Commands:</>");
-        $this->line("  <fg=green>/help</>      Show this help message");
-        $this->line("  <fg=green>/exit</>      Exit the REPL");
-        $this->line("  <fg=green>/clear</>     Clear conversation history");
-        $this->line("  <fg=green>/compact</>   Compact conversation context");
-        $this->line("  <fg=green>/cost</>       Show token usage and cost");
-        $this->line("  <fg=green>/history</>   Show message count");
-        $this->line("  <fg=green>/model</>     Show/set current model");
-        $this->line("  <fg=green>/status</>    Show session status");
-        $this->line("  <fg=green>/tasks</>     List background tasks");
-        $this->line("  <fg=green>/resume</>    Resume a previous session");
-        $this->line("  <fg=green>/diff</>      Show uncommitted changes");
-        $this->line("  <fg=green>/memory</>    View/edit session memory");
-        $this->line("  <fg=green>/context</>   Show context usage");
-        $this->line("  <fg=green>/rewind</>    Undo last change");
-        $this->line("  <fg=green>/doctor</>    Run diagnostics");
-        $this->line("  <fg=green>/skills</>    List available skills");
-        $this->line("  <fg=green>/theme</>     Toggle color theme");
-        $this->line("  <fg=green>/permissions</> View/manage permission rules");
-        $this->line("  <fg=green>/fast</>          Toggle fast (haiku) model mode");
-        $this->line("  <fg=green>/snapshot</>      Export session to a markdown file");
-        $this->line("  <fg=green>/init</>          Initialize .haocode/settings.json");
-        $this->line("  <fg=green>/version</>       Show version information");
+        $this->line('  <fg=green>/help</>      Show this help message');
+        $this->line('  <fg=green>/exit</>      Exit the REPL');
+        $this->line('  <fg=green>/clear</>     Clear conversation history');
+        $this->line('  <fg=green>/compact</>   Compact conversation context');
+        $this->line('  <fg=green>/cost</>       Show token usage and cost');
+        $this->line('  <fg=green>/history</>   Show message count');
+        $this->line('  <fg=green>/model</>     Show/set current model');
+        $this->line('  <fg=green>/status</>    Show session status');
+        $this->line('  <fg=green>/tasks</>     List background tasks');
+        $this->line('  <fg=green>/resume</>    Resume a previous session');
+        $this->line('  <fg=green>/diff</>      Show uncommitted changes');
+        $this->line('  <fg=green>/memory</>    View/edit session memory');
+        $this->line('  <fg=green>/context</>   Show context usage');
+        $this->line('  <fg=green>/rewind</>    Undo last change');
+        $this->line('  <fg=green>/doctor</>    Run diagnostics');
+        $this->line('  <fg=green>/skills</>    List available skills');
+        $this->line('  <fg=green>/theme</>     Toggle color theme');
+        $this->line('  <fg=green>/permissions</> View/manage permission rules');
+        $this->line('  <fg=green>/fast</>          Toggle fast (haiku) model mode');
+        $this->line('  <fg=green>/snapshot</>      Export session to a markdown file');
+        $this->line('  <fg=green>/init</>          Initialize .haocode/settings.json');
+        $this->line('  <fg=green>/version</>       Show version information');
         $this->line("  <fg=green>/output-style</>  List or set output style\n");
     }
 
     private function handleClear(AgentLoop $agent): void
     {
         $agent->getMessageHistory()->clear();
-        $this->line("<fg=gray>Conversation history cleared.</>");
+        $this->line('<fg=gray>Conversation history cleared.</>');
     }
 
     private function handleHistory(AgentLoop $agent): void
@@ -323,7 +473,8 @@ class HaoCodeCommand extends Command
         $tasks = BashTool::listTasks();
 
         if (empty($tasks)) {
-            $this->line("<fg=gray>No background tasks running.</>");
+            $this->line('<fg=gray>No background tasks running.</>');
+
             return;
         }
 
@@ -341,23 +492,28 @@ class HaoCodeCommand extends Command
 
         if ($args === 'list' || $args === '') {
             $this->listSessions();
+
             return;
         }
 
         $sessionPath = config('haocode.session_path', storage_path('app/haocode/sessions'));
 
+        // Sanitize args for glob safety
+        $safeArg = str_replace(['*', '?', '[', ']'], '', $args);
+
         // Find session file matching the partial ID
-        $pattern = $sessionPath . '/' . $args . '*.jsonl';
+        $pattern = $sessionPath.'/'.$safeArg.'*.jsonl';
         $files = glob($pattern);
 
         if (empty($files)) {
             // Try partial match
-            $pattern = $sessionPath . '/*' . $args . '*.jsonl';
+            $pattern = $sessionPath.'/*'.$safeArg.'*.jsonl';
             $files = glob($pattern);
         }
 
         if (empty($files)) {
             $this->line("<fg=red>No session found matching: {$args}</>");
+
             return;
         }
 
@@ -370,7 +526,8 @@ class HaoCodeCommand extends Command
         }
 
         if (empty($entries)) {
-            $this->line("<fg=red>Session is empty.</>");
+            $this->line('<fg=red>Session is empty.</>');
+
             return;
         }
 
@@ -389,7 +546,7 @@ class HaoCodeCommand extends Command
                     $history->addAssistantMessage($entry['message']);
                     $restored++;
                 }
-                if (!empty($entry['tool_results'])) {
+                if (! empty($entry['tool_results'])) {
                     $history->addToolResultMessage($entry['tool_results']);
                 }
             }
@@ -409,32 +566,36 @@ class HaoCodeCommand extends Command
     {
         $sessionPath = config('haocode.session_path', storage_path('app/haocode/sessions'));
 
-        if (!is_dir($sessionPath)) {
-            $this->line("<fg=gray>No sessions found.</>");
+        if (! is_dir($sessionPath)) {
+            $this->line('<fg=gray>No sessions found.</>');
+
             return;
         }
 
-        $files = glob($sessionPath . '/*.jsonl');
+        $files = glob($sessionPath.'/*.jsonl');
 
         if (empty($files)) {
-            $this->line("<fg=gray>No sessions found.</>");
+            $this->line('<fg=gray>No sessions found.</>');
+
             return;
         }
 
         // Sort by modification time, newest first
-        usort($files, fn($a, $b) => filemtime($b) - filemtime($a));
+        usort($files, fn ($a, $b) => filemtime($b) - filemtime($a));
 
         $this->line("\n  <fg=cyan;bold>Recent Sessions:</>");
         $count = 0;
         foreach ($files as $file) {
-            if ($count++ >= 10) break;
+            if ($count++ >= 10) {
+                break;
+            }
             $id = basename($file, '.jsonl');
             $lines = count(file($file));
             $time = date('Y-m-d H:i', filemtime($file));
 
             // Extract stored title from the session file
-            $entries = array_map(fn($l) => json_decode(trim($l), true) ?: [], file($file));
-            $title = \App\Services\Session\SessionManager::extractTitleFromEntries($entries);
+            $entries = array_map(fn ($l) => json_decode(trim($l), true) ?: [], file($file));
+            $title = SessionManager::extractTitleFromEntries($entries);
             $titleStr = $title ? " <fg=white>· {$title}</>" : '';
 
             $this->line("  <fg=yellow>{$id}</>{$titleStr} <fg=gray>{$time} · {$lines} entries</>");
@@ -450,7 +611,8 @@ class HaoCodeCommand extends Command
         if ($args === '') {
             $this->line("<fg=gray>Current model: <fg=white>{$settings->getModel()}</></>");
             $available = SettingsManager::getAvailableModels();
-            $this->line("<fg=gray>Available: " . implode(', ', $available) . "</>");
+            $this->line('<fg=gray>Available: '.implode(', ', $available).'</>');
+
             return;
         }
 
@@ -460,7 +622,7 @@ class HaoCodeCommand extends Command
             $this->line("<fg=green>Model set to:</> <fg=white>{$args}</>");
         } else {
             $this->line("<fg=red>Unknown model: {$args}</>");
-            $this->line("<fg=gray>Available: " . implode(', ', $available) . "</>");
+            $this->line('<fg=gray>Available: '.implode(', ', $available).'</>');
         }
     }
 
@@ -473,7 +635,8 @@ class HaoCodeCommand extends Command
         }
 
         if (empty(trim($stat ?? ''))) {
-            $this->line("<fg=gray>No uncommitted changes.</>");
+            $this->line('<fg=gray>No uncommitted changes.</>');
+
             return;
         }
 
@@ -484,7 +647,8 @@ class HaoCodeCommand extends Command
         $fullDiff = shell_exec('git diff HEAD 2>/dev/null') ?: shell_exec('git diff --cached 2>/dev/null') ?: '';
 
         if (mb_strlen($fullDiff) > 8000) {
-            $this->line("  <fg=gray>(diff too large to display — run `git diff` in your terminal)</>");
+            $this->line('  <fg=gray>(diff too large to display — run `git diff` in your terminal)</>');
+
             return;
         }
 
@@ -512,13 +676,14 @@ class HaoCodeCommand extends Command
     private function handleMemory(string $args): void
     {
         $args = trim($args);
-        /** @var \App\Services\Memory\SessionMemory $memory */
-        $memory = app(\App\Services\Memory\SessionMemory::class);
+        /** @var SessionMemory $memory */
+        $memory = app(SessionMemory::class);
 
         if ($args === '' || $args === 'list') {
             $memories = $memory->list();
             if (empty($memories)) {
-                $this->line("<fg=gray>No memories stored. Use: /memory set <key> <value></>");
+                $this->line('<fg=gray>No memories stored. Use: /memory set <key> <value></>');
+
                 return;
             }
             $this->line("\n  <fg=cyan;bold>Session Memories:</>");
@@ -528,17 +693,20 @@ class HaoCodeCommand extends Command
                 $this->line("  <fg=yellow>{$key}</> <fg=gray>[{$type}]</> <fg=white>{$entry['value']}</>");
                 $this->line("    <fg=gray>Updated: {$updated}</>");
             }
+
             return;
         }
 
         if (str_starts_with($args, 'set ')) {
             $parts = explode(' ', substr($args, 4), 2);
             if (count($parts) < 2) {
-                $this->line("<fg=red>Usage: /memory set <key> <value></>");
+                $this->line('<fg=red>Usage: /memory set <key> <value></>');
+
                 return;
             }
             $memory->set($parts[0], $parts[1]);
             $this->line("<fg=green>Memory set:</> <fg=yellow>{$parts[0]}</>");
+
             return;
         }
 
@@ -549,6 +717,7 @@ class HaoCodeCommand extends Command
             } else {
                 $this->line("<fg=red>Memory not found:</> {$key}");
             }
+
             return;
         }
 
@@ -557,26 +726,29 @@ class HaoCodeCommand extends Command
             $results = $memory->search($query);
             if (empty($results)) {
                 $this->line("<fg=gray>No memories matching: {$query}</>");
+
                 return;
             }
             foreach ($results as $key => $entry) {
                 $this->line("  <fg=yellow>{$key}</>: <fg=white>{$entry['value']}</>");
             }
+
             return;
         }
 
-        $this->line("<fg=yellow>Usage:</> /memory [list|set <key> <value>|delete <key>|search <query>]");
+        $this->line('<fg=yellow>Usage:</> /memory [list|set <key> <value>|delete <key>|search <query>]');
     }
 
     private function handleRewind(): void
     {
         // Undo the last conversation turn by popping the last user + assistant messages
-        $history = app(\App\Services\Agent\MessageHistory::class);
+        $history = app(MessageHistory::class);
         $messages = $history->getMessagesForApi();
         $count = count($messages);
 
         if ($count < 2) {
-            $this->line("<fg=gray>Nothing to rewind.</>");
+            $this->line('<fg=gray>Nothing to rewind.</>');
+
             return;
         }
 
@@ -586,7 +758,7 @@ class HaoCodeCommand extends Command
         $removed++;
 
         // Pop tool result messages (user role with tool_result blocks)
-        while (!empty($messages)) {
+        while (! empty($messages)) {
             $last = end($messages);
             $role = $last['role'] ?? '';
             $content = $last['content'] ?? '';
@@ -599,7 +771,7 @@ class HaoCodeCommand extends Command
         }
 
         // Pop the user message that triggered this turn
-        if (!empty($messages) && ($messages[count($messages) - 1]['role'] ?? '') === 'user') {
+        if (! empty($messages) && ($messages[count($messages) - 1]['role'] ?? '') === 'user') {
             array_pop($messages);
             $removed++;
         }
@@ -614,7 +786,7 @@ class HaoCodeCommand extends Command
                     $history->addUserMessage($content);
                 } else {
                     $history->addToolResultMessage(
-                        array_filter($content, fn($b) => ($b['type'] ?? '') === 'tool_result')
+                        array_filter($content, fn ($b) => ($b['type'] ?? '') === 'tool_result')
                     );
                 }
             } elseif ($role === 'assistant') {
@@ -622,7 +794,7 @@ class HaoCodeCommand extends Command
             }
         }
 
-        $this->line("<fg=green>Rewound:</> removed {$removed} messages. History now has " . count($messages) . " messages.");
+        $this->line("<fg=green>Rewound:</> removed {$removed} messages. History now has ".count($messages).' messages.');
     }
 
     private function handleContext(AgentLoop $agent): void
@@ -635,20 +807,20 @@ class HaoCodeCommand extends Command
 
         $this->line("\n  <fg=cyan;bold>Context Usage:</>");
         $this->line("  Messages:     <fg=white>{$msgs}</>");
-        $this->line("  Input tokens: <fg=white>" . number_format($in) . "</> / " . number_format($contextLimit));
-        $this->line("  Output tokens:<fg=white>" . number_format($out) . "</>");
+        $this->line('  Input tokens: <fg=white>'.number_format($in).'</> / '.number_format($contextLimit));
+        $this->line('  Output tokens:<fg=white>'.number_format($out).'</>');
 
         // Visual bar
         $barWidth = 40;
         $filled = (int) round(($usagePercent / 100) * $barWidth);
         $filled = min($filled, $barWidth);
-        $bar = str_repeat('█', $filled) . str_repeat('░', $barWidth - $filled);
+        $bar = str_repeat('█', $filled).str_repeat('░', $barWidth - $filled);
 
         $color = $usagePercent < 50 ? 'green' : ($usagePercent < 80 ? 'yellow' : 'red');
         $this->line("  <fg={$color}>{$bar}</> {$usagePercent}%");
 
         if ($usagePercent > 70) {
-            $this->line("  <fg=yellow>⚠ Context is getting large. Consider using /compact to reduce it.</>");
+            $this->line('  <fg=yellow>⚠ Context is getting large. Consider using /compact to reduce it.</>');
         }
         $this->line('');
     }
@@ -656,7 +828,7 @@ class HaoCodeCommand extends Command
     private function handleStatus(AgentLoop $agent): void
     {
         $settings = app(SettingsManager::class);
-        $costTracker = app(\App\Services\Cost\CostTracker::class);
+        $costTracker = app(CostTracker::class);
         $this->line("\n  <fg=cyan;bold>Session Status:</>");
         $this->line("  Session: <fg=white>{$agent->getSessionManager()->getSessionId()}</>");
         $title = $agent->getSessionManager()->getTitle();
@@ -666,7 +838,7 @@ class HaoCodeCommand extends Command
         $this->line("  Model: <fg=white>{$settings->getModel()}</>");
         $this->line("  Messages: <fg=white>{$agent->getMessageHistory()->count()}</>");
         $this->line("  Permission mode: <fg=white>{$settings->getPermissionMode()->value}</>");
-        $this->line("  " . $costTracker->getSummary());
+        $this->line('  '.$costTracker->getSummary());
         $this->printUsageStats($agent);
     }
 
@@ -676,7 +848,7 @@ class HaoCodeCommand extends Command
 
         $checks = [
             ['PHP Version', PHP_VERSION, true],
-            ['PHP CLI', PHP_SAPI === 'cli' ? 'OK' : 'Not CLI (' . PHP_SAPI . ')', PHP_SAPI === 'cli'],
+            ['PHP CLI', PHP_SAPI === 'cli' ? 'OK' : 'Not CLI ('.PHP_SAPI.')', PHP_SAPI === 'cli'],
             ['pcntl extension', extension_loaded('pcntl') ? 'Available' : 'Not available', extension_loaded('pcntl')],
             ['posix extension', extension_loaded('posix') ? 'Available' : 'Not available', extension_loaded('posix')],
             ['curl extension', extension_loaded('curl') ? 'Available' : 'Not available', extension_loaded('curl')],
@@ -687,7 +859,7 @@ class HaoCodeCommand extends Command
         // Check API key
         $settings = app(SettingsManager::class);
         $apiKey = $settings->getApiKey();
-        $checks[] = ['API Key', $apiKey ? 'Configured (' . mb_substr($apiKey, 0, 10) . '...)' : 'NOT SET', !empty($apiKey)];
+        $checks[] = ['API Key', $apiKey ? 'Configured ('.mb_substr($apiKey, 0, 10).'...)' : 'NOT SET', ! empty($apiKey)];
 
         // Check API base URL
         $baseUrl = $settings->getBaseUrl();
@@ -695,18 +867,18 @@ class HaoCodeCommand extends Command
 
         // Check git
         $gitVersion = shell_exec('git --version 2>/dev/null');
-        $checks[] = ['Git', trim($gitVersion ?? 'Not found'), !empty($gitVersion)];
+        $checks[] = ['Git', trim($gitVersion ?? 'Not found'), ! empty($gitVersion)];
 
         // Check rg (ripgrep)
         $rgVersion = shell_exec('rg --version 2>/dev/null');
-        $checks[] = ['ripgrep', $rgVersion ? trim(explode("\n", $rgVersion)[0]) : 'Not installed', !empty($rgVersion)];
+        $checks[] = ['ripgrep', $rgVersion ? trim(explode("\n", $rgVersion)[0]) : 'Not installed', ! empty($rgVersion)];
 
         // Check session storage
         $sessionPath = storage_path('app/haocode/sessions');
         $checks[] = ['Session Storage', is_dir($sessionPath) ? 'OK' : 'Not created yet', true];
 
         // Check settings files
-        $home = $_SERVER['HOME'] ?? '~';
+        $home = $_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir();
         $globalSettings = "{$home}/.haocode/settings.json";
         $checks[] = ['Global Settings', file_exists($globalSettings) ? $globalSettings : 'Not found', true];
 
@@ -715,10 +887,10 @@ class HaoCodeCommand extends Command
             $this->line("  {$icon} <fg=white>{$label}:</> <fg=gray>{$value}</>");
         }
 
-        $toolCount = count(app(\App\Tools\ToolRegistry::class)->getAllTools());
+        $toolCount = count(app(ToolRegistry::class)->getAllTools());
         $this->line("  <fg=green>✓</> <fg=white>Tools:</> <fg=gray>{$toolCount} registered</>");
 
-        $allOk = count(array_filter($checks, fn($c) => !$c[2])) === 0;
+        $allOk = count(array_filter($checks, fn ($c) => ! $c[2])) === 0;
         $this->line($allOk
             ? "\n  <fg=green>All checks passed.</>\n"
             : "\n  <fg=yellow>Some checks failed. See above for details.</>\n");
@@ -733,16 +905,20 @@ class HaoCodeCommand extends Command
 
         if ($args === '' || $args === 'list') {
             $this->line("\n  <fg=cyan;bold>Themes:</>");
-            $this->line("  <fg=green>dark</>     Default dark theme (current)");
-            $this->line("  <fg=green>light</>    Light terminal theme");
-            $this->line("  <fg=green>ansi</>     Basic ANSI (no truecolor)");
+            $themes = ['dark' => 'Default dark theme', 'light' => 'Light terminal theme', 'ansi' => 'Basic ANSI (no truecolor)'];
+            foreach ($themes as $name => $desc) {
+                $marker = $name === $current ? ' (current)' : '';
+                $this->line("  <fg=green>{$name}</>     {$desc}{$marker}");
+            }
             $this->line("\n  <fg=gray>Use /theme <name> to switch</>");
+
             return;
         }
 
         if (in_array($args, ['dark', 'light', 'ansi'])) {
             $settings->set('theme', $args);
             $this->line("<fg=green>Theme set to:</> <fg=white>{$args}</>");
+
             return;
         }
 
@@ -751,12 +927,13 @@ class HaoCodeCommand extends Command
 
     private function handleSkills(): void
     {
-        /** @var \App\Tools\Skill\SkillLoader $skillLoader */
-        $skillLoader = app(\App\Tools\Skill\SkillLoader::class);
+        /** @var SkillLoader $skillLoader */
+        $skillLoader = app(SkillLoader::class);
         $skills = $skillLoader->listSkills();
 
         if (empty($skills)) {
-            $this->line("<fg=gray>No skills found. Create skills in ~/.haocode/skills/ or .haocode/skills/</>");
+            $this->line('<fg=gray>No skills found. Create skills in ~/.haocode/skills/ or .haocode/skills/</>');
+
             return;
         }
 
@@ -772,8 +949,8 @@ class HaoCodeCommand extends Command
 
     private function handlePermissions(string $args): void
     {
-        /** @var \App\Services\Settings\SettingsManager $settings */
-        $settings = app(\App\Services\Settings\SettingsManager::class);
+        /** @var SettingsManager $settings */
+        $settings = app(SettingsManager::class);
         $mode = $settings->getPermissionMode();
         $allowRules = $settings->getAllowRules();
         $denyRules = $settings->getDenyRules();
@@ -785,32 +962,38 @@ class HaoCodeCommand extends Command
         // Sub-commands for managing rules
         if ($subCommand === 'allow') {
             if (empty($ruleArg)) {
-                $this->line("<fg=red>Usage: /permissions allow <rule></>  e.g. <fg=white>/permissions allow Bash(git push*)</>");
+                $this->line('<fg=red>Usage: /permissions allow <rule></>  e.g. <fg=white>/permissions allow Bash(git push*)</>');
+
                 return;
             }
             $settings->addAllowRule($ruleArg);
             $this->line("<fg=green>Added allow rule:</> <fg=white>{$ruleArg}</>");
+
             return;
         }
 
         if ($subCommand === 'deny') {
             if (empty($ruleArg)) {
-                $this->line("<fg=red>Usage: /permissions deny <rule></>  e.g. <fg=white>/permissions deny Bash(rm -rf)</>");
+                $this->line('<fg=red>Usage: /permissions deny <rule></>  e.g. <fg=white>/permissions deny Bash(rm -rf)</>');
+
                 return;
             }
             $settings->addDenyRule($ruleArg);
             $this->line("<fg=red>Added deny rule:</> <fg=white>{$ruleArg}</>");
+
             return;
         }
 
         if ($subCommand === 'remove') {
             if (empty($ruleArg)) {
-                $this->line("<fg=red>Usage: /permissions remove <rule></>");
+                $this->line('<fg=red>Usage: /permissions remove <rule></>');
+
                 return;
             }
             $settings->removeAllowRule($ruleArg);
             $settings->removeDenyRule($ruleArg);
             $this->line("<fg=gray>Removed rule:</> <fg=white>{$ruleArg}</>");
+
             return;
         }
 
@@ -818,14 +1001,14 @@ class HaoCodeCommand extends Command
         $this->line("\n  <fg=cyan;bold>Permission Settings:</>");
         $this->line("  Mode:              <fg=yellow>{$mode->value}</>");
 
-        if (!empty($allowRules)) {
+        if (! empty($allowRules)) {
             $this->line("\n  <fg=green>Allow Rules:</>");
             foreach ($allowRules as $rule) {
                 $this->line("    <fg=green>+</> <fg=white>{$rule}</>");
             }
         }
 
-        if (!empty($denyRules)) {
+        if (! empty($denyRules)) {
             $this->line("\n  <fg=red>Deny Rules:</>");
             foreach ($denyRules as $rule) {
                 $this->line("    <fg=red>-</> <fg=white>{$rule}</>");
@@ -833,7 +1016,7 @@ class HaoCodeCommand extends Command
         }
 
         if (empty($allowRules) && empty($denyRules)) {
-            $this->line("  <fg=gray>No custom rules configured.</>");
+            $this->line('  <fg=gray>No custom rules configured.</>');
         }
 
         $this->line("\n  <fg=gray>Commands: /permissions allow <rule> | /permissions deny <rule> | /permissions remove <rule></>\n");
@@ -842,14 +1025,14 @@ class HaoCodeCommand extends Command
     private function handleFast(): void
     {
         $settings = app(SettingsManager::class);
-        $this->fastMode = !$this->fastMode;
+        $this->fastMode = ! $this->fastMode;
 
         if ($this->fastMode) {
             $settings->set('model', 'claude-haiku-4-20250514');
-            $this->line("<fg=green>Fast mode ON</> — switched to <fg=white>claude-haiku-4-20250514</> (cheaper & faster)");
+            $this->line('<fg=green>Fast mode ON</> — switched to <fg=white>claude-haiku-4-20250514</> (cheaper & faster)');
         } else {
             $settings->set('model', config('haocode.model', 'claude-sonnet-4-20250514'));
-            $this->line("<fg=gray>Fast mode OFF</> — restored <fg=white>" . config('haocode.model', 'claude-sonnet-4-20250514') . "</>");
+            $this->line('<fg=gray>Fast mode OFF</> — restored <fg=white>'.config('haocode.model', 'claude-sonnet-4-20250514').'</>');
         }
     }
 
@@ -858,28 +1041,29 @@ class HaoCodeCommand extends Command
         $messages = $agent->getMessageHistory()->getMessagesForApi();
 
         if (empty($messages)) {
-            $this->line("<fg=gray>Nothing to snapshot — conversation is empty.</>");
+            $this->line('<fg=gray>Nothing to snapshot — conversation is empty.</>');
+
             return;
         }
 
         $args = trim($args);
         $timestamp = date('Y-m-d_H-i-s');
         $filename = $args ?: "snapshot_{$timestamp}.md";
-        if (!str_ends_with($filename, '.md')) {
+        if (! str_ends_with($filename, '.md')) {
             $filename .= '.md';
         }
 
         $snapshotDir = storage_path('app/haocode/snapshots');
-        if (!is_dir($snapshotDir)) {
+        if (! is_dir($snapshotDir)) {
             mkdir($snapshotDir, 0755, true);
         }
 
-        $filepath = $snapshotDir . '/' . $filename;
+        $filepath = $snapshotDir.'/'.$filename;
 
         $md = "# Hao Code Snapshot\n\n";
-        $md .= "**Date:** " . date('Y-m-d H:i:s') . "\n";
-        $md .= "**Session:** " . $agent->getSessionManager()->getSessionId() . "\n";
-        $md .= "**Model:** " . app(SettingsManager::class)->getModel() . "\n\n---\n\n";
+        $md .= '**Date:** '.date('Y-m-d H:i:s')."\n";
+        $md .= '**Session:** '.$agent->getSessionManager()->getSessionId()."\n";
+        $md .= '**Model:** '.app(SettingsManager::class)->getModel()."\n\n---\n\n";
 
         foreach ($messages as $msg) {
             $role = $msg['role'] ?? 'unknown';
@@ -910,16 +1094,17 @@ class HaoCodeCommand extends Command
 
     private function handleInit(string $args): void
     {
-        $projectPath = getcwd() . '/.haocode/settings.json';
+        $projectPath = getcwd().'/.haocode/settings.json';
 
         if (file_exists($projectPath) && trim($args) !== '--force') {
             $this->line("<fg=yellow>Settings already exist at:</> <fg=white>{$projectPath}</>");
-            $this->line("<fg=gray>Use /init --force to overwrite.</>");
+            $this->line('<fg=gray>Use /init --force to overwrite.</>');
+
             return;
         }
 
         $dir = dirname($projectPath);
-        if (!is_dir($dir)) {
+        if (! is_dir($dir)) {
             mkdir($dir, 0755, true);
         }
 
@@ -933,7 +1118,7 @@ class HaoCodeCommand extends Command
 
         file_put_contents($projectPath, json_encode($defaults, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
         $this->line("<fg=green>Initialized:</> <fg=white>{$projectPath}</>");
-        $this->line("<fg=gray>Edit this file to customise model, permissions, and system prompt.</>");
+        $this->line('<fg=gray>Edit this file to customise model, permissions, and system prompt.</>');
     }
 
     private function handleVersion(): void
@@ -946,20 +1131,20 @@ class HaoCodeCommand extends Command
         }
 
         $settings = app(SettingsManager::class);
-        $toolCount = count(app(\App\Tools\ToolRegistry::class)->getAllTools());
+        $toolCount = count(app(ToolRegistry::class)->getAllTools());
 
         $this->line("\n  <fg=cyan;bold>Hao Code</> <fg=white>{$version}</>");
-        $this->line("  PHP:     <fg=white>" . PHP_VERSION . "</>");
-        $this->line("  Laravel: <fg=white>" . app()->version() . "</>");
-        $this->line("  Model:   <fg=white>" . $settings->getModel() . "</>");
+        $this->line('  PHP:     <fg=white>'.PHP_VERSION.'</>');
+        $this->line('  Laravel: <fg=white>'.app()->version().'</>');
+        $this->line('  Model:   <fg=white>'.$settings->getModel().'</>');
         $this->line("  Tools:   <fg=white>{$toolCount} registered</>");
-        $this->line("  CWD:     <fg=white>" . getcwd() . "</>\n");
+        $this->line('  CWD:     <fg=white>'.getcwd()."</>\n");
     }
 
     private function handleOutputStyle(string $args): void
     {
-        /** @var \App\Services\OutputStyle\OutputStyleLoader $loader */
-        $loader = app(\App\Services\OutputStyle\OutputStyleLoader::class);
+        /** @var OutputStyleLoader $loader */
+        $loader = app(OutputStyleLoader::class);
         $settings = app(SettingsManager::class);
         $args = trim($args);
 
@@ -967,8 +1152,9 @@ class HaoCodeCommand extends Command
 
         if ($args === '' || $args === 'list') {
             if (empty($styles)) {
-                $this->line("<fg=gray>No output styles found.</>");
-                $this->line("<fg=gray>Create .md files in ~/.haocode/output-styles/ or .haocode/output-styles/</>");
+                $this->line('<fg=gray>No output styles found.</>');
+                $this->line('<fg=gray>Create .md files in ~/.haocode/output-styles/ or .haocode/output-styles/</>');
+
                 return;
             }
             $active = $settings->getOutputStyle();
@@ -978,48 +1164,74 @@ class HaoCodeCommand extends Command
                 $this->line("  {$marker} <fg=yellow>{$slug}</> <fg=gray>{$style['description']}</>");
             }
             $this->line("\n  <fg=gray>Use /output-style <slug> to activate, /output-style off to disable\n</>");
+
             return;
         }
 
         if ($args === 'off' || $args === 'none') {
             $settings->set('output_style', null);
-            $this->line("<fg=gray>Output style disabled.</>");
+            $this->line('<fg=gray>Output style disabled.</>');
+
             return;
         }
 
         if (isset($styles[$args])) {
             $settings->set('output_style', $args);
             $this->line("<fg=green>Output style set to:</> <fg=white>{$styles[$args]['name']}</>");
+
             return;
         }
 
-        $this->line("<fg=red>Unknown style: {$args}</>. Available: " . implode(', ', array_keys($styles)));
+        $this->line("<fg=red>Unknown style: {$args}</>. Available: ".implode(', ', array_keys($styles)));
     }
 
     private function runAgentTurn(AgentLoop $agent, string $input): void
     {
         $this->line('');
+        $streamedOutput = false;
+        $markdownRenderer = app(MarkdownRenderer::class);
+        $markdownOutput = $this->createStreamingMarkdownOutput($markdownRenderer);
+        $turnStatus = $this->createTurnStatusRenderer($input);
+        $previousAlarmHandler = $this->startTurnStatusTicker($turnStatus);
 
         try {
+            $turnStatus->start();
+
             $response = $agent->run(
                 userInput: $input,
-                onTextDelta: function (string $text) {
-                    $this->output->write($text);
+                onTextDelta: function (string $text) use (&$streamedOutput, $turnStatus, $markdownOutput) {
+                    $turnStatus->recordTextDelta($text);
+                    $turnStatus->pause();
+                    $streamedOutput = true;
+                    $markdownOutput->append($text);
                 },
-                onToolStart: function (string $toolName, array $toolInput) {
+                onToolStart: function (string $toolName, array $toolInput) use (&$streamedOutput, $turnStatus, $markdownOutput) {
+                    $turnStatus->pause();
+                    $streamedOutput = true;
+                    $markdownOutput->finalize();
                     $args = $this->summarizeToolInput($toolName, $toolInput);
-                    $this->line("\n  <fg=magenta>⚙ {$toolName}</><fg=gray>({$args})</>");
+                    $this->line("\n".$this->formatter()->toolCall($toolName, $args));
+                    $turnStatus->resume();
                 },
-                onToolComplete: function (string $toolName, $result) {
-                    $status = $result->isError ? '<fg=red>✗</>' : '<fg=green>✓</>';
-                    $this->line(" {$status}");
+                onToolComplete: function (string $toolName, $result) use ($turnStatus) {
+                    $turnStatus->pause();
+                    if ($result->isError) {
+                        $message = trim((string) $result->output);
+                        $this->line($this->formatter()->toolFailure($toolName, $message === '' ? 'Unknown error' : $message));
+                    }
+                    $turnStatus->resume();
                 },
             );
 
+            $turnStatus->pause();
+            $markdownOutput->finalize();
+            if (! $streamedOutput && $response !== '') {
+                $this->line($markdownRenderer->render($response));
+            }
             $this->line("\n");
 
             // Generate session title after the first turn (fire-and-forget best-effort)
-            if (!$this->titleGenerated && $agent->getSessionManager()->getTitle() === null) {
+            if (! $this->titleGenerated && $agent->getSessionManager()->getTitle() === null) {
                 $this->titleGenerated = true;
                 $messages = $agent->getMessageHistory()->getMessagesForApi();
                 $title = app(SessionTitleService::class)->generateTitle($messages);
@@ -1034,7 +1246,7 @@ class HaoCodeCommand extends Command
             $inTokens = $agent->getTotalInputTokens();
             $outTokens = $agent->getTotalOutputTokens();
             $cacheRead = $agent->getCacheReadTokens();
-            $this->line("<fg=gray>  [{$inTokens}in/{$outTokens}out" . ($cacheRead > 0 ? "/{$cacheRead}cache" : '') . " tokens · \${$cost}]</>");
+            $this->line($this->formatter()->usageFooter($inTokens, $outTokens, $cacheRead, $cost));
 
             // Show context window warning if applicable
             $compactor = app(ContextCompactor::class);
@@ -1047,13 +1259,19 @@ class HaoCodeCommand extends Command
                 $this->line("  <fg=yellow>⚠  {$warn['message']}</>");
             }
 
-        } catch (\App\Services\Api\ApiErrorException $e) {
+        } catch (ApiErrorException $e) {
+            $turnStatus->pause();
+            $markdownOutput->finalize();
             $this->line("\n  <fg=red>API Error ({$e->getErrorType()}): {$e->getMessage()}</>\n");
         } catch (\Throwable $e) {
+            $turnStatus->pause();
+            $markdownOutput->finalize();
             $this->line("\n  <fg=red>Error: {$e->getMessage()}</>\n");
             if (config('app.debug')) {
                 $this->line("  <fg=gray>{$e->getFile()}:{$e->getLine()}</>\n");
             }
+        } finally {
+            $this->stopTurnStatusTicker($turnStatus, $previousAlarmHandler);
         }
     }
 
@@ -1061,10 +1279,13 @@ class HaoCodeCommand extends Command
     {
         $args = $this->summarizeToolInput($toolName, $input);
 
-        $this->line("\n  <fg=yellow>⚡ Tool permission required:</> <fg=white>{$toolName}</>(<fg=gray>{$args}</>)");
-        $this->line("  <fg=green>[y]</> Yes (this time)  <fg=green>[a]</> Always for session  <fg=red>[n]</> No");
+        $this->line("\n  <fg=yellow>⚡ Permission required</>  ".$this->formatter()->toolCall($toolName, $args));
+        $this->line('  <fg=green>[y]</> allow once  <fg=green>[a]</> allow for session  <fg=red>[n]</> deny');
 
         $handle = fopen('php://stdin', 'r');
+        if ($handle === false) {
+            return false;
+        }
         $answer = strtolower(trim(fgets($handle)));
         fclose($handle);
 
@@ -1081,7 +1302,7 @@ class HaoCodeCommand extends Command
             'Glob' => $this->truncate($input['pattern'] ?? '', 60),
             'Grep' => $this->truncate($input['pattern'] ?? '', 60),
             'WebFetch' => $this->truncate($input['url'] ?? '', 60),
-            'TodoWrite' => count($input['todos'] ?? []) . ' items',
+            'TodoWrite' => count($input['todos'] ?? []).' items',
             default => $this->truncate(json_encode($input), 60),
         };
     }
@@ -1089,8 +1310,9 @@ class HaoCodeCommand extends Command
     private function truncate(string $str, int $max): string
     {
         if (mb_strlen($str) > $max) {
-            return mb_substr($str, 0, $max - 3) . '...';
+            return mb_substr($str, 0, $max - 3).'...';
         }
+
         return $str;
     }
 
@@ -1104,15 +1326,76 @@ class HaoCodeCommand extends Command
         $msgs = $agent->getMessageHistory()->count();
 
         $this->line("\n  <fg=cyan;bold>Usage:</>");
-        $this->line("  Input tokens:       <fg=white>" . number_format($in) . "</>");
-        $this->line("  Output tokens:      <fg=white>" . number_format($out) . "</>");
+        $this->line('  Input tokens:       <fg=white>'.number_format($in).'</>');
+        $this->line('  Output tokens:      <fg=white>'.number_format($out).'</>');
         if ($cacheWrite > 0) {
-            $this->line("  Cache write tokens: <fg=white>" . number_format($cacheWrite) . "</>");
+            $this->line('  Cache write tokens: <fg=white>'.number_format($cacheWrite).'</>');
         }
         if ($cacheRead > 0) {
-            $this->line("  Cache read tokens:  <fg=white>" . number_format($cacheRead) . "</>");
+            $this->line('  Cache read tokens:  <fg=white>'.number_format($cacheRead).'</>');
         }
         $this->line("  Est. cost:          <fg=white>\${$cost}</>");
         $this->line("  Messages:           <fg=white>{$msgs}</>\n");
+    }
+
+    private function formatter(): ReplFormatter
+    {
+        return $this->replFormatter ??= app(ReplFormatter::class);
+    }
+
+    private function createTurnStatusRenderer(string $input): TurnStatusRenderer
+    {
+        return new TurnStatusRenderer($this->output, $this->formatter(), $input);
+    }
+
+    private function createStreamingMarkdownOutput(?MarkdownRenderer $renderer = null): StreamingMarkdownOutput
+    {
+        return new StreamingMarkdownOutput(
+            output: $this->output,
+            renderer: $renderer ?? app(MarkdownRenderer::class),
+        );
+    }
+
+    private function startTurnStatusTicker(TurnStatusRenderer $turnStatus): mixed
+    {
+        if (! $turnStatus->isEnabled() || ! function_exists('pcntl_signal') || ! function_exists('pcntl_alarm')) {
+            return null;
+        }
+
+        $previousHandler = function_exists('pcntl_signal_get_handler')
+            ? pcntl_signal_get_handler(SIGALRM)
+            : SIG_DFL;
+
+        pcntl_signal(SIGALRM, function () use ($turnStatus) {
+            $turnStatus->tick();
+            pcntl_alarm(1);
+        });
+
+        pcntl_alarm(1);
+
+        return $previousHandler;
+    }
+
+    private function stopTurnStatusTicker(TurnStatusRenderer $turnStatus, mixed $previousHandler): void
+    {
+        $turnStatus->stop();
+
+        if (! function_exists('pcntl_signal') || ! function_exists('pcntl_alarm')) {
+            return;
+        }
+
+        pcntl_alarm(0);
+
+        if ($previousHandler === null) {
+            return;
+        }
+
+        if (is_callable($previousHandler) || in_array($previousHandler, [SIG_DFL, SIG_IGN], true)) {
+            pcntl_signal(SIGALRM, $previousHandler);
+
+            return;
+        }
+
+        pcntl_signal(SIGALRM, SIG_DFL);
     }
 }
