@@ -6,6 +6,10 @@ use App\Services\Permissions\PermissionMode;
 
 class SettingsManager
 {
+    private const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
+    private const DEFAULT_BASE_URL = 'https://api.anthropic.com';
+    private const DEFAULT_MAX_TOKENS = 16384;
+
     private const DEFAULT_STATUSLINE = [
         'enabled' => true,
         'layout' => 'expanded',
@@ -21,23 +25,30 @@ class SettingsManager
     public function getApiKey(): string
     {
         $settings = $this->loadProjectSettings();
-        $apiKey = $settings['api_key']
+        $providerConfig = $this->getProviderConfig();
+        $apiKey = $providerConfig['api_key']
+            ?? $settings['api_key']
             ?? config('haocode.api_key')
             ?: getenv('ANTHROPIC_API_KEY')
             ?: '';
 
-        return is_string($apiKey) ? $apiKey : '';
+        return is_string($apiKey) ? trim($apiKey) : '';
     }
 
     public function getModel(): string
     {
         $settings = $this->loadProjectSettings();
-        $model = $this->runtimeOverrides['model']
-            ?? $settings['model']
-            ?? config('haocode.model', 'claude-sonnet-4-20250514');
+        $runtimeModel = $this->resolveModelOverride($this->runtimeOverrides['model'] ?? null, $settings);
+        $providerConfig = $this->getProviderConfig();
+        $settingsModel = $this->resolveModelOverride($settings['model'] ?? null, $settings);
+
+        $model = $runtimeModel
+            ?? $providerConfig['model']
+            ?? $settingsModel
+            ?? config('haocode.model', self::DEFAULT_MODEL);
 
         if (! is_string($model) || trim($model) === '') {
-            $model = 'claude-sonnet-4-20250514';
+            $model = self::DEFAULT_MODEL;
         }
 
         // Kimi's Anthropic-compatible coding endpoint expects its own model name.
@@ -52,22 +63,84 @@ class SettingsManager
     {
         $settings = $this->loadProjectSettings();
         $baseUrl = $this->runtimeOverrides['api_base_url']
+            ?? $this->getProviderConfig()['api_base_url']
             ?? $settings['api_base_url']
-            ?? config('haocode.api_base_url', 'https://api.anthropic.com');
+            ?? config('haocode.api_base_url', self::DEFAULT_BASE_URL);
 
         return is_string($baseUrl) && trim($baseUrl) !== ''
             ? $baseUrl
-            : 'https://api.anthropic.com';
+            : self::DEFAULT_BASE_URL;
     }
 
     public function getMaxTokens(): int
     {
         $settings = $this->loadProjectSettings();
         $maxTokens = $this->runtimeOverrides['max_tokens']
+            ?? $this->getProviderConfig()['max_tokens']
             ?? $settings['max_tokens']
-            ?? config('haocode.max_tokens', 16384);
+            ?? config('haocode.max_tokens', self::DEFAULT_MAX_TOKENS);
 
-        return is_numeric($maxTokens) ? (int) $maxTokens : 16384;
+        return is_numeric($maxTokens) ? (int) $maxTokens : self::DEFAULT_MAX_TOKENS;
+    }
+
+    public function getActiveProviderName(): ?string
+    {
+        return $this->resolveSelectedProviderName($this->loadProjectSettings());
+    }
+
+    /**
+     * @return array<string, array{api_key: string|null, api_base_url: string|null, model: string|null, max_tokens: int|null}>
+     */
+    public function getConfiguredProviders(): array
+    {
+        $settings = $this->loadProjectSettings();
+        $providers = $this->configuredProvidersFromSettings($settings);
+        $normalized = [];
+
+        foreach ($providers as $name => $provider) {
+            $normalized[$name] = $this->normalizeProviderConfig($name, $provider);
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * @return array{api_key: string|null, api_base_url: string|null, model: string|null, max_tokens: int|null}|null
+     */
+    public function getProviderConfig(?string $name = null): ?array
+    {
+        $providers = $this->getConfiguredProviders();
+        $selected = $name !== null ? $this->normalizeProviderName($name) : $this->getActiveProviderName();
+
+        if ($selected === null || ! array_key_exists($selected, $providers)) {
+            return null;
+        }
+
+        return $providers[$selected];
+    }
+
+    public function getResolvedModelIdentifier(): string
+    {
+        $settings = $this->loadProjectSettings();
+        $provider = $this->getActiveProviderName();
+        $runtimeModel = $this->runtimeOverrides['model'] ?? null;
+        $settingsModel = $settings['model'] ?? null;
+        $runtimeSelection = $this->parseQualifiedModel($runtimeModel, $settings);
+        $settingsSelection = $this->parseQualifiedModel($settingsModel, $settings);
+
+        if ($runtimeSelection['provider'] === null && is_string($runtimeModel) && trim($runtimeModel) !== '' && str_contains($runtimeModel, '/')) {
+            return trim($runtimeModel);
+        }
+
+        if ($provider !== null) {
+            return $provider.'/'.$this->getModel();
+        }
+
+        if ($settingsSelection['provider'] === null && is_string($settingsModel) && trim($settingsModel) !== '' && str_contains($settingsModel, '/')) {
+            return trim($settingsModel);
+        }
+
+        return $this->getModel();
     }
 
     public function getPermissionMode(): PermissionMode
@@ -279,6 +352,7 @@ class SettingsManager
     {
         $allowedKeys = [
             'model',
+            'active_provider',
             'api_base_url',
             'max_tokens',
             'permission_mode',
@@ -359,6 +433,9 @@ class SettingsManager
 
         return [
             'model' => $this->getModel(),
+            'model_identifier' => $this->getResolvedModelIdentifier(),
+            'active_provider' => $this->getActiveProviderName(),
+            'configured_providers' => array_keys($this->getConfiguredProviders()),
             'api_base_url' => $this->getBaseUrl(),
             'max_tokens' => $this->getMaxTokens(),
             'permission_mode' => $this->getPermissionMode()->value,
@@ -402,26 +479,23 @@ class SettingsManager
             return $this->cachedSettings;
         }
 
-        $this->cachedSettings = [];
-        $globalPerms = [];
-
         $globalPath = config('haocode.global_settings_path')
             ?? ($_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir()) . '/.haocode/settings.json';
-
-        if (file_exists($globalPath)) {
-            $global = json_decode(file_get_contents($globalPath), true) ?: [];
-            $globalPerms = $global['permissions'] ?? [];
-            unset($global['permissions']);
-            $this->cachedSettings = array_merge($this->cachedSettings, $global);
-        }
-
-        $projectPerms = [];
         $projectPath = getcwd() . '/.haocode/settings.json';
-        if (file_exists($projectPath)) {
-            $project = json_decode(file_get_contents($projectPath), true) ?: [];
-            $projectPerms = $project['permissions'] ?? [];
-            unset($project['permissions']);
-            $this->cachedSettings = array_merge($this->cachedSettings, $project);
+        $global = $this->loadSettingsFile($globalPath);
+        $project = $this->loadSettingsFile($projectPath);
+
+        $globalPerms = is_array($global['permissions'] ?? null) ? $global['permissions'] : [];
+        $projectPerms = is_array($project['permissions'] ?? null) ? $project['permissions'] : [];
+
+        unset($global['permissions'], $project['permissions']);
+
+        $this->cachedSettings = array_merge($global, $project);
+
+        $providers = $this->mergeProviderMaps($global, $project);
+        unset($this->cachedSettings['providers']);
+        if ($providers !== []) {
+            $this->cachedSettings['provider'] = $providers;
         }
 
         // Permissions accumulate across both files — project rules ADD to global rules
@@ -432,6 +506,217 @@ class SettingsManager
         ];
 
         return $this->cachedSettings;
+    }
+
+    private function loadSettingsFile(string $path): array
+    {
+        if (! file_exists($path)) {
+            return [];
+        }
+
+        $decoded = json_decode((string) file_get_contents($path), true);
+
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    private function resolveSelectedProviderName(array $settings): ?string
+    {
+        $providers = $this->configuredProvidersFromSettings($settings);
+        if ($providers === []) {
+            return null;
+        }
+
+        $runtimeSelection = $this->parseQualifiedModel($this->runtimeOverrides['model'] ?? null, $settings);
+        if ($runtimeSelection['provider'] !== null) {
+            return $runtimeSelection['provider'];
+        }
+
+        if (array_key_exists('active_provider', $this->runtimeOverrides)) {
+            $runtimeProvider = $this->normalizeProviderName($this->runtimeOverrides['active_provider']);
+            if ($runtimeProvider !== null && array_key_exists($runtimeProvider, $providers)) {
+                return $runtimeProvider;
+            }
+        } else {
+            $settingsProvider = $this->normalizeProviderName(
+                $settings['active_provider']
+                    ?? config('haocode.active_provider')
+                    ?? null,
+            );
+            if ($settingsProvider !== null && array_key_exists($settingsProvider, $providers)) {
+                return $settingsProvider;
+            }
+        }
+
+        $settingsSelection = $this->parseQualifiedModel($settings['model'] ?? null, $settings);
+        if ($settingsSelection['provider'] !== null) {
+            return $settingsSelection['provider'];
+        }
+
+        if (! $this->hasLegacyTopLevelConfig($settings)) {
+            return array_key_first($providers);
+        }
+
+        return null;
+    }
+
+    private function resolveModelOverride(mixed $value, array $settings): ?string
+    {
+        $selection = $this->parseQualifiedModel($value, $settings);
+
+        return $selection['model'];
+    }
+
+    /**
+     * @return array{provider: string|null, model: string|null}
+     */
+    private function parseQualifiedModel(mixed $value, array $settings): array
+    {
+        if (! is_string($value) || trim($value) === '') {
+            return ['provider' => null, 'model' => null];
+        }
+
+        $model = trim($value);
+        if (! str_contains($model, '/')) {
+            return ['provider' => null, 'model' => $model];
+        }
+
+        [$candidateProvider, $candidateModel] = explode('/', $model, 2);
+        $candidateProvider = $this->normalizeProviderName($candidateProvider);
+        $candidateModel = trim($candidateModel);
+
+        if ($candidateProvider !== null
+            && $candidateModel !== ''
+            && array_key_exists($candidateProvider, $this->configuredProvidersFromSettings($settings))) {
+            return ['provider' => $candidateProvider, 'model' => $candidateModel];
+        }
+
+        return ['provider' => null, 'model' => $model];
+    }
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    private function configuredProvidersFromSettings(array $settings): array
+    {
+        $providers = [];
+
+        foreach (['provider', 'providers'] as $key) {
+            $raw = $settings[$key] ?? null;
+            if (! is_array($raw)) {
+                continue;
+            }
+
+            foreach ($raw as $name => $provider) {
+                $normalizedName = $this->normalizeProviderName($name);
+                if ($normalizedName === null || ! is_array($provider)) {
+                    continue;
+                }
+
+                $providers[$normalizedName] = $provider;
+            }
+        }
+
+        return $providers;
+    }
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    private function mergeProviderMaps(array $global, array $project): array
+    {
+        return array_replace_recursive(
+            $this->configuredProvidersFromSettings($global),
+            $this->configuredProvidersFromSettings($project),
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $provider
+     * @return array{api_key: string|null, api_base_url: string|null, model: string|null, max_tokens: int|null}
+     */
+    private function normalizeProviderConfig(string $name, array $provider): array
+    {
+        $options = is_array($provider['options'] ?? null) ? $provider['options'] : [];
+
+        return [
+            'api_key' => $this->firstNonEmptyString(
+                $provider['api_key'] ?? null,
+                $provider['apiKey'] ?? null,
+                $options['apiKey'] ?? null,
+                $options['api_key'] ?? null,
+            ),
+            'api_base_url' => $this->firstNonEmptyString(
+                $provider['api_base_url'] ?? null,
+                $provider['apiBaseUrl'] ?? null,
+                $provider['base_url'] ?? null,
+                $provider['baseURL'] ?? null,
+                $options['baseURL'] ?? null,
+                $options['base_url'] ?? null,
+                $options['apiBaseUrl'] ?? null,
+            ),
+            'model' => $this->firstNonEmptyString(
+                $provider['model'] ?? null,
+                $provider['default_model'] ?? null,
+                $provider['defaultModel'] ?? null,
+            ),
+            'max_tokens' => $this->firstNumericValue(
+                $provider['max_tokens'] ?? null,
+                $provider['maxTokens'] ?? null,
+                $options['maxTokens'] ?? null,
+                $options['max_tokens'] ?? null,
+            ),
+        ];
+    }
+
+    private function hasLegacyTopLevelConfig(array $settings): bool
+    {
+        $model = $this->parseQualifiedModel($settings['model'] ?? null, $settings);
+
+        return $this->firstNonEmptyString($settings['api_key'] ?? null) !== null
+            || $this->firstNonEmptyString($settings['api_base_url'] ?? null) !== null
+            || ($model['provider'] === null && $model['model'] !== null);
+    }
+
+    private function normalizeProviderName(mixed $value): ?string
+    {
+        if (! is_string($value)) {
+            return null;
+        }
+
+        $normalized = trim($value);
+
+        return $normalized !== '' ? $normalized : null;
+    }
+
+    private function firstNonEmptyString(mixed ...$values): ?string
+    {
+        foreach ($values as $value) {
+            if (! is_string($value)) {
+                continue;
+            }
+
+            $normalized = trim($value);
+            if ($normalized !== '') {
+                return $normalized;
+            }
+        }
+
+        return null;
+    }
+
+    private function firstNumericValue(mixed ...$values): ?int
+    {
+        foreach ($values as $value) {
+            if (is_int($value)) {
+                return $value;
+            }
+
+            if (is_numeric($value)) {
+                return (int) $value;
+            }
+        }
+
+        return null;
     }
 
     /**

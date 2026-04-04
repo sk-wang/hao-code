@@ -97,6 +97,8 @@ Launch Hao Code from any directory:
 hao-code
 ```
 
+When installed globally, runtime files are stored under `~/.haocode/` (`storage/` for logs, history, and sessions; `bootstrap/cache/` for Laravel cache files).
+
 ### Local development
 
 ```bash
@@ -266,6 +268,7 @@ See [CLAUDE_CODE_PARITY.md](CLAUDE_CODE_PARITY.md) for the parity audit against 
 - `/context`
 - `/cost`
 - `/model [name]`
+- `/provider [list|use|clear]`
 - `/fast`
 - `/theme`
 - `/output-style`
@@ -371,11 +374,39 @@ Example global settings:
 }
 ```
 
+Example multi-provider settings:
+
+```json
+{
+  "active_provider": "zai",
+  "provider": {
+    "anthropic": {
+      "api_key": "sk-ant-...",
+      "api_base_url": "https://api.anthropic.com",
+      "model": "claude-sonnet-4-20250514"
+    },
+    "zai": {
+      "api_key": "your-zai-key",
+      "api_base_url": "https://api.z.ai/api/anthropic",
+      "model": "glm-5.1",
+      "max_tokens": 8192
+    }
+  }
+}
+```
+
+Notes:
+
+- `model` also supports `provider/model` format, for example `zai/glm-5.1`.
+- Use `/provider` in the REPL to inspect or switch providers for the current session.
+- Legacy flat keys like `api_key` and `api_base_url` still work.
+
 ### Common environment variables
 
 ```env
 ANTHROPIC_API_KEY=sk-ant-...
 HAOCODE_MODEL=claude-sonnet-4-20250514
+HAOCODE_ACTIVE_PROVIDER=
 HAOCODE_MAX_TOKENS=16384
 HAOCODE_PERMISSION_MODE=default
 HAOCODE_API_BASE_URL=https://api.anthropic.com

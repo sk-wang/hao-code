@@ -38,6 +38,11 @@ class ConfigToolTest extends TestCase
         $this->assertNull($this->validateValue('model', 'some-random-model'));
     }
 
+    public function test_validate_active_provider_accepts_any_string(): void
+    {
+        $this->assertNull($this->validateValue('active_provider', 'zai'));
+    }
+
     // api_base_url: must be a valid URL
     public function test_validate_api_base_url_accepts_valid_url(): void
     {
@@ -188,6 +193,57 @@ class ConfigToolTest extends TestCase
 
         $this->assertFalse($result->isError);
         $this->assertStringContainsString('Set model', $result->output);
+    }
+
+    public function test_call_set_active_provider_calls_settings_set(): void
+    {
+        $settings = $this->createMock(SettingsManager::class);
+        $settings->expects($this->once())
+            ->method('getConfiguredProviders')
+            ->willReturn([
+                'zai' => ['model' => 'glm-5.1'],
+            ]);
+        $settings->expects($this->once())
+            ->method('set')
+            ->with('active_provider', 'zai');
+        $tool = $this->makeToolWithSettings($settings);
+
+        $result = $tool->call(['key' => 'active_provider', 'value' => 'zai'], $this->context);
+
+        $this->assertFalse($result->isError);
+        $this->assertStringContainsString('Set active_provider = zai', $result->output);
+    }
+
+    public function test_call_set_active_provider_rejects_unknown_provider(): void
+    {
+        $settings = $this->createMock(SettingsManager::class);
+        $settings->expects($this->once())
+            ->method('getConfiguredProviders')
+            ->willReturn([
+                'anthropic' => ['model' => 'claude-sonnet-4-20250514'],
+            ]);
+        $settings->expects($this->never())->method('set');
+        $tool = $this->makeToolWithSettings($settings);
+
+        $result = $tool->call(['key' => 'active_provider', 'value' => 'zai'], $this->context);
+
+        $this->assertTrue($result->isError);
+        $this->assertStringContainsString('Unknown provider', $result->output);
+    }
+
+    public function test_call_setting_active_provider_off_stores_null(): void
+    {
+        $settings = $this->createMock(SettingsManager::class);
+        $settings->expects($this->never())->method('getConfiguredProviders');
+        $settings->expects($this->once())
+            ->method('set')
+            ->with('active_provider', null);
+        $tool = $this->makeToolWithSettings($settings);
+
+        $result = $tool->call(['key' => 'active_provider', 'value' => 'off'], $this->context);
+
+        $this->assertFalse($result->isError);
+        $this->assertStringContainsString('Set active_provider = off', $result->output);
     }
 
     public function test_call_set_invalid_value_returns_error(): void

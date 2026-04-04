@@ -23,6 +23,7 @@ final class SlashCommandCatalog
             ['name' => 'files', 'aliases' => [], 'description' => 'list files currently in context'],
             ['name' => 'mcp', 'aliases' => [], 'description' => 'manage MCP server configs', 'help' => 'manage MCP servers (/mcp list|add|show|enable|disable|remove)'],
             ['name' => 'model', 'aliases' => [], 'description' => 'show or set current model'],
+            ['name' => 'provider', 'aliases' => [], 'description' => 'show or switch API provider', 'help' => 'show or switch API provider (/provider list|use|clear)'],
             ['name' => 'plan', 'aliases' => [], 'description' => 'enable plan mode or run a planning prompt', 'help' => 'enable plan mode or run a planning prompt (/plan off to exit)'],
             ['name' => 'review', 'aliases' => [], 'description' => 'review current branch or a PR'],
             ['name' => 'status', 'aliases' => [], 'description' => 'show session status'],

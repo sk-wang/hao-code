@@ -18,7 +18,7 @@ class ConfigTool extends BaseTool
     public function description(): string
     {
         return <<<DESC
-Get or set runtime configuration values. Supported keys: model, api_base_url, max_tokens, permission_mode, theme, output_style.
+Get or set runtime configuration values. Supported keys: model, active_provider, api_base_url, max_tokens, permission_mode, theme, output_style.
 
 Usage:
 - To get all settings: call with no arguments
@@ -37,7 +37,7 @@ DESC;
                 'key' => [
                     'type' => 'string',
                     'description' => 'The config key to get or set',
-                    'enum' => ['model', 'api_base_url', 'max_tokens', 'permission_mode', 'theme', 'output_style'],
+                    'enum' => ['model', 'active_provider', 'api_base_url', 'max_tokens', 'permission_mode', 'theme', 'output_style'],
                 ],
                 'value' => [
                     'type' => ['string', 'null'],
@@ -45,7 +45,7 @@ DESC;
                 ],
             ],
         ], [
-            'key' => 'nullable|string|in:model,api_base_url,max_tokens,permission_mode,theme,output_style',
+            'key' => 'nullable|string|in:model,active_provider,api_base_url,max_tokens,permission_mode,theme,output_style',
             'value' => 'nullable|string',
         ]);
     }
@@ -74,6 +74,27 @@ DESC;
             return ToolResult::success("{$key} = ".$this->displayValue($current));
         }
 
+        if ($key === 'active_provider') {
+            $normalizedValue = is_string($value) && in_array(strtolower(trim($value)), ['off', 'none', 'clear'], true)
+                ? null
+                : trim((string) $value);
+
+            if ($normalizedValue !== null) {
+                $providers = array_keys($settings->getConfiguredProviders());
+                if ($providers === []) {
+                    return ToolResult::error('No providers are configured. Add a "provider" object to your settings.json first.');
+                }
+
+                if (! in_array($normalizedValue, $providers, true)) {
+                    return ToolResult::error('Unknown provider: '.$normalizedValue.'. Available: '.implode(', ', $providers));
+                }
+            }
+
+            $settings->set('active_provider', $normalizedValue);
+
+            return ToolResult::success('Set active_provider = '.$this->displayValue($normalizedValue));
+        }
+
         // Validate and set
         $error = $this->validateValue($key, $value);
         if ($error !== null) {
@@ -94,6 +115,7 @@ DESC;
     {
         return match ($key) {
             'model' => null, // Accept any model string
+            'active_provider' => null,
             'api_base_url' => filter_var($value, FILTER_VALIDATE_URL) ? null : "Invalid URL: {$value}",
             'max_tokens' => is_numeric($value) && (int) $value > 0 ? null : "max_tokens must be a positive integer",
             'permission_mode' => in_array($value, ['default', 'plan', 'accept_edits', 'bypass_permissions'])

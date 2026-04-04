@@ -2,6 +2,7 @@
 
 namespace App\Services\Session;
 
+use App\Services\Settings\SettingsManager;
 use Symfony\Component\HttpClient\HttpClient;
 
 /**
@@ -32,6 +33,7 @@ PROMPT;
     public function __construct(
         private readonly string $apiKey,
         private readonly string $baseUrl = 'https://api.anthropic.com',
+        private readonly ?SettingsManager $settingsManager = null,
     ) {}
 
     /**
@@ -109,10 +111,11 @@ PROMPT;
         }
 
         $client = HttpClient::create(['timeout' => 15]);
+        $baseUrl = rtrim($this->resolveBaseUrl(), '/');
 
-        $response = $client->request('POST', $this->baseUrl . '/v1/messages', [
+        $response = $client->request('POST', $baseUrl . '/v1/messages', [
             'headers' => [
-                'x-api-key' => $this->apiKey,
+                'x-api-key' => $this->resolveApiKey(),
                 'anthropic-version' => '2023-06-01',
                 'content-type' => 'application/json',
             ],
@@ -139,7 +142,7 @@ PROMPT;
 
     private function isKimiCodingEndpoint(): bool
     {
-        return str_contains(strtolower($this->baseUrl), 'api.kimi.com/coding');
+        return str_contains(strtolower($this->resolveBaseUrl()), 'api.kimi.com/coding');
     }
 
     private function resolveModel(): string
@@ -147,6 +150,16 @@ PROMPT;
         return $this->isKimiCodingEndpoint()
             ? 'kimi-for-coding'
             : self::HAIKU_MODEL;
+    }
+
+    private function resolveApiKey(): string
+    {
+        return $this->settingsManager?->getApiKey() ?: $this->apiKey;
+    }
+
+    private function resolveBaseUrl(): string
+    {
+        return $this->settingsManager?->getBaseUrl() ?: $this->baseUrl;
     }
 
     private function buildLocalSummary(array $entries): ?string

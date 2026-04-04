@@ -37,6 +37,7 @@ class StreamingClient
         if ($this->settingsManager) {
             return $this->settingsManager->getModel() ?? $this->model;
         }
+
         return $this->model;
     }
 
@@ -48,7 +49,32 @@ class StreamingClient
         if ($this->settingsManager) {
             return (int) ($this->settingsManager->getMaxTokens() ?? $this->maxTokens);
         }
+
         return $this->maxTokens;
+    }
+
+    /**
+     * Resolve API key from settings if available.
+     */
+    private function resolveApiKey(): string
+    {
+        if ($this->settingsManager) {
+            return $this->settingsManager->getApiKey() ?: $this->apiKey;
+        }
+
+        return $this->apiKey;
+    }
+
+    /**
+     * Resolve base URL from settings if available.
+     */
+    private function resolveBaseUrl(): string
+    {
+        if ($this->settingsManager) {
+            return $this->settingsManager->getBaseUrl() ?: $this->baseUrl;
+        }
+
+        return $this->baseUrl;
     }
 
     /**
@@ -109,6 +135,7 @@ class StreamingClient
         ?callable $onRawEvent,
         ?callable $shouldAbort,
     ): \Generator {
+        $baseUrl = $this->resolveBaseUrl();
         $payload = [
             'model' => $this->resolveModel(),
             'max_tokens' => $this->resolveMaxTokens(),
@@ -135,16 +162,16 @@ class StreamingClient
             $payload['tools'] = $toolsWithCache;
         }
 
-        $response = $this->httpClient->request('POST', rtrim($this->baseUrl, '/') . '/v1/messages', [
+        $response = $this->httpClient->request('POST', rtrim($baseUrl, '/') . '/v1/messages', [
             'headers' => [
-                'x-api-key' => $this->apiKey,
+                'x-api-key' => $this->resolveApiKey(),
                 'anthropic-version' => $this->apiVersion,
                 'content-type' => 'application/json',
                 'accept' => 'text/event-stream',
             ],
             'body' => $this->encodePayload($payload),
             'buffer' => false,
-            'http_version' => $this->preferredHttpVersion(),
+            'http_version' => $this->preferredHttpVersion($baseUrl),
             'verify_peer' => true,
             'verify_host' => true,
         ]);
@@ -385,9 +412,9 @@ class StreamingClient
         throw new ApiErrorException($message, $errorType, $statusCode);
     }
 
-    private function preferredHttpVersion(): ?string
+    private function preferredHttpVersion(?string $baseUrl = null): ?string
     {
-        $host = (string) parse_url($this->baseUrl, PHP_URL_HOST);
+        $host = (string) parse_url($baseUrl ?? $this->resolveBaseUrl(), PHP_URL_HOST);
 
         if ($host === 'api.kimi.com') {
             return '1.1';

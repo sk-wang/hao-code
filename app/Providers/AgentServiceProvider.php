@@ -42,6 +42,7 @@ class AgentServiceProvider extends ServiceProvider
             return new SessionTitleService(
                 apiKey: $settings->getApiKey(),
                 baseUrl: $settings->getBaseUrl(),
+                settingsManager: $settings,
             );
         });
 
@@ -50,6 +51,7 @@ class AgentServiceProvider extends ServiceProvider
             return new AwaySummaryService(
                 apiKey: $settings->getApiKey(),
                 baseUrl: $settings->getBaseUrl(),
+                settingsManager: $settings,
             );
         });
         $this->app->singleton(DenialTracker::class);

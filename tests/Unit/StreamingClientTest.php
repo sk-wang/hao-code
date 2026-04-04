@@ -633,6 +633,45 @@ class StreamingClientTest extends TestCase
         $this->assertSame(32768, $decoded['max_tokens']);
     }
 
+    public function test_api_key_and_base_url_resolved_from_settings(): void
+    {
+        $capturedUrl = null;
+        $capturedHeaders = null;
+
+        $httpClient = new MockHttpClient(function (string $method, string $url, array $options) use (&$capturedUrl, &$capturedHeaders) {
+            $capturedUrl = $url;
+            $capturedHeaders = $options['headers'] ?? [];
+
+            return new MockResponse([
+                "event: message_stop\n",
+                "data: {}\n\n",
+            ], ['http_code' => 200]);
+        });
+
+        $settings = $this->createMock(\App\Services\Settings\SettingsManager::class);
+        $settings->method('getModel')->willReturn('glm-5.1');
+        $settings->method('getMaxTokens')->willReturn(16384);
+        $settings->method('getApiKey')->willReturn('dynamic-key');
+        $settings->method('getBaseUrl')->willReturn('https://api.z.ai/api/anthropic');
+
+        $client = new StreamingClient(
+            apiKey: 'fallback-key',
+            model: 'claude-sonnet-4-20250514',
+            baseUrl: 'https://api.anthropic.com',
+            httpClient: $httpClient,
+            settingsManager: $settings,
+        );
+
+        iterator_to_array($client->streamMessages(
+            systemPrompt: [],
+            messages: [['role' => 'user', 'content' => 'hello']],
+            tools: [],
+        ));
+
+        $this->assertSame('https://api.z.ai/api/anthropic/v1/messages', $capturedUrl);
+        $this->assertContains('x-api-key: dynamic-key', $capturedHeaders);
+    }
+
     // ─── cache_control on tools ───────────────────────────────────────────
 
     public function test_cache_control_added_to_last_tool(): void

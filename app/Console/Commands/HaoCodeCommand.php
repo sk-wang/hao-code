@@ -702,6 +702,7 @@ class HaoCodeCommand extends Command
             'compact' => $this->handleCompact($agent),
             'config' => $this->handleConfig($args),
             'model' => $this->handleModel($args),
+            'provider' => $this->handleProvider($args),
             'cost' => $this->printUsageStats($agent),
             'hooks' => $this->handleHooks(),
             'files' => $this->handleFiles($agent),
@@ -790,16 +791,18 @@ class HaoCodeCommand extends Command
         if ($args === '' || in_array(strtolower($args), ['list', 'ls'], true)) {
             $all = $settings->all();
             $lines = [
-                $this->formatter()->keyValue('Model', $this->formatSettingValue($all['model'] ?? null)),
+                $this->formatter()->keyValue('Model', $this->formatSettingValue($all['model_identifier'] ?? $all['model'] ?? null)),
+                $this->formatter()->keyValue('Provider', $this->formatSettingValue($all['active_provider'] ?? null)),
                 $this->formatter()->keyValue('Permission mode', $this->formatSettingValue($all['permission_mode'] ?? null)),
                 $this->formatter()->keyValue('Theme', $this->formatSettingValue($all['theme'] ?? null)),
                 $this->formatter()->keyValue('Output style', $this->formatSettingValue($all['output_style'] ?? null)),
                 $this->formatter()->keyValue('API base URL', $this->formatSettingValue($all['api_base_url'] ?? null), 'gray', 'gray'),
                 $this->formatter()->keyValue('Max tokens', $this->formatSettingValue($all['max_tokens'] ?? null), 'gray', 'gray'),
                 $this->formatter()->keyValue('API key', ! empty($all['api_key_set']) ? 'configured' : 'missing', 'gray', 'gray'),
+                $this->formatter()->keyValue('Configured providers', $this->formatSettingValue($all['configured_providers'] ?? []), 'gray', 'gray'),
                 '',
                 '<fg=gray>Use /config &lt;key&gt; to inspect or /config &lt;key&gt; &lt;value&gt; to change.</>',
-                '<fg=gray>Keys: model, permission_mode, theme, output_style, api_base_url, max_tokens</>',
+                '<fg=gray>Keys: model, active_provider, permission_mode, theme, output_style, api_base_url, max_tokens</>',
             ];
 
             $this->renderPanel('Runtime config', $lines);
@@ -813,7 +816,7 @@ class HaoCodeCommand extends Command
         if (in_array($verb, ['get', 'show'], true)) {
             $key = $this->normalizeConfigKey($parts[1] ?? '');
             if ($key === null) {
-                $this->line('<fg=red>Unknown config key.</> Supported keys: model, permission_mode, theme, output_style, api_base_url, max_tokens');
+                $this->line('<fg=red>Unknown config key.</> Supported keys: model, active_provider, permission_mode, theme, output_style, api_base_url, max_tokens');
 
                 return;
             }
@@ -833,7 +836,7 @@ class HaoCodeCommand extends Command
         }
 
         if ($key === null) {
-            $this->line('<fg=red>Unknown config key.</> Supported keys: model, permission_mode, theme, output_style, api_base_url, max_tokens');
+            $this->line('<fg=red>Unknown config key.</> Supported keys: model, active_provider, permission_mode, theme, output_style, api_base_url, max_tokens');
 
             return;
         }
@@ -845,9 +848,10 @@ class HaoCodeCommand extends Command
             return;
         }
 
-        $normalizedValue = in_array($key, ['output_style'], true) && in_array(strtolower(trim($value)), ['off', 'none'], true)
-            ? null
-            : trim($value);
+        $normalizedValue = trim($value);
+        if (in_array($key, ['output_style', 'active_provider'], true) && in_array(strtolower($normalizedValue), ['off', 'none', 'clear'], true)) {
+            $normalizedValue = null;
+        }
 
         if ($key === 'permission_mode' && $normalizedValue === PermissionMode::Plan->value) {
             $this->previousPermissionMode ??= $settings->getPermissionMode()->value;
@@ -1470,11 +1474,12 @@ class HaoCodeCommand extends Command
     {
         $settings = app(SettingsManager::class);
         $args = trim($args);
+        $available = $this->availableModelChoices($settings);
 
         if ($args === '') {
-            $available = SettingsManager::getAvailableModels();
             $lines = [
-                $this->formatter()->keyValue('Current', $settings->getModel()),
+                $this->formatter()->keyValue('Current', $settings->getResolvedModelIdentifier()),
+                $this->formatter()->keyValue('Provider', $this->formatSettingValue($settings->getActiveProviderName()), 'gray', 'gray'),
                 ...array_map(
                     fn (string $model): string => $this->formatter()->keyValue('Model', $model, 'gray', 'gray'),
                     $available,
@@ -1485,14 +1490,103 @@ class HaoCodeCommand extends Command
             return;
         }
 
-        $available = SettingsManager::getAvailableModels();
-        if (in_array($args, $available)) {
-            $settings->set('model', $args);
-            $this->line("<fg=green>Model set to:</> <fg=white>{$args}</>");
-        } else {
-            $this->line("<fg=red>Unknown model: {$args}</>");
-            $this->line('<fg=gray>Available: '.implode(', ', $available).'</>');
+        $settings->set('model', $args);
+
+        if (in_array($args, $available, true)) {
+            $this->line('<fg=green>Model set to:</> <fg=white>'.$settings->getResolvedModelIdentifier().'</>');
+
+            return;
         }
+
+        $this->line("<fg=green>Model override set to:</> <fg=white>{$args}</>");
+        if ($available !== []) {
+            $this->line('<fg=gray>Known choices: '.implode(', ', $available).'</>');
+        }
+    }
+
+    private function handleProvider(string $args = ''): void
+    {
+        $settings = app(SettingsManager::class);
+        $providers = $settings->getConfiguredProviders();
+        $tokens = $this->tokenizeArguments($args);
+        $subcommand = strtolower($tokens[0] ?? 'list');
+
+        if ($providers === []) {
+            $paths = array_map(
+                fn (array $entry): string => '<fg=gray>'.$entry['path'].'</>',
+                $this->configuredSettingsPaths(),
+            );
+
+            $this->renderPanel('Providers', [
+                '<fg=gray>No providers configured.</>',
+                '<fg=gray>Add a "provider" object to one of these files:</>',
+                ...$paths,
+                '<fg=gray>Example: {"active_provider":"zai","provider":{"zai":{"api_key":"...","api_base_url":"https://api.z.ai/api/anthropic","model":"glm-5.1"}}}</>',
+            ]);
+
+            return;
+        }
+
+        if (count($tokens) === 1 && array_key_exists($subcommand, $providers)) {
+            $tokens = ['use', $subcommand];
+            $subcommand = 'use';
+        }
+
+        if (in_array($subcommand, ['list', 'ls', 'show'], true)) {
+            $current = $settings->getActiveProviderName();
+            $lines = [
+                $this->formatter()->keyValue('Current', $this->formatSettingValue($current)),
+            ];
+
+            foreach ($providers as $name => $provider) {
+                $marker = $name === $current ? '<fg=green>✓</>' : '<fg=gray>·</>';
+                $lines[] = "{$marker} <fg=yellow>{$name}</>";
+                $lines[] = $this->formatter()->keyValue('Model', $this->formatSettingValue($provider['model'] ?? null), 'gray', 'gray');
+                $lines[] = $this->formatter()->keyValue('Base URL', $this->formatSettingValue($provider['api_base_url'] ?? null), 'gray', 'gray');
+                $lines[] = $this->formatter()->keyValue('API key', ! empty($provider['api_key']) ? 'configured' : 'missing', 'gray', 'gray');
+                if ($name !== array_key_last($providers)) {
+                    $lines[] = '';
+                }
+            }
+
+            $lines[] = '';
+            $lines[] = '<fg=gray>Use /provider use &lt;name&gt; to switch for this session.</>';
+            $lines[] = '<fg=gray>Use /provider clear to fall back to default resolution.</>';
+
+            $this->renderPanel('Providers', $lines);
+
+            return;
+        }
+
+        if (in_array($subcommand, ['clear', 'off', 'unset'], true)) {
+            $settings->set('active_provider', null);
+            $this->line('<fg=green>Provider override cleared.</> <fg=gray>Using default resolution.</>');
+
+            return;
+        }
+
+        if (in_array($subcommand, ['use', 'set'], true)) {
+            $name = $tokens[1] ?? null;
+            if ($name === null || ! array_key_exists($name, $providers)) {
+                $this->line('<fg=red>Unknown provider.</> Available: '.implode(', ', array_keys($providers)));
+
+                return;
+            }
+
+            $settings->set('active_provider', $name);
+            $settings->set('model', null);
+
+            $label = $providers[$name]['model'] !== null
+                ? $name.'/'.$providers[$name]['model']
+                : $name;
+
+            $this->line("<fg=green>Provider set to:</> <fg=white>{$name}</>");
+            $this->line("<fg=gray>Resolved model:</> <fg=white>{$label}</>");
+
+            return;
+        }
+
+        $this->line('<fg=red>Usage:</> <fg=white>/provider</>, <fg=white>/provider use &lt;name&gt;</>, <fg=white>/provider clear</>');
     }
 
     private function handleDiff(): void
@@ -1734,7 +1828,8 @@ class HaoCodeCommand extends Command
         if ($title) {
             $lines[] = $this->formatter()->keyValue('Title', $title);
         }
-        $lines[] = $this->formatter()->keyValue('Model', $settings->getModel());
+        $lines[] = $this->formatter()->keyValue('Model', $settings->getResolvedModelIdentifier());
+        $lines[] = $this->formatter()->keyValue('Provider', $this->formatSettingValue($settings->getActiveProviderName()), 'gray', 'gray');
         $lines[] = $this->formatter()->keyValue('Messages', (string) $agent->getMessageHistory()->count());
         $lines[] = $this->formatter()->keyValue('Permission mode', $settings->getPermissionMode()->value);
         $lines[] = $this->formatter()->keyValue('Cost', $costTracker->getSummary(), 'gray', 'gray');
@@ -1932,6 +2027,7 @@ class HaoCodeCommand extends Command
         $settings = app(SettingsManager::class);
         $apiKey = $settings->getApiKey();
         $checks[] = ['API Key', $apiKey ? 'Configured ('.mb_substr($apiKey, 0, 10).'...)' : 'NOT SET', ! empty($apiKey)];
+        $checks[] = ['Provider', $settings->getActiveProviderName() ?? 'default', true];
 
         // Check API base URL
         $baseUrl = $settings->getBaseUrl();
@@ -2476,7 +2572,8 @@ class HaoCodeCommand extends Command
         $this->line("\n  <fg=cyan;bold>Hao Code</> <fg=white>{$version}</>");
         $this->line('  PHP:     <fg=white>'.PHP_VERSION.'</>');
         $this->line('  Laravel: <fg=white>'.app()->version().'</>');
-        $this->line('  Model:   <fg=white>'.$settings->getModel().'</>');
+        $this->line('  Provider:<fg=white> '.($settings->getActiveProviderName() ?? 'default').'</>');
+        $this->line('  Model:   <fg=white>'.$settings->getResolvedModelIdentifier().'</>');
         $this->line("  Tools:   <fg=white>{$toolCount} registered</>");
         $this->line('  CWD:     <fg=white>'.getcwd()."</>\n");
     }
@@ -3283,6 +3380,7 @@ PROMPT;
     {
         return match (strtolower(trim($key))) {
             'model' => 'model',
+            'active_provider', 'active-provider', 'provider' => 'active_provider',
             'api_base_url', 'api-base-url', 'api', 'base-url' => 'api_base_url',
             'max_tokens', 'max-tokens', 'tokens' => 'max_tokens',
             'permission_mode', 'permission-mode', 'permission', 'permissions' => 'permission_mode',
@@ -3362,6 +3460,22 @@ PROMPT;
         }
 
         return json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: 'unknown';
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function availableModelChoices(SettingsManager $settings): array
+    {
+        $choices = SettingsManager::getAvailableModels();
+
+        foreach ($settings->getConfiguredProviders() as $name => $provider) {
+            if (is_string($provider['model'] ?? null) && trim($provider['model']) !== '') {
+                $choices[] = $name.'/'.trim($provider['model']);
+            }
+        }
+
+        return array_values(array_unique($choices));
     }
 
     private function summarizeToolInput(string $toolName, array $input): string
@@ -3791,7 +3905,7 @@ PROMPT;
         $contextState = $compactor->getWarningState($lastTurnTokens);
 
         return [
-            'model' => $settings->getModel(),
+            'model' => $settings->getResolvedModelIdentifier(),
             'message_count' => $agent->getMessageHistory()->count(),
             'permission_mode' => $settings->getPermissionMode()->value,
             'fast_mode' => $this->fastMode,

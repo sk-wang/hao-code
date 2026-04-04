@@ -17,6 +17,7 @@ class SlashCommandCatalogTest extends TestCase
         $this->assertContains('buddy', $names);
         $this->assertContains('output-style', $names);
         $this->assertContains('config', $names);
+        $this->assertContains('provider', $names);
         $this->assertContains('hooks', $names);
         $this->assertContains('files', $names);
         $this->assertContains('plan', $names);

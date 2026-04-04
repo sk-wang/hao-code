@@ -112,6 +112,9 @@ class SettingsManagerTest extends TestCase
         $all = $settings->all();
 
         $this->assertArrayHasKey('model', $all);
+        $this->assertArrayHasKey('model_identifier', $all);
+        $this->assertArrayHasKey('active_provider', $all);
+        $this->assertArrayHasKey('configured_providers', $all);
         $this->assertArrayHasKey('api_base_url', $all);
         $this->assertArrayHasKey('max_tokens', $all);
         $this->assertArrayHasKey('permission_mode', $all);
@@ -368,6 +371,143 @@ class SettingsManagerTest extends TestCase
                 putenv("ANTHROPIC_API_KEY={$originalApiKey}");
             }
 
+            @unlink($globalDir . '/settings.json');
+            @unlink($projectSettingsDir . '/settings.json');
+            @rmdir($globalDir);
+            @rmdir($projectSettingsDir);
+            @rmdir(dirname($globalDir));
+            @rmdir($projectDir);
+            @rmdir($tmpDir);
+        }
+    }
+
+    public function test_active_provider_uses_provider_specific_configuration(): void
+    {
+        $tmpDir = sys_get_temp_dir() . '/smtest_provider_' . getmypid() . '_' . uniqid();
+        $globalDir = $tmpDir . '/global/.haocode';
+        mkdir($globalDir, 0755, true);
+
+        file_put_contents($globalDir . '/settings.json', json_encode([
+            'active_provider' => 'zai',
+            'model' => 'anthropic/claude-sonnet-4-20250514',
+            'provider' => [
+                'anthropic' => [
+                    'api_key' => 'anthropic-key',
+                    'api_base_url' => 'https://api.anthropic.com',
+                    'model' => 'claude-sonnet-4-20250514',
+                ],
+                'zai' => [
+                    'api_key' => 'zai-key',
+                    'api_base_url' => 'https://api.z.ai/api/anthropic',
+                    'model' => 'glm-5.1',
+                    'max_tokens' => 12000,
+                ],
+            ],
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+
+        config([
+            'haocode.api_key' => '',
+            'haocode.api_base_url' => 'https://config.api.example',
+            'haocode.max_tokens' => 1024,
+            'haocode.model' => 'claude-sonnet-4-20250514',
+            'haocode.global_settings_path' => $globalDir . '/settings.json',
+        ]);
+
+        try {
+            $settings = new SettingsManager;
+
+            $this->assertSame('zai', $settings->getActiveProviderName());
+            $this->assertSame('zai-key', $settings->getApiKey());
+            $this->assertSame('https://api.z.ai/api/anthropic', $settings->getBaseUrl());
+            $this->assertSame(12000, $settings->getMaxTokens());
+            $this->assertSame('glm-5.1', $settings->getModel());
+            $this->assertSame('zai/glm-5.1', $settings->getResolvedModelIdentifier());
+        } finally {
+            @unlink($globalDir . '/settings.json');
+            @rmdir($globalDir);
+            @rmdir(dirname($globalDir));
+            @rmdir($tmpDir);
+        }
+    }
+
+    public function test_runtime_model_prefix_selects_configured_provider(): void
+    {
+        config([
+            'haocode.api_key' => '',
+            'haocode.api_base_url' => 'https://api.anthropic.com',
+            'haocode.model' => 'claude-sonnet-4-20250514',
+        ]);
+
+        $settings = new SettingsManager;
+
+        $ref = new \ReflectionClass($settings);
+        $cachedSettings = $ref->getProperty('cachedSettings');
+        $cachedSettings->setAccessible(true);
+        $cachedSettings->setValue($settings, [
+            'provider' => [
+                'anthropic' => [
+                    'api_key' => 'anthropic-key',
+                    'api_base_url' => 'https://api.anthropic.com',
+                    'model' => 'claude-sonnet-4-20250514',
+                ],
+                'zai' => [
+                    'api_key' => 'zai-key',
+                    'api_base_url' => 'https://api.z.ai/api/anthropic',
+                    'model' => 'glm-5.1',
+                    'max_tokens' => 16384,
+                ],
+            ],
+            'permissions' => ['allow' => [], 'deny' => []],
+        ]);
+
+        $settings->set('model', 'zai/glm-5.1');
+
+        $this->assertSame('zai', $settings->getActiveProviderName());
+        $this->assertSame('zai-key', $settings->getApiKey());
+        $this->assertSame('https://api.z.ai/api/anthropic', $settings->getBaseUrl());
+        $this->assertSame('glm-5.1', $settings->getModel());
+    }
+
+    public function test_global_and_project_provider_maps_are_merged(): void
+    {
+        $tmpDir = sys_get_temp_dir() . '/smtest_provider_merge_' . getmypid() . '_' . uniqid();
+        $globalDir = $tmpDir . '/global/.haocode';
+        $projectDir = $tmpDir . '/project';
+        $projectSettingsDir = $projectDir . '/.haocode';
+        mkdir($globalDir, 0755, true);
+        mkdir($projectSettingsDir, 0755, true);
+
+        file_put_contents($globalDir . '/settings.json', json_encode([
+            'provider' => [
+                'anthropic' => [
+                    'api_key' => 'anthropic-key',
+                    'api_base_url' => 'https://api.anthropic.com',
+                    'model' => 'claude-sonnet-4-20250514',
+                ],
+            ],
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+
+        file_put_contents($projectSettingsDir . '/settings.json', json_encode([
+            'provider' => [
+                'zai' => [
+                    'api_key' => 'zai-key',
+                    'api_base_url' => 'https://api.z.ai/api/anthropic',
+                    'model' => 'glm-5.1',
+                ],
+            ],
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+
+        config(['haocode.global_settings_path' => $globalDir . '/settings.json']);
+
+        $origDir = getcwd();
+        chdir($projectDir);
+
+        try {
+            $settings = new SettingsManager;
+
+            $this->assertSame(['anthropic', 'zai'], array_keys($settings->getConfiguredProviders()));
+        } finally {
+            chdir($origDir);
             @unlink($globalDir . '/settings.json');
             @unlink($projectSettingsDir . '/settings.json');
             @rmdir($globalDir);
