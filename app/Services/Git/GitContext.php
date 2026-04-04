@@ -22,18 +22,23 @@ class GitContext
         $remote = $this->getRemoteUrl();
         $defaultBranch = $this->getDefaultBranch();
         $diff = $this->getWorkingTreeDiff();
+        $recentCommits = $this->getRecentCommits();
 
-        if ($diff === '') {
-            return "\n# Git Status\n- Branch: {$branch}"
-                . ($remote ? "\n- Remote: {$remote}" : '')
-                . ($defaultBranch ? "\n- Default branch: {$defaultBranch}" : '')
-                . "\n- Working tree: clean";
+        $context = "\n# Git Status\n- Branch: {$branch}"
+            . ($remote ? "\n- Remote: {$remote}" : '')
+            . ($defaultBranch ? "\n- Default branch: {$defaultBranch}" : '');
+
+        if ($recentCommits !== '') {
+            $context .= "\n\n# Recent Commits\n```\n{$recentCommits}\n```";
         }
 
-        return "\n# Git Status\n- Branch: {$branch}"
-            . ($remote ? "\n- Remote: {$remote}" : '')
-            . ($defaultBranch ? "\n- Default branch: {$defaultBranch}" : '')
-            . "\n\n# Uncommitted Changes\n```\n{$diff}\n```";
+        if ($diff === '') {
+            $context .= "\n- Working tree: clean";
+        } else {
+            $context .= "\n\n# Uncommitted Changes\n```\n{$diff}\n```";
+        }
+
+        return $context;
     }
 
     /**
@@ -114,6 +119,20 @@ class GitContext
         }
 
         return $stat . "\n\n" . $diff;
+    }
+
+    /**
+     * Get recent commit history (last 5 commits, one-line format).
+     */
+    public function getRecentCommits(int $count = 5): string
+    {
+        exec("git log --oneline -n {$count} 2>/dev/null", $output, $exitCode);
+
+        if ($exitCode !== 0 || empty($output)) {
+            return '';
+        }
+
+        return implode("\n", $output);
     }
 
     /**

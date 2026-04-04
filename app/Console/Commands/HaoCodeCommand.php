@@ -712,7 +712,7 @@ class HaoCodeCommand extends Command
             'help' => $this->handleHelp(),
             'clear' => $this->handleClear($agent),
             'history' => $this->handleHistory($agent),
-            'compact' => $this->handleCompact($agent),
+            'compact' => $this->handleCompact($agent, $args),
             'config' => $this->handleConfig($args),
             'model' => $this->handleModel($args),
             'provider' => $this->handleProvider($args),
@@ -784,13 +784,30 @@ class HaoCodeCommand extends Command
             app(SlashCommandCatalog::class)->all(),
         );
 
+        $lines[] = '';
+        $lines[] = '<fg=gray>Keybindings:</>  Ctrl+C = cancel  Ctrl+D = exit  ↑/↓ = history  Tab = autocomplete';
+        $lines[] = '<fg=gray>Docs:</>         https://github.com/sk-wang/hao-code';
+
         $this->renderPanel('Available commands', $lines);
     }
 
     private function handleClear(AgentLoop $agent): void
     {
+        // Execute SessionEnd hooks before clearing
+        app(HookExecutor::class)->execute('SessionEnd', []);
+
         $agent->getMessageHistory()->clear();
-        $this->line('<fg=gray>Conversation history cleared.</>');
+        $agent->resetSessionMetrics();
+
+        // Generate new session ID
+        $sm = $agent->getSessionManager();
+        $oldId = $sm->getSessionId();
+        $sm->switchToSession(date('Ymd_His').'_'.bin2hex(random_bytes(3)));
+
+        // Execute SessionStart hooks after clearing
+        app(HookExecutor::class)->execute('SessionStart', []);
+
+        $this->line('<fg=gray>Conversation cleared.</> <fg=gray>(previous session: '.substr($oldId, 0, 16).'…)</>');
     }
 
     private function handleHistory(AgentLoop $agent): void
@@ -799,11 +816,22 @@ class HaoCodeCommand extends Command
         $this->line("<fg=gray>Message count: {$count}</>");
     }
 
-    private function handleCompact(AgentLoop $agent): void
+    private function handleCompact(AgentLoop $agent, string $args = ''): void
     {
+        $history = $agent->getMessageHistory();
+        $beforeCount = $history->count();
+
         $compactor = app(ContextCompactor::class);
-        $result = $compactor->compact($agent->getMessageHistory());
+        $instructions = trim($args) !== '' ? trim($args) : null;
+        $result = $compactor->compact($history, customInstructions: $instructions);
+
+        $afterCount = $history->count();
         $this->line("<fg=gray>{$result}</>");
+
+        if ($beforeCount > $afterCount) {
+            $saved = $beforeCount - $afterCount;
+            $this->line("<fg=gray>Compacted {$saved} messages (from {$beforeCount} to {$afterCount}).</>");
+        }
     }
 
     private function handleConfig(string $args): void
@@ -1505,31 +1533,47 @@ class HaoCodeCommand extends Command
         $args = trim($args);
         $available = $this->availableModelChoices($settings);
 
+        // Resolve model aliases
+        $aliases = [
+            'sonnet' => 'claude-sonnet-4-20250514',
+            'opus' => 'claude-opus-4-20250514',
+            'haiku' => 'claude-haiku-4-20250514',
+            'sonnet-3.5' => 'claude-3-5-sonnet-20241022',
+            'haiku-3.5' => 'claude-3-5-haiku-20241022',
+        ];
+
         if ($args === '') {
             $lines = [
                 $this->formatter()->keyValue('Current', $settings->getResolvedModelIdentifier()),
                 $this->formatter()->keyValue('Provider', $this->formatSettingValue($settings->getActiveProviderName()), 'gray', 'gray'),
-                ...array_map(
-                    fn (string $model): string => $this->formatter()->keyValue('Model', $model, 'gray', 'gray'),
-                    $available,
-                ),
+                '',
+                '<fg=gray>Available models:</>',
             ];
+            foreach ($available as $model) {
+                $alias = array_search($model, $aliases, true);
+                $label = $alias !== false ? "<fg=cyan>{$model}</> <fg=gray>({$alias})</>" : "<fg=cyan>{$model}</>";
+                $lines[] = "  {$label}";
+            }
+            $lines[] = '';
+            $lines[] = '<fg=gray>Aliases: '.implode(', ', array_keys($aliases)).'</>';
             $this->renderPanel('Models', $lines);
 
             return;
         }
 
-        $settings->set('model', $args);
+        $resolved = $aliases[strtolower($args)] ?? $args;
+        $settings->set('model', $resolved);
 
-        if (in_array($args, $available, true)) {
-            $this->line('<fg=green>Model set to:</> <fg=white>'.$settings->getResolvedModelIdentifier().'</>');
-
-            return;
-        }
-
-        $this->line("<fg=green>Model override set to:</> <fg=white>{$args}</>");
-        if ($available !== []) {
-            $this->line('<fg=gray>Known choices: '.implode(', ', $available).'</>');
+        $display = $settings->getResolvedModelIdentifier();
+        if ($resolved !== $args) {
+            $this->line("<fg=green>Model set to:</> <fg=white>{$display}</> <fg=gray>(alias: {$args})</>");
+        } elseif (in_array($resolved, $available, true)) {
+            $this->line('<fg=green>Model set to:</> <fg=white>'.$display.'</>');
+        } else {
+            $this->line("<fg=green>Model override set to:</> <fg=white>{$args}</>");
+            if ($available !== []) {
+                $this->line('<fg=gray>Known choices: '.implode(', ', $available).'</>');
+            }
         }
     }
 
@@ -1823,8 +1867,9 @@ class HaoCodeCommand extends Command
         $in = $agent->getTotalInputTokens();
         $out = $agent->getTotalOutputTokens();
         $msgs = $agent->getMessageHistory()->count();
-        $contextLimit = 200000; // Claude context window
-        $usagePercent = round(($in / $contextLimit) * 100, 1);
+        $model = app(SettingsManager::class)->getModel();
+        $contextLimit = $this->contextWindowForModel($model);
+        $usagePercent = $contextLimit > 0 ? round(($in / $contextLimit) * 100, 1) : 0;
 
         $this->line("\n  <fg=cyan;bold>Context Usage:</>");
         $this->line("  Messages:     <fg=white>{$msgs}</>");
@@ -3522,6 +3567,19 @@ PROMPT;
         }
 
         return array_values(array_unique($choices));
+    }
+
+    private function contextWindowForModel(string $model): int
+    {
+        return match (true) {
+            str_contains($model, 'opus') => 200000,
+            str_contains($model, 'sonnet-4') => 200000,
+            str_contains($model, 'haiku-4') => 200000,
+            str_contains($model, 'sonnet-3') => 200000,
+            str_contains($model, 'haiku-3') => 200000,
+            str_contains($model, 'kimi') => 131072,
+            default => 200000,
+        };
     }
 
     private function displayPackageVersion(): string

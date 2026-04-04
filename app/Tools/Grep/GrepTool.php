@@ -70,6 +70,18 @@ DESC;
                     'type' => 'integer',
                     'description' => 'Limit output to first N entries',
                 ],
+                'type' => [
+                    'type' => 'string',
+                    'description' => 'File type to search (e.g., "php", "js", "py", "go", "rust"). Maps to rg --type.',
+                ],
+                'multiline' => [
+                    'type' => 'boolean',
+                    'description' => 'Enable multiline mode for cross-line patterns (rg -U). Default: false.',
+                ],
+                'offset' => [
+                    'type' => 'integer',
+                    'description' => 'Skip first N entries before applying head_limit. Default: 0.',
+                ],
             ],
             'required' => ['pattern'],
         ], [
@@ -82,6 +94,9 @@ DESC;
             '-C' => 'nullable|integer|min:0',
             '-i' => 'nullable|boolean',
             'head_limit' => 'nullable|integer|min:0',
+            'type' => 'nullable|string',
+            'multiline' => 'nullable|boolean',
+            'offset' => 'nullable|integer|min:0',
         ]);
     }
 
@@ -91,17 +106,20 @@ DESC;
         $path = $input['path'] ?? $context->workingDirectory;
         $outputMode = $input['output_mode'] ?? 'files_with_matches';
         $glob = $input['glob'] ?? null;
+        $type = $input['type'] ?? null;
         $caseInsensitive = $input['-i'] ?? false;
+        $multiline = $input['multiline'] ?? false;
         $contextLines = $input['-C'] ?? null;
         $afterLines = $contextLines ?? $input['-A'] ?? 0;
         $beforeLines = $contextLines ?? $input['-B'] ?? 0;
         $headLimit = $input['head_limit'] ?? 250;
+        $offset = $input['offset'] ?? 0;
 
         // Try ripgrep first, fallback to PHP implementation
         if ($this->hasRipgrep()) {
             return $this->grepWithRipgrep(
-                $pattern, $path, $outputMode, $glob,
-                $caseInsensitive, $afterLines, $beforeLines, $headLimit
+                $pattern, $path, $outputMode, $glob, $type,
+                $caseInsensitive, $multiline, $afterLines, $beforeLines, $headLimit, $offset
             );
         }
 
@@ -118,13 +136,18 @@ DESC;
     }
 
     private function grepWithRipgrep(
-        string $pattern, string $path, string $outputMode, ?string $glob,
-        bool $caseInsensitive, int $afterLines, int $beforeLines, int $headLimit
+        string $pattern, string $path, string $outputMode, ?string $glob, ?string $type,
+        bool $caseInsensitive, bool $multiline, int $afterLines, int $beforeLines, int $headLimit, int $offset = 0
     ): ToolResult {
         $cmd = ['rg', '--no-heading'];
 
         if ($caseInsensitive) {
             $cmd[] = '-i';
+        }
+
+        if ($multiline) {
+            $cmd[] = '-U';
+            $cmd[] = '--multiline-dotall';
         }
 
         if ($outputMode === 'count') {
@@ -137,10 +160,14 @@ DESC;
             if ($beforeLines > 0) $cmd[] = '-B ' . $beforeLines;
         }
 
-        $cmd[] = '--max-count=' . $headLimit;
+        $cmd[] = '--max-count=' . ($headLimit + $offset);
 
         if ($glob) {
             $cmd[] = '--glob=' . escapeshellarg($glob);
+        }
+
+        if ($type) {
+            $cmd[] = '--type=' . escapeshellarg($type);
         }
 
         $cmd[] = '--';
@@ -157,6 +184,11 @@ DESC;
 
         if ($exitCode > 1) {
             return ToolResult::error("ripgrep error: " . implode("\n", $output));
+        }
+
+        // Apply offset
+        if ($offset > 0) {
+            $output = array_slice($output, $offset);
         }
 
         $result = implode("\n", $output);

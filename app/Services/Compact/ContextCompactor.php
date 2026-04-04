@@ -42,8 +42,9 @@ class ContextCompactor
     /**
      * Compact message history using LLM-generated 9-section structured summary.
      */
-    public function compact(MessageHistory $history, int $keepLast = 6): string
+    public function compact(MessageHistory $history, int $keepLast = 6, ?string $customInstructions = null): string
     {
+
         $messages = $history->getMessagesForApi();
         $count = count($messages);
 
@@ -62,7 +63,7 @@ class ContextCompactor
             ]);
         }
 
-        $summary = $this->generateLlmSummary($oldMessages);
+        $summary = $this->generateLlmSummary($oldMessages, $customInstructions ?? null);
 
         if ($summary === null) {
             $summary = $this->generateBasicSummary($oldMessages);
@@ -306,7 +307,7 @@ PROMPT,
         ]];
     }
 
-    private function generateLlmSummary(array $oldMessages): ?string
+    private function generateLlmSummary(array $oldMessages, ?string $customInstructions = null): ?string
     {
         try {
             $conversationText = $this->messagesToText($oldMessages);
@@ -315,9 +316,14 @@ PROMPT,
                 $conversationText = mb_substr($conversationText, 0, 50000) . "\n[...truncated for compaction...]";
             }
 
+            $prompt = "Please summarize the following conversation using the structured 9-section format:\n\n{$conversationText}";
+            if ($customInstructions !== null) {
+                $prompt .= "\n\nAdditional instructions for this compaction:\n{$customInstructions}";
+            }
+
             $summaryMessages = [[
                 'role' => 'user',
-                'content' => "Please summarize the following conversation using the structured 9-section format:\n\n{$conversationText}",
+                'content' => $prompt,
             ]];
 
             $processor = $this->queryEngine->query(

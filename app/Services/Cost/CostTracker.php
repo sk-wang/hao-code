@@ -23,16 +23,51 @@ class CostTracker
         $this->stopThreshold = $stopThreshold ?? (float) ($_ENV['HAOCODE_COST_STOP'] ?? 50.00);
     }
 
+    // Per-million-token pricing by model family
+    private const MODEL_PRICING = [
+        'opus' => ['input' => 15.0, 'output' => 75.0, 'cache_write' => 18.75, 'cache_read' => 1.50],
+        'sonnet' => ['input' => 3.0, 'output' => 15.0, 'cache_write' => 3.75, 'cache_read' => 0.30],
+        'haiku' => ['input' => 0.80, 'output' => 4.0, 'cache_write' => 1.0, 'cache_read' => 0.08],
+    ];
+
+    private string $currentModel = '';
+
+    public function setModel(string $model): void
+    {
+        $this->currentModel = $model;
+    }
+
+    /**
+     * Get pricing for the current model.
+     *
+     * @return array{input: float, output: float, cache_write: float, cache_read: float}
+     */
+    private function getPricing(): array
+    {
+        $model = strtolower($this->currentModel);
+
+        foreach (self::MODEL_PRICING as $family => $pricing) {
+            if (str_contains($model, $family)) {
+                return $pricing;
+            }
+        }
+
+        // Default to Sonnet pricing
+        return self::MODEL_PRICING['sonnet'];
+    }
+
     /**
      * Add cost from a single API call.
      */
     public function addUsage(int $inputTokens, int $outputTokens, int $cacheWriteTokens = 0, int $cacheReadTokens = 0): void
     {
+        $pricing = $this->getPricing();
+
         $cost = (
-            $inputTokens * 3.0 +
-            $outputTokens * 15.0 +
-            $cacheWriteTokens * 3.75 +
-            $cacheReadTokens * 0.30
+            $inputTokens * $pricing['input'] +
+            $outputTokens * $pricing['output'] +
+            $cacheWriteTokens * $pricing['cache_write'] +
+            $cacheReadTokens * $pricing['cache_read']
         ) / 1_000_000;
 
         $this->totalCost += $cost;
