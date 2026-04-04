@@ -2559,12 +2559,7 @@ class HaoCodeCommand extends Command
 
     private function handleVersion(): void
     {
-        $composerJson = base_path('composer.json');
-        $version = 'dev';
-        if (file_exists($composerJson)) {
-            $composer = json_decode(file_get_contents($composerJson), true) ?? [];
-            $version = $composer['version'] ?? $version;
-        }
+        $version = $this->displayPackageVersion();
 
         $settings = app(SettingsManager::class);
         $toolCount = count(app(ToolRegistry::class)->getAllTools());
@@ -3476,6 +3471,21 @@ PROMPT;
         }
 
         return array_values(array_unique($choices));
+    }
+
+    private function displayPackageVersion(): string
+    {
+        $composerJson = base_path('composer.json');
+        $version = 'dev';
+
+        if (file_exists($composerJson)) {
+            $composer = json_decode(file_get_contents($composerJson), true) ?? [];
+            if (is_string($composer['version'] ?? null) && $composer['version'] !== '') {
+                $version = $composer['version'];
+            }
+        }
+
+        return str_starts_with($version, 'v') ? $version : 'v'.$version;
     }
 
     private function summarizeToolInput(string $toolName, array $input): string

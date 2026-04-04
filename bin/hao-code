@@ -8,6 +8,23 @@ define('LARAVEL_START', microtime(true));
 
 $packageRoot = dirname(__DIR__);
 $composerBinDir = $GLOBALS['_composer_bin_dir'] ?? null;
+$argv = $_SERVER['argv'] ?? ['hao-code'];
+
+if (in_array('--version', $argv, true) || in_array('-V', $argv, true)) {
+    $composerJsonPath = $packageRoot.'/composer.json';
+    $version = 'dev';
+
+    if (is_file($composerJsonPath)) {
+        $composer = json_decode((string) file_get_contents($composerJsonPath), true) ?? [];
+        $version = is_string($composer['version'] ?? null) && $composer['version'] !== ''
+            ? $composer['version']
+            : $version;
+    }
+
+    $displayVersion = str_starts_with($version, 'v') ? $version : 'v'.$version;
+    fwrite(STDOUT, "Hao Code {$displayVersion}\n");
+    exit(0);
+}
 
 $autoloadCandidates = array_filter([
     $GLOBALS['_composer_autoload_path'] ?? null,
@@ -90,7 +107,6 @@ if (is_string($storagePath) && $storagePath !== '') {
     $app->useStoragePath($storagePath);
 }
 
-$argv = $_SERVER['argv'] ?? ['hao-code'];
 array_splice($argv, 1, 0, ['hao-code']);
 $_SERVER['argv'] = $argv;
 $_SERVER['argc'] = count($argv);
