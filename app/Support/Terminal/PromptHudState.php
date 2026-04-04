@@ -7,6 +7,9 @@ class PromptHudState
     /** @var array<int, array{name: string, target: string|null, status: string}> */
     private array $tools = [];
 
+    /** @var array{event: string, label: string, detail: string|null}|null */
+    private ?array $turn = null;
+
     /** @var array<int, array{content: string, status: string}> */
     private array $todos = [];
 
@@ -79,8 +82,34 @@ class PromptHudState
     public function reset(): void
     {
         $this->tools = [];
+        $this->turn = null;
         $this->todos = [];
         $this->taskIdToIndex = [];
+    }
+
+    public function recordTurnEvent(string $event, ?string $detail = null): void
+    {
+        $this->turn = [
+            'event' => $event,
+            'label' => $this->turnLabel($event),
+            'detail' => $detail !== null && trim($detail) !== '' ? trim($detail) : null,
+        ];
+    }
+
+    /**
+     * @return array{event: string, label: string, detail: string|null}|null
+     */
+    public function summarizeTurn(): ?array
+    {
+        return $this->turn;
+    }
+
+    /**
+     * @param  array{event: string, label: string, detail: string|null}|null  $turn
+     */
+    public function restoreTurnSummary(?array $turn): void
+    {
+        $this->turn = $turn;
     }
 
     /**
@@ -375,5 +404,18 @@ class PromptHudState
         }
 
         return mb_substr($value, 0, max(1, $max - 1)).'…';
+    }
+
+    private function turnLabel(string $event): string
+    {
+        return match ($event) {
+            'turn.started' => 'Turn started',
+            'tool.started' => 'Tool running',
+            'tool.completed' => 'Tool finished',
+            'plan.updated' => 'Plan updated',
+            'turn.completed' => 'Turn completed',
+            'turn.failed' => 'Turn failed',
+            default => $event,
+        };
     }
 }

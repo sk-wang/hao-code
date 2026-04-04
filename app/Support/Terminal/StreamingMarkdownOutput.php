@@ -27,7 +27,7 @@ class StreamingMarkdownOutput
         private readonly MarkdownRenderer $renderer,
         private readonly ?int $terminalWidth = null,
         private readonly ?bool $liveRepaint = null,
-        private readonly int $minRenderIntervalMs = 40,
+        private readonly int $minRenderIntervalMs = 120,
         ?callable $timeProvider = null,
     ) {
         $this->timeProvider = $timeProvider;

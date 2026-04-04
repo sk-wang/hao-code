@@ -16,7 +16,7 @@ _Real terminal session running Hao Code in the terminal._
 ## Highlights
 
 - Interactive REPL with history, multiline input, transcript browsing, and slash-command autocomplete.
-- Streaming Markdown output with live tool execution and a built-in HUD footer.
+- Status-first terminal output with optional coalesced streaming and a built-in HUD footer.
 - 30+ tools for shell, files, search, LSP, web, cron, tasks, worktrees, and notebooks.
 - Session restore, branching, background agents, permissions, hooks, and reusable skills.
 
@@ -33,7 +33,7 @@ _Real terminal session running Hao Code in the terminal._
 ### Terminal-first coding workflow
 
 - Interactive REPL with readline history, multiline input, reverse search, transcript browsing, and slash-command autocomplete.
-- Streaming Markdown output with live tool execution.
+- Final-answer-first output by default, with optional coalesced streaming when you want live text deltas.
 - A built-in HUD footer that keeps project, git, context health, recent tools, background agents, and todo progress visible.
 
 ### Real agent behavior
@@ -269,6 +269,7 @@ See [CLAUDE_CODE_PARITY.md](CLAUDE_CODE_PARITY.md) for the parity audit against 
 - `/cost`
 - `/model [name]`
 - `/provider [list|use|clear]`
+- `/buddy [card|status|hatch|pet|feed|mute|unmute|release|rename|face|quip|mood]`
 - `/fast`
 - `/theme`
 - `/output-style`
@@ -370,7 +371,8 @@ Example global settings:
 {
   "api_key": "sk-ant-...",
   "model": "claude-sonnet-4-20250514",
-  "permission_mode": "default"
+  "permission_mode": "default",
+  "stream_output": false
 }
 ```
 
@@ -395,11 +397,22 @@ Example multi-provider settings:
 }
 ```
 
-Notes:
+### Primary config keys
+
+| Key | Typical values | Purpose |
+| --- | --- | --- |
+| `model` | `claude-sonnet-4-20250514` | Select the model ID |
+| `active_provider` | `anthropic`, `zai` | Select the active provider |
+| `permission_mode` | `default`, `plan`, `accept_edits`, `bypass_permissions` | Control approval and editing behavior |
+| `stream_output` | `true`, `false` | Toggle throttled live text output |
+
+### Notes
 
 - `model` also supports `provider/model` format, for example `zai/glm-5.1`.
 - Use `/provider` in the REPL to inspect or switch providers for the current session.
 - Legacy flat keys like `api_key` and `api_base_url` still work.
+- `permission_mode` is still the public config surface; internally Hao Code derives approval/sandbox behavior from it.
+- Terminal output is final-answer-first by default to reduce flicker; set `stream_output=true` or `HAOCODE_STREAM_OUTPUT=true` if you want throttled live text deltas.
 
 ### Common environment variables
 
@@ -408,6 +421,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 HAOCODE_MODEL=claude-sonnet-4-20250514
 HAOCODE_ACTIVE_PROVIDER=
 HAOCODE_MAX_TOKENS=16384
+HAOCODE_STREAM_OUTPUT=false
+HAOCODE_STREAM_RENDER_INTERVAL_MS=120
 HAOCODE_PERMISSION_MODE=default
 HAOCODE_API_BASE_URL=https://api.anthropic.com
 HAOCODE_THINKING=false

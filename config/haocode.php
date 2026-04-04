@@ -40,6 +40,8 @@ return [
     |--------------------------------------------------------------------------
     | Permission Mode
     |--------------------------------------------------------------------------
+    | Public Claude-style config surface. Hao Code derives internal approval
+    | and sandbox behavior from this setting.
     | Supported: default, plan, accept_edits, bypass_permissions
     */
     'permission_mode' => env('HAOCODE_PERMISSION_MODE', 'default'),
@@ -65,4 +67,20 @@ return [
     */
     'background_agent_idle_timeout' => (int) env('HAOCODE_BACKGROUND_AGENT_IDLE_TIMEOUT', 300),
     'background_agent_poll_interval_ms' => (int) env('HAOCODE_BACKGROUND_AGENT_POLL_INTERVAL_MS', 250),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Assistant Text Streaming
+    |--------------------------------------------------------------------------
+    | Public Claude-style toggle. Disabled by default so the terminal stays
+    | calmer and prints the final answer as a stable block.
+    */
+    'stream_output' => filter_var(env('HAOCODE_STREAM_OUTPUT', false), FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE) ?? false,
+
+    /*
+    |--------------------------------------------------------------------------
+    | Terminal Streaming Render
+    |--------------------------------------------------------------------------
+    */
+    'stream_render_interval_ms' => (int) env('HAOCODE_STREAM_RENDER_INTERVAL_MS', 120),
 ];

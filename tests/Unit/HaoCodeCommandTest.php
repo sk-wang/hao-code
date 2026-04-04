@@ -125,10 +125,12 @@ class HaoCodeCommandTest extends TestCase
 
         $permission = $this->invoke($command, 'normalizeConfigKey', 'permission-mode');
         $outputStyle = $this->invoke($command, 'normalizeConfigKey', 'output-style');
+        $streamOutput = $this->invoke($command, 'normalizeConfigKey', 'stream-output');
         $api = $this->invoke($command, 'normalizeConfigKey', 'api');
 
         $this->assertSame('permission_mode', $permission);
         $this->assertSame('output_style', $outputStyle);
+        $this->assertSame('stream_output', $streamOutput);
         $this->assertSame('api_base_url', $api);
     }
 

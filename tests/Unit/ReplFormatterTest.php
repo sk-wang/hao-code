@@ -60,6 +60,106 @@ class ReplFormatterTest extends TestCase
         );
     }
 
+    public function test_it_formats_the_buddy_dock_line(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $this->assertSame(
+            '  <fg=gray>Buddy</> <fg=white>(^_^)</> <fg=cyan>Mochi</>',
+            $formatter->buddyDockLine('<fg=white>(^_^)</> <fg=cyan>Mochi</>'),
+        );
+    }
+
+    public function test_it_formats_a_compact_buddy_dock_for_narrow_terminals(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $lines = $formatter->buddyDockLines([
+            'narrow_line' => '<fg=white>(^_^)</> <fg=cyan>Mochi</>',
+            'name' => 'Mochi',
+            'mood' => 'happy',
+            'mood_emoji' => '😊',
+            'quip' => null,
+            'quip_fading' => false,
+            'sprite_lines' => [' /^_^\\\\ '],
+        ], 80);
+
+        $this->assertSame([
+            '  <fg=gray>Buddy</> <fg=white>(^_^)</> <fg=cyan>Mochi</>',
+        ], $lines);
+    }
+
+    public function test_it_formats_a_buddy_panel_for_wide_terminals(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $lines = $formatter->buddyDockLines([
+            'narrow_line' => '<fg=white>(^_^)</> <fg=cyan>Mochi</>',
+            'name' => 'Mochi',
+            'mood' => 'thinking',
+            'mood_emoji' => '🤔',
+            'quip' => 'Mochi is investigating the bug',
+            'quip_fading' => false,
+            'sprite_lines' => [' /^_^\\\\ ', ' (  -_-)'],
+        ], 120);
+
+        $this->assertGreaterThan(4, count($lines));
+        $this->assertStringContainsString('Buddy', $lines[1]);
+        $this->assertStringContainsString('🤔 Mochi', implode("\n", $lines));
+        $this->assertStringContainsString('investigating the bug', implode("\n", $lines));
+        $this->assertStringContainsString('/^_^\\\\', implode("\n", $lines));
+    }
+
+    public function test_it_docks_buddy_panel_to_the_right_when_space_allows(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $left = [
+            '  <fg=gray>Context</> <fg=green>██░░</> <fg=green>50%</>',
+            '  <fg=gray>Tools</> <fg=cyan>Read×2</>',
+        ];
+        $right = $formatter->buddyDockLines([
+            'narrow_line' => '<fg=white>(^_^)</> <fg=cyan>Mochi</>',
+            'name' => 'Mochi',
+            'mood' => 'thinking',
+            'mood_emoji' => '🤔',
+            'quip' => 'Mochi is investigating the bug',
+            'quip_fading' => false,
+            'sprite_lines' => [' /^_^\\\\ ', ' (  -_-)'],
+        ], 120);
+
+        $lines = $formatter->dockRight($left, $right, 120);
+
+        $this->assertCount(count($right), $lines);
+        $this->assertStringContainsString('Context', implode("\n", $lines));
+        $this->assertStringContainsString('Tools', implode("\n", $lines));
+        $this->assertStringContainsString('Buddy', implode("\n", $lines));
+        $this->assertStringContainsString('Mochi', implode("\n", $lines));
+    }
+
+    public function test_it_falls_back_to_stacked_layout_when_terminal_is_too_narrow(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $left = [
+            '  <fg=gray>Context</> <fg=green>██████░░░░</> <fg=green>60%</>',
+            '  <fg=gray>Tools</> <fg=cyan>Read×2 Edit×1 Search×4</>',
+        ];
+        $right = $formatter->buddyDockLines([
+            'narrow_line' => '<fg=white>(^_^)</> <fg=cyan>Mochi</>',
+            'name' => 'Mochi',
+            'mood' => 'thinking',
+            'mood_emoji' => '🤔',
+            'quip' => 'Mochi is investigating the bug',
+            'quip_fading' => false,
+            'sprite_lines' => [' /^_^\\\\ ', ' (  -_-)'],
+        ], 120);
+
+        $lines = $formatter->dockRight($left, $right, 50);
+
+        $this->assertSame(array_merge($left, $right), $lines);
+    }
+
     public function test_it_formats_tool_calls_in_a_compact_claude_code_style(): void
     {
         $formatter = new ReplFormatter;
@@ -239,6 +339,36 @@ class ReplFormatterTest extends TestCase
         $this->assertCount(2, $lines);
         $this->assertStringContainsString('claude-haiku-4-20250514', $lines[0]);
         $this->assertStringContainsString('Context', $lines[1]);
+    }
+
+    public function test_prompt_footer_renders_latest_turn_status_when_available(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $lines = $formatter->promptFooterLines([
+            'model' => 'claude-haiku-4-20250514',
+            'message_count' => 3,
+            'permission_mode' => 'default',
+            'context_percent' => 5.0,
+            'context_tokens' => 9000,
+            'context_limit' => 180000,
+            'context_state' => 'normal',
+            'cost' => 0.001,
+            'cost_warn' => 5.0,
+            'tools' => ['running' => [], 'completed' => []],
+            'agents' => ['bash_tasks' => 0, 'entries' => []],
+            'todo' => null,
+            'turn' => [
+                'event' => 'plan.updated',
+                'label' => 'Plan updated',
+                'detail' => 'TodoWrite · 3 items',
+            ],
+        ]);
+
+        $this->assertCount(3, $lines);
+        $this->assertStringContainsString('Status', $lines[2]);
+        $this->assertStringContainsString('plan.updated', $lines[2]);
+        $this->assertStringContainsString('Plan updated', $lines[2]);
     }
 
     public function test_prompt_footer_supports_compact_layout_and_section_toggles(): void

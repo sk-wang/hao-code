@@ -18,7 +18,7 @@ class ConfigTool extends BaseTool
     public function description(): string
     {
         return <<<DESC
-Get or set runtime configuration values. Supported keys: model, active_provider, api_base_url, max_tokens, permission_mode, theme, output_style.
+Get or set runtime configuration values. Supported keys: model, active_provider, api_base_url, max_tokens, permission_mode, theme, output_style, stream_output.
 
 Usage:
 - To get all settings: call with no arguments
@@ -37,7 +37,7 @@ DESC;
                 'key' => [
                     'type' => 'string',
                     'description' => 'The config key to get or set',
-                    'enum' => ['model', 'active_provider', 'api_base_url', 'max_tokens', 'permission_mode', 'theme', 'output_style'],
+                    'enum' => ['model', 'active_provider', 'api_base_url', 'max_tokens', 'permission_mode', 'theme', 'output_style', 'stream_output'],
                 ],
                 'value' => [
                     'type' => ['string', 'null'],
@@ -45,7 +45,7 @@ DESC;
                 ],
             ],
         ], [
-            'key' => 'nullable|string|in:model,active_provider,api_base_url,max_tokens,permission_mode,theme,output_style',
+            'key' => 'nullable|string|in:model,active_provider,api_base_url,max_tokens,permission_mode,theme,output_style,stream_output',
             'value' => 'nullable|string',
         ]);
     }
@@ -95,6 +95,18 @@ DESC;
             return ToolResult::success('Set active_provider = '.$this->displayValue($normalizedValue));
         }
 
+        if ($key === 'stream_output') {
+            $normalizedValue = $this->normalizeBooleanValue((string) $value);
+
+            if ($normalizedValue === null) {
+                return ToolResult::error('Invalid stream_output. Must be true/false, on/off, yes/no, or 1/0');
+            }
+
+            $settings->set('stream_output', $normalizedValue);
+
+            return ToolResult::success('Set stream_output = '.$this->displayValue($normalizedValue));
+        }
+
         // Validate and set
         $error = $this->validateValue($key, $value);
         if ($error !== null) {
@@ -125,7 +137,21 @@ DESC;
                 ? null
                 : "Invalid theme. Must be: dark, light, or ansi",
             'output_style' => null,
+            'stream_output' => $this->normalizeBooleanValue($value) !== null
+                ? null
+                : 'Invalid stream_output. Must be true/false, on/off, yes/no, or 1/0',
             default => "Unknown config key: {$key}",
+        };
+    }
+
+    private function normalizeBooleanValue(string $value): ?bool
+    {
+        $normalized = strtolower(trim($value));
+
+        return match ($normalized) {
+            '1', 'true', 'yes', 'on' => true,
+            '0', 'false', 'no', 'off' => false,
+            default => null,
         };
     }
 

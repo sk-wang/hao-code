@@ -57,6 +57,17 @@ class SettingsManagerExtendedTest extends TestCase
         $this->assertSame(PermissionMode::Plan, $manager->getPermissionMode());
     }
 
+    public function test_modern_permission_aliases_drive_derived_permission_mode(): void
+    {
+        $manager = $this->makeManager();
+        $manager->set('approval_policy', 'on-failure');
+        $manager->set('sandbox_mode', 'workspace-write');
+
+        $this->assertSame(PermissionMode::AcceptEdits, $manager->getPermissionMode());
+        $this->assertSame('on-failure', $manager->getApprovalPolicy());
+        $this->assertSame('workspace-write', $manager->getSandboxMode());
+    }
+
     public function test_set_output_style_overrides(): void
     {
         $manager = $this->makeManager();

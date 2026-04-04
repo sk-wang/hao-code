@@ -9,6 +9,9 @@ class SettingsManager
     private const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
     private const DEFAULT_BASE_URL = 'https://api.anthropic.com';
     private const DEFAULT_MAX_TOKENS = 16384;
+    private const DEFAULT_APPROVAL_POLICY = 'on-request';
+    private const DEFAULT_SANDBOX_MODE = 'workspace-write';
+    private const DEFAULT_STREAM_MODE = 'final';
 
     private const DEFAULT_STATUSLINE = [
         'enabled' => true,
@@ -85,6 +88,11 @@ class SettingsManager
 
     public function getActiveProviderName(): ?string
     {
+        return $this->getModelProvider();
+    }
+
+    public function getModelProvider(): ?string
+    {
         return $this->resolveSelectedProviderName($this->loadProjectSettings());
     }
 
@@ -146,15 +154,108 @@ class SettingsManager
     public function getPermissionMode(): PermissionMode
     {
         $settings = $this->loadProjectSettings();
-        $mode = $this->runtimeOverrides['permission_mode']
-            ?? $settings['permission_mode']
-            ?? config('haocode.permission_mode', 'default');
 
-        if (! is_string($mode)) {
-            return PermissionMode::Default;
+        if (array_key_exists('permission_mode', $this->runtimeOverrides)) {
+            return $this->normalizePermissionModeValue($this->runtimeOverrides['permission_mode']);
         }
 
-        return PermissionMode::tryFrom($mode) ?? PermissionMode::Default;
+        if (array_key_exists('approval_policy', $this->runtimeOverrides)
+            || array_key_exists('sandbox_mode', $this->runtimeOverrides)) {
+            return $this->permissionModeFromModernConfig(
+                $this->runtimeOverrides['approval_policy'] ?? null,
+                $this->runtimeOverrides['sandbox_mode'] ?? null,
+            );
+        }
+
+        if (array_key_exists('permission_mode', $settings)) {
+            return $this->normalizePermissionModeValue($settings['permission_mode']);
+        }
+
+        if (array_key_exists('approval_policy', $settings) || array_key_exists('sandbox_mode', $settings)) {
+            return $this->permissionModeFromModernConfig(
+                $settings['approval_policy'] ?? null,
+                $settings['sandbox_mode'] ?? null,
+            );
+        }
+
+        if (config('haocode.approval_policy') !== null || config('haocode.sandbox_mode') !== null) {
+            return $this->permissionModeFromModernConfig(
+                config('haocode.approval_policy'),
+                config('haocode.sandbox_mode'),
+            );
+        }
+
+        return $this->normalizePermissionModeValue(config('haocode.permission_mode', PermissionMode::Default->value));
+    }
+
+    public function getApprovalPolicy(): string
+    {
+        $settings = $this->loadProjectSettings();
+
+        if (array_key_exists('approval_policy', $this->runtimeOverrides)) {
+            $mode = $this->normalizeApprovalPolicy($this->runtimeOverrides['approval_policy']);
+            if ($mode !== null) {
+                return $mode;
+            }
+        }
+
+        if (array_key_exists('permission_mode', $this->runtimeOverrides)
+            || array_key_exists('sandbox_mode', $this->runtimeOverrides)) {
+            return $this->approvalPolicyFromPermissionMode($this->getPermissionMode());
+        }
+
+        if (array_key_exists('approval_policy', $settings)) {
+            $mode = $this->normalizeApprovalPolicy($settings['approval_policy']);
+            if ($mode !== null) {
+                return $mode;
+            }
+        }
+
+        if (array_key_exists('permission_mode', $settings) || array_key_exists('sandbox_mode', $settings)) {
+            return $this->approvalPolicyFromPermissionMode($this->getPermissionMode());
+        }
+
+        $configApprovalPolicy = $this->normalizeApprovalPolicy(config('haocode.approval_policy'));
+        if ($configApprovalPolicy !== null) {
+            return $configApprovalPolicy;
+        }
+
+        return $this->approvalPolicyFromPermissionMode($this->getPermissionMode());
+    }
+
+    public function getSandboxMode(): string
+    {
+        $settings = $this->loadProjectSettings();
+
+        if (array_key_exists('sandbox_mode', $this->runtimeOverrides)) {
+            $mode = $this->normalizeSandboxMode($this->runtimeOverrides['sandbox_mode']);
+            if ($mode !== null) {
+                return $mode;
+            }
+        }
+
+        if (array_key_exists('permission_mode', $this->runtimeOverrides)
+            || array_key_exists('approval_policy', $this->runtimeOverrides)) {
+            return $this->sandboxModeFromPermissionMode($this->getPermissionMode());
+        }
+
+        if (array_key_exists('sandbox_mode', $settings)) {
+            $mode = $this->normalizeSandboxMode($settings['sandbox_mode']);
+            if ($mode !== null) {
+                return $mode;
+            }
+        }
+
+        if (array_key_exists('permission_mode', $settings) || array_key_exists('approval_policy', $settings)) {
+            return $this->sandboxModeFromPermissionMode($this->getPermissionMode());
+        }
+
+        $configSandboxMode = $this->normalizeSandboxMode(config('haocode.sandbox_mode'));
+        if ($configSandboxMode !== null) {
+            return $configSandboxMode;
+        }
+
+        return $this->sandboxModeFromPermissionMode($this->getPermissionMode());
     }
 
     public function getAppendSystemPrompt(): ?string
@@ -200,6 +301,45 @@ class SettingsManager
         return $this->runtimeOverrides['output_style']
             ?? $this->loadProjectSettings()['output_style']
             ?? null;
+    }
+
+    public function isStreamOutputEnabled(): bool
+    {
+        return $this->getStreamMode() === 'coalesced';
+    }
+
+    public function getStreamMode(): string
+    {
+        $settings = $this->loadProjectSettings();
+
+        if (array_key_exists('stream_mode', $this->runtimeOverrides)) {
+            $mode = $this->normalizeStreamMode($this->runtimeOverrides['stream_mode']);
+            if ($mode !== null) {
+                return $mode;
+            }
+        }
+
+        if (array_key_exists('stream_output', $this->runtimeOverrides)) {
+            return $this->streamModeFromLegacyToggle($this->runtimeOverrides['stream_output']);
+        }
+
+        if (array_key_exists('stream_mode', $settings)) {
+            $mode = $this->normalizeStreamMode($settings['stream_mode']);
+            if ($mode !== null) {
+                return $mode;
+            }
+        }
+
+        if (array_key_exists('stream_output', $settings)) {
+            return $this->streamModeFromLegacyToggle($settings['stream_output']);
+        }
+
+        $configStreamMode = $this->normalizeStreamMode(config('haocode.stream_mode'));
+        if ($configStreamMode !== null) {
+            return $configStreamMode;
+        }
+
+        return $this->streamModeFromLegacyToggle(config('haocode.stream_output', false));
     }
 
     public function getTheme(): string
@@ -353,10 +493,15 @@ class SettingsManager
         $allowedKeys = [
             'model',
             'active_provider',
+            'model_provider',
             'api_base_url',
             'max_tokens',
             'permission_mode',
+            'approval_policy',
+            'sandbox_mode',
             'output_style',
+            'stream_output',
+            'stream_mode',
             'theme',
             'statusline_enabled',
             'statusline_layout',
@@ -366,10 +511,39 @@ class SettingsManager
             'statusline_show_todos',
             'append_system_prompt',
             'system_prompt',
+            'thinking_enabled',
+            'thinking_budget',
+            'vim_mode',
+            'effort_level',
         ];
-        if (in_array($key, $allowedKeys)) {
-            $this->runtimeOverrides[$key] = $value;
+        if (! in_array($key, $allowedKeys, true)) {
+            return;
         }
+
+        if ($key === 'active_provider' || $key === 'model_provider') {
+            $this->runtimeOverrides['active_provider'] = $value;
+            $this->runtimeOverrides['model_provider'] = $value;
+
+            return;
+        }
+
+        if ($key === 'permission_mode') {
+            unset($this->runtimeOverrides['approval_policy'], $this->runtimeOverrides['sandbox_mode']);
+        }
+
+        if ($key === 'approval_policy' || $key === 'sandbox_mode') {
+            unset($this->runtimeOverrides['permission_mode']);
+        }
+
+        if ($key === 'stream_output') {
+            unset($this->runtimeOverrides['stream_mode']);
+        }
+
+        if ($key === 'stream_mode') {
+            unset($this->runtimeOverrides['stream_output']);
+        }
+
+        $this->runtimeOverrides[$key] = $value;
     }
 
     /**
@@ -424,6 +598,38 @@ class SettingsManager
         });
     }
 
+    public function isThinkingEnabled(): bool
+    {
+        if (array_key_exists('thinking_enabled', $this->runtimeOverrides)) {
+            return (bool) $this->runtimeOverrides['thinking_enabled'];
+        }
+
+        $envValue = getenv('HAOCODE_THINKING');
+
+        return $envValue !== false && filter_var($envValue, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    public function getThinkingBudget(): int
+    {
+        if (array_key_exists('thinking_budget', $this->runtimeOverrides)) {
+            return (int) $this->runtimeOverrides['thinking_budget'];
+        }
+
+        $envValue = getenv('HAOCODE_THINKING_BUDGET');
+
+        return $envValue !== false && is_numeric($envValue) ? (int) $envValue : 10000;
+    }
+
+    public function getEffortLevel(): string
+    {
+        return $this->runtimeOverrides['effort_level'] ?? 'auto';
+    }
+
+    public function isVimMode(): bool
+    {
+        return (bool) ($this->runtimeOverrides['vim_mode'] ?? false);
+    }
+
     /**
      * Get all current settings as a flat array.
      */
@@ -441,6 +647,7 @@ class SettingsManager
             'permission_mode' => $this->getPermissionMode()->value,
             'theme' => $this->getTheme(),
             'output_style' => $this->getOutputStyle(),
+            'stream_output' => $this->isStreamOutputEnabled(),
             'statusline_enabled' => $statusline['enabled'],
             'statusline_layout' => $statusline['layout'],
             'statusline_path_levels' => $statusline['path_levels'],
@@ -531,14 +738,23 @@ class SettingsManager
             return $runtimeSelection['provider'];
         }
 
-        if (array_key_exists('active_provider', $this->runtimeOverrides)) {
-            $runtimeProvider = $this->normalizeProviderName($this->runtimeOverrides['active_provider']);
+        $runtimeProviderValue = array_key_exists('model_provider', $this->runtimeOverrides)
+            ? $this->runtimeOverrides['model_provider']
+            : (array_key_exists('active_provider', $this->runtimeOverrides)
+                ? $this->runtimeOverrides['active_provider']
+                : null);
+
+        if (array_key_exists('model_provider', $this->runtimeOverrides)
+            || array_key_exists('active_provider', $this->runtimeOverrides)) {
+            $runtimeProvider = $this->normalizeProviderName($runtimeProviderValue);
             if ($runtimeProvider !== null && array_key_exists($runtimeProvider, $providers)) {
                 return $runtimeProvider;
             }
         } else {
             $settingsProvider = $this->normalizeProviderName(
-                $settings['active_provider']
+                $settings['model_provider']
+                    ?? $settings['active_provider']
+                    ?? config('haocode.model_provider')
                     ?? config('haocode.active_provider')
                     ?? null,
             );
@@ -557,6 +773,100 @@ class SettingsManager
         }
 
         return null;
+    }
+
+    private function normalizePermissionModeValue(mixed $value): PermissionMode
+    {
+        if (! is_string($value)) {
+            return PermissionMode::Default;
+        }
+
+        return PermissionMode::tryFrom($value) ?? PermissionMode::Default;
+    }
+
+    private function permissionModeFromModernConfig(mixed $approvalPolicy, mixed $sandboxMode): PermissionMode
+    {
+        $normalizedSandbox = $this->normalizeSandboxMode($sandboxMode);
+        if ($normalizedSandbox === 'read-only') {
+            return PermissionMode::Plan;
+        }
+
+        if ($normalizedSandbox === 'danger-full-access') {
+            return PermissionMode::BypassPermissions;
+        }
+
+        $normalizedApproval = $this->normalizeApprovalPolicy($approvalPolicy);
+        if ($normalizedApproval === 'never') {
+            return PermissionMode::BypassPermissions;
+        }
+
+        if ($normalizedApproval === 'on-failure') {
+            return PermissionMode::AcceptEdits;
+        }
+
+        return PermissionMode::Default;
+    }
+
+    private function approvalPolicyFromPermissionMode(PermissionMode $mode): string
+    {
+        return match ($mode) {
+            PermissionMode::AcceptEdits => 'on-failure',
+            PermissionMode::BypassPermissions => 'never',
+            default => self::DEFAULT_APPROVAL_POLICY,
+        };
+    }
+
+    private function sandboxModeFromPermissionMode(PermissionMode $mode): string
+    {
+        return match ($mode) {
+            PermissionMode::Plan => 'read-only',
+            PermissionMode::BypassPermissions => 'danger-full-access',
+            default => self::DEFAULT_SANDBOX_MODE,
+        };
+    }
+
+    private function streamModeFromLegacyToggle(mixed $value): string
+    {
+        return $this->normalizeStatuslineToggle($value, false)
+            ? 'coalesced'
+            : self::DEFAULT_STREAM_MODE;
+    }
+
+    private function normalizeApprovalPolicy(mixed $value): ?string
+    {
+        if (! is_string($value)) {
+            return null;
+        }
+
+        return match (strtolower(trim($value))) {
+            'untrusted', 'on-request', 'on-failure', 'never' => strtolower(trim($value)),
+            default => null,
+        };
+    }
+
+    private function normalizeSandboxMode(mixed $value): ?string
+    {
+        if (! is_string($value)) {
+            return null;
+        }
+
+        return match (strtolower(trim($value))) {
+            'read-only', 'workspace-write', 'danger-full-access' => strtolower(trim($value)),
+            default => null,
+        };
+    }
+
+    private function normalizeStreamMode(mixed $value): ?string
+    {
+        if (! is_string($value)) {
+            return null;
+        }
+
+        return match (strtolower(trim($value))) {
+            'final', 'off', 'disabled' => 'final',
+            'coalesced', 'stream', 'streaming', 'live', 'on', 'enabled' => 'coalesced',
+            default => null,
+        };
     }
 
     private function resolveModelOverride(mixed $value, array $settings): ?string

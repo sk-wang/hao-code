@@ -7,6 +7,7 @@ use Symfony\Component\Console\Formatter\OutputFormatter;
 class ReplFormatter
 {
     private const LOADING_COLOR = 'yellow';
+    private const BUDDY_PANEL_MIN_WIDTH = 100;
 
     private OutputFormatter $outputFormatter;
 
@@ -57,6 +58,107 @@ class ReplFormatter
     public function helpHint(): string
     {
         return "  <fg=gray>/help commands · Tab/↑↓ autocomplete · Ctrl+O transcript · Ctrl+R history · Ctrl+C interrupt · Ctrl+D exit · \\ multiline</>";
+    }
+
+    public function buddyDockLine(string $line): string
+    {
+        return '  <fg=gray>Buddy</> '.$line;
+    }
+
+    /**
+     * @param array{
+     *   narrow_line: string,
+     *   name: string,
+     *   mood?: string,
+     *   mood_emoji?: string,
+     *   quip?: string|null,
+     *   quip_fading?: bool,
+     *   sprite_lines?: array<int, string>
+     * } $buddy
+     * @return array<int, string>
+     */
+    public function buddyDockLines(array $buddy, int $terminalWidth): array
+    {
+        $narrowLine = trim((string) ($buddy['narrow_line'] ?? ''));
+        $spriteLines = array_values(array_filter(
+            is_array($buddy['sprite_lines'] ?? null) ? $buddy['sprite_lines'] : [],
+            static fn (mixed $line): bool => is_string($line) && $line !== '',
+        ));
+
+        if ($terminalWidth < self::BUDDY_PANEL_MIN_WIDTH || $spriteLines === []) {
+            return $narrowLine === '' ? [] : [$this->buddyDockLine($narrowLine)];
+        }
+
+        $name = trim((string) ($buddy['name'] ?? 'Buddy'));
+        $mood = trim((string) ($buddy['mood'] ?? ''));
+        $moodEmoji = trim((string) ($buddy['mood_emoji'] ?? ''));
+        $quip = trim((string) ($buddy['quip'] ?? ''));
+        $quipColor = (bool) ($buddy['quip_fading'] ?? false) ? 'gray' : 'yellow';
+
+        $identity = trim(implode(' ', array_filter([$moodEmoji, $name], static fn (string $part): bool => $part !== '')));
+        $lines = [
+            '<fg=white>'.$this->escape($identity !== '' ? $identity : 'Buddy').'</>'
+                .($mood !== '' ? ' <fg=gray>· '.$this->escape($mood).'</>' : ''),
+        ];
+
+        if ($quip !== '') {
+            $lines[] = '<fg='.$quipColor.'>"'.$this->escape(
+                $this->truncate($quip, max(24, min(50, $terminalWidth - 18))),
+            ).'"</>';
+        }
+
+        foreach ($spriteLines as $line) {
+            $lines[] = '<fg=white>'.$this->escape($line).'</>';
+        }
+
+        return $this->panel('Buddy', $lines, 'magenta');
+    }
+
+    /**
+     * @param array<int, string> $leftLines
+     * @param array<int, string> $rightLines
+     * @return array<int, string>
+     */
+    public function dockRight(array $leftLines, array $rightLines, int $terminalWidth, int $gap = 2): array
+    {
+        if ($rightLines === []) {
+            return $leftLines;
+        }
+
+        $rightWidth = $this->maxLineWidth($rightLines);
+        $leftWidth = $this->maxLineWidth($leftLines);
+        $availableLeftWidth = max(0, $terminalWidth - $rightWidth - $gap);
+
+        if ($leftLines !== [] && ($leftWidth + $gap + $rightWidth > $terminalWidth)) {
+            return array_merge($leftLines, $rightLines);
+        }
+
+        $rowCount = max(count($leftLines), count($rightLines));
+        $leftTopPad = max(0, $rowCount - count($leftLines));
+        $rightTopPad = max(0, $rowCount - count($rightLines));
+        $merged = [];
+
+        for ($row = 0; $row < $rowCount; $row++) {
+            $leftLine = $leftLines[$row - $leftTopPad] ?? '';
+            $rightLine = $rightLines[$row - $rightTopPad] ?? '';
+
+            if ($rightLine === '') {
+                $merged[] = $leftLine;
+                continue;
+            }
+
+            $rightPadding = max(0, $terminalWidth - $rightWidth);
+            if ($leftLine === '') {
+                $merged[] = str_repeat(' ', $rightPadding).$rightLine;
+                continue;
+            }
+
+            $leftPlainWidth = $this->displayWidth($this->stripMarkup($leftLine));
+            $spacing = max($gap, $availableLeftWidth - $leftPlainWidth + $gap);
+            $merged[] = $leftLine.str_repeat(' ', $spacing).$rightLine;
+        }
+
+        return $merged;
     }
 
     public function readlinePrompt(string $cwd): string
@@ -155,6 +257,11 @@ class ReplFormatter
      *     completed: int,
      *     total: int,
      *     all_completed: bool
+     *   }|null,
+     *   turn?: array{
+     *     event: string,
+     *     label: string,
+     *     detail: string|null
      *   }|null
      * }  $snapshot
      * @return array<int, string>
@@ -273,6 +380,11 @@ class ReplFormatter
             }
         }
 
+        $turn = $snapshot['turn'] ?? null;
+        if (is_array($turn) && $this->stringValue($turn['event'] ?? null) !== null) {
+            $lines[] = $this->turnFooterLine($turn);
+        }
+
         return $lines;
     }
 
@@ -312,6 +424,11 @@ class ReplFormatter
      *     completed: int,
      *     total: int,
      *     all_completed: bool
+     *   }|null,
+     *   turn?: array{
+     *     event: string,
+     *     label: string,
+     *     detail: string|null
      *   }|null
      * }  $snapshot
      * @return array<int, string>
@@ -389,11 +506,32 @@ class ReplFormatter
             }
         }
 
+        $turn = $snapshot['turn'] ?? null;
+        if (is_array($turn) && $this->stringValue($turn['event'] ?? null) !== null) {
+            $activity[] = '<fg=yellow>status</> <fg=cyan>'.$this->escape((string) ($turn['event'] ?? 'status')).'</>'
+                .($this->stringValue($turn['detail'] ?? null) !== null
+                    ? ' <fg=gray>'.$this->escape($this->truncate((string) $turn['detail'], 24)).'</>'
+                    : '');
+        }
+
         if ($activity !== []) {
             $lines[] = '  '.implode(' <fg=gray>·</> ', $activity);
         }
 
         return $lines;
+    }
+
+    /**
+     * @param array{event: string, label: string, detail: string|null} $turn
+     */
+    private function turnFooterLine(array $turn): string
+    {
+        $event = $this->stringValue($turn['event'] ?? null) ?? 'status';
+        $label = $this->stringValue($turn['label'] ?? null) ?? $event;
+        $detail = $this->stringValue($turn['detail'] ?? null);
+
+        return '  <fg=gray>Status</> <fg=cyan>'.$this->escape($event).'</> <fg=gray>·</> <fg=white>'.$this->escape($label).'</>'
+            .($detail !== null ? ' <fg=gray>· '.$this->escape($this->truncate($detail, 48)).'</>' : '');
     }
 
     public function transcriptFooter(
@@ -616,6 +754,20 @@ class ReplFormatter
     private function stripMarkup(string $text): string
     {
         return preg_replace('/<[^>]+>/', '', $text) ?? $text;
+    }
+
+    /**
+     * @param array<int, string> $lines
+     */
+    private function maxLineWidth(array $lines): int
+    {
+        $max = 0;
+
+        foreach ($lines as $line) {
+            $max = max($max, $this->displayWidth($this->stripMarkup($line)));
+        }
+
+        return $max;
     }
 
     private function contextBar(float $percent, int $width = 10): string

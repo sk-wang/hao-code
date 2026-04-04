@@ -121,6 +121,20 @@ class ConfigToolTest extends TestCase
         $this->assertNull($this->validateValue('output_style', 'off'));
     }
 
+    public function test_validate_stream_output_accepts_boolean_like_values(): void
+    {
+        foreach (['true', 'false', 'on', 'off', 'yes', 'no', '1', '0'] as $value) {
+            $this->assertNull($this->validateValue('stream_output', $value), "Value {$value} should be valid");
+        }
+    }
+
+    public function test_validate_stream_output_rejects_unknown_values(): void
+    {
+        $error = $this->validateValue('stream_output', 'maybe');
+        $this->assertNotNull($error);
+        $this->assertStringContainsString('Invalid stream_output', $error);
+    }
+
     // unknown key
     public function test_validate_unknown_key_returns_error(): void
     {
@@ -229,6 +243,20 @@ class ConfigToolTest extends TestCase
 
         $this->assertTrue($result->isError);
         $this->assertStringContainsString('Unknown provider', $result->output);
+    }
+
+    public function test_call_set_stream_output_normalizes_to_boolean(): void
+    {
+        $settings = $this->createMock(SettingsManager::class);
+        $settings->expects($this->once())
+            ->method('set')
+            ->with('stream_output', true);
+        $tool = $this->makeToolWithSettings($settings);
+
+        $result = $tool->call(['key' => 'stream_output', 'value' => 'on'], $this->context);
+
+        $this->assertFalse($result->isError);
+        $this->assertStringContainsString('Set stream_output = true', $result->output);
     }
 
     public function test_call_setting_active_provider_off_stores_null(): void

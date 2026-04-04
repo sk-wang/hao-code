@@ -66,6 +66,30 @@ class StreamingClient
     }
 
     /**
+     * Resolve thinking enabled from settings (allows runtime changes via /effort).
+     */
+    private function resolveThinkingEnabled(): bool
+    {
+        if ($this->settingsManager) {
+            return $this->settingsManager->isThinkingEnabled();
+        }
+
+        return $this->thinkingEnabled;
+    }
+
+    /**
+     * Resolve thinking budget from settings (allows runtime changes via /effort).
+     */
+    private function resolveThinkingBudget(): int
+    {
+        if ($this->settingsManager) {
+            return $this->settingsManager->getThinkingBudget();
+        }
+
+        return $this->thinkingBudget;
+    }
+
+    /**
      * Resolve base URL from settings if available.
      */
     private function resolveBaseUrl(): string
@@ -144,14 +168,16 @@ class StreamingClient
             'stream' => true,
         ];
 
-        // Enable extended thinking if configured
-        if ($this->thinkingEnabled) {
+        // Enable extended thinking if configured (resolves at runtime for /effort)
+        $thinkingEnabled = $this->resolveThinkingEnabled();
+        if ($thinkingEnabled) {
+            $thinkingBudget = $this->resolveThinkingBudget();
             $payload['thinking'] = [
                 'type' => 'enabled',
-                'budget_tokens' => $this->thinkingBudget,
+                'budget_tokens' => $thinkingBudget,
             ];
             // Extended thinking requires higher max_tokens
-            $payload['max_tokens'] = max($this->resolveMaxTokens(), $this->thinkingBudget + 4096);
+            $payload['max_tokens'] = max($this->resolveMaxTokens(), $thinkingBudget + 4096);
         }
 
         if (count($tools) > 0) {

@@ -128,4 +128,18 @@ class PromptHudStateTest extends TestCase
             'all_completed' => true,
         ], $state->summarizeTodos());
     }
+
+    public function test_record_turn_event_keeps_latest_internal_status_snapshot(): void
+    {
+        $state = new PromptHudState;
+
+        $state->recordTurnEvent('turn.started', 'Investigate provider config');
+        $state->recordTurnEvent('tool.completed', 'Read · config/haocode.php');
+
+        $this->assertSame([
+            'event' => 'tool.completed',
+            'label' => 'Tool finished',
+            'detail' => 'Read · config/haocode.php',
+        ], $state->summarizeTurn());
+    }
 }

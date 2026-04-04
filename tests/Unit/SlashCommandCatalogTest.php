@@ -27,6 +27,21 @@ class SlashCommandCatalogTest extends TestCase
         $this->assertContains('review', $names);
         $this->assertContains('stats', $names);
         $this->assertContains('statusline', $names);
+        $this->assertContains('rename', $names);
+        $this->assertContains('effort', $names);
+        $this->assertContains('vim', $names);
+        $this->assertContains('copy', $names);
+        $this->assertContains('env', $names);
+        $this->assertContains('release-notes', $names);
+        $this->assertContains('upgrade', $names);
+        $this->assertContains('session', $names);
+        $this->assertContains('add-dir', $names);
+        $this->assertContains('pr-comments', $names);
+        $this->assertContains('agents', $names);
+        $this->assertContains('feedback', $names);
+        $this->assertContains('login', $names);
+        $this->assertContains('logout', $names);
+        $this->assertContains('keybindings', $names);
     }
 
     public function test_resolve_matches_canonical_command(): void
@@ -57,6 +72,26 @@ class SlashCommandCatalogTest extends TestCase
 
         $this->assertNotNull($resolved);
         $this->assertSame('branch', $resolved['name']);
+    }
+
+    public function test_resolve_matches_pr_comments_alias(): void
+    {
+        $catalog = new SlashCommandCatalog();
+
+        $resolved = $catalog->resolve('/pr_comments');
+
+        $this->assertNotNull($resolved);
+        $this->assertSame('pr-comments', $resolved['name']);
+    }
+
+    public function test_resolve_matches_changelog_alias(): void
+    {
+        $catalog = new SlashCommandCatalog();
+
+        $resolved = $catalog->resolve('/changelog');
+
+        $this->assertNotNull($resolved);
+        $this->assertSame('release-notes', $resolved['name']);
     }
 
     public function test_resolve_returns_null_for_unknown_command(): void

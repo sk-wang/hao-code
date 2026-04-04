@@ -99,6 +99,92 @@ class SettingsManagerTest extends TestCase
         $this->assertSame(\App\Services\Permissions\PermissionMode::Default, $settings->getPermissionMode());
     }
 
+    public function test_modern_approval_policy_maps_to_accept_edits_permission_mode(): void
+    {
+        $settings = new SettingsManager;
+        $settings->set('approval_policy', 'on-failure');
+
+        $this->assertSame(\App\Services\Permissions\PermissionMode::AcceptEdits, $settings->getPermissionMode());
+        $this->assertSame('on-failure', $settings->getApprovalPolicy());
+        $this->assertSame('workspace-write', $settings->getSandboxMode());
+    }
+
+    public function test_modern_sandbox_mode_maps_to_plan_permission_mode(): void
+    {
+        $settings = new SettingsManager;
+        $settings->set('sandbox_mode', 'read-only');
+
+        $this->assertSame(\App\Services\Permissions\PermissionMode::Plan, $settings->getPermissionMode());
+        $this->assertSame('read-only', $settings->getSandboxMode());
+        $this->assertSame('on-request', $settings->getApprovalPolicy());
+    }
+
+    public function test_stream_output_defaults_to_config_and_supports_runtime_override(): void
+    {
+        config(['haocode.stream_output' => false]);
+
+        $settings = new SettingsManager;
+
+        $this->assertFalse($settings->isStreamOutputEnabled());
+
+        $settings->set('stream_output', 'on');
+        $this->assertTrue($settings->isStreamOutputEnabled());
+
+        $settings->set('stream_output', 'off');
+        $this->assertFalse($settings->isStreamOutputEnabled());
+    }
+
+    public function test_stream_mode_prefers_modern_values_and_controls_stream_output(): void
+    {
+        $settings = new SettingsManager;
+        $settings->set('stream_mode', 'coalesced');
+
+        $this->assertSame('coalesced', $settings->getStreamMode());
+        $this->assertTrue($settings->isStreamOutputEnabled());
+
+        $settings->set('stream_mode', 'final');
+
+        $this->assertSame('final', $settings->getStreamMode());
+        $this->assertFalse($settings->isStreamOutputEnabled());
+    }
+
+    public function test_model_provider_alias_tracks_active_provider(): void
+    {
+        $tmpDir = sys_get_temp_dir() . '/smtest_model_provider_' . getmypid() . '_' . uniqid();
+        mkdir($tmpDir . '/.haocode', 0755, true);
+
+        file_put_contents($tmpDir . '/.haocode/settings.json', json_encode([
+            'provider' => [
+                'anthropic' => [
+                    'api_key' => 'sk-ant-123',
+                    'api_base_url' => 'https://api.anthropic.com',
+                    'model' => 'claude-sonnet-4-20250514',
+                ],
+                'zai' => [
+                    'api_key' => 'sk-zai-123',
+                    'api_base_url' => 'https://api.z.ai/api/anthropic',
+                    'model' => 'glm-5.1',
+                ],
+            ],
+        ]));
+
+        $origDir = getcwd();
+        chdir($tmpDir);
+
+        try {
+            $settings = new SettingsManager;
+            $settings->set('model_provider', 'zai');
+
+            $this->assertSame('zai', $settings->getModelProvider());
+            $this->assertSame('zai', $settings->getActiveProviderName());
+        } finally {
+            chdir($origDir);
+            @unlink($tmpDir . '/.haocode/settings.json');
+            @rmdir($tmpDir . '/.haocode');
+            @rmdir($tmpDir);
+        }
+    }
+
     // ─── all() ────────────────────────────────────────────────────────────
 
     public function test_all_returns_expected_keys(): void
@@ -120,6 +206,7 @@ class SettingsManagerTest extends TestCase
         $this->assertArrayHasKey('permission_mode', $all);
         $this->assertArrayHasKey('theme', $all);
         $this->assertArrayHasKey('output_style', $all);
+        $this->assertArrayHasKey('stream_output', $all);
         $this->assertArrayHasKey('statusline_enabled', $all);
         $this->assertArrayHasKey('statusline_layout', $all);
         $this->assertArrayHasKey('statusline_path_levels', $all);
@@ -466,6 +553,60 @@ class SettingsManagerTest extends TestCase
         $this->assertSame('zai-key', $settings->getApiKey());
         $this->assertSame('https://api.z.ai/api/anthropic', $settings->getBaseUrl());
         $this->assertSame('glm-5.1', $settings->getModel());
+    }
+
+    // ─── thinking / effort / vim ─────────────────────────────────────────
+
+    public function test_thinking_defaults_to_disabled(): void
+    {
+        $settings = new SettingsManager;
+
+        $this->assertFalse($settings->isThinkingEnabled());
+        $this->assertSame(10000, $settings->getThinkingBudget());
+    }
+
+    public function test_thinking_can_be_enabled_via_runtime_override(): void
+    {
+        $settings = new SettingsManager;
+        $settings->set('thinking_enabled', true);
+        $settings->set('thinking_budget', 32000);
+
+        $this->assertTrue($settings->isThinkingEnabled());
+        $this->assertSame(32000, $settings->getThinkingBudget());
+    }
+
+    public function test_effort_level_defaults_to_auto(): void
+    {
+        $settings = new SettingsManager;
+
+        $this->assertSame('auto', $settings->getEffortLevel());
+    }
+
+    public function test_effort_level_can_be_set_via_runtime_override(): void
+    {
+        $settings = new SettingsManager;
+        $settings->set('effort_level', 'max');
+
+        $this->assertSame('max', $settings->getEffortLevel());
+    }
+
+    public function test_vim_mode_defaults_to_false(): void
+    {
+        $settings = new SettingsManager;
+
+        $this->assertFalse($settings->isVimMode());
+    }
+
+    public function test_vim_mode_can_be_toggled(): void
+    {
+        $settings = new SettingsManager;
+        $settings->set('vim_mode', true);
+
+        $this->assertTrue($settings->isVimMode());
+
+        $settings->set('vim_mode', false);
+
+        $this->assertFalse($settings->isVimMode());
     }
 
     public function test_global_and_project_provider_maps_are_merged(): void

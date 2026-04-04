@@ -52,6 +52,21 @@ final class SlashCommandCatalog
             ['name' => 'output-style', 'aliases' => [], 'description' => 'list or set output style'],
             ['name' => 'dream', 'aliases' => [], 'description' => 'run memory consolidation'],
             ['name' => 'buddy', 'aliases' => [], 'description' => 'companion pet', 'help' => 'companion pet (card|hatch|pet|feed|mute|release)'],
+            ['name' => 'rename', 'aliases' => [], 'description' => 'rename current session', 'help' => 'rename current session (/rename [title])'],
+            ['name' => 'effort', 'aliases' => [], 'description' => 'set reasoning effort level', 'help' => 'set reasoning effort (/effort low|medium|high|max|auto)'],
+            ['name' => 'vim', 'aliases' => [], 'description' => 'toggle vim editing mode'],
+            ['name' => 'copy', 'aliases' => [], 'description' => 'copy last response to clipboard'],
+            ['name' => 'env', 'aliases' => [], 'description' => 'show environment info'],
+            ['name' => 'release-notes', 'aliases' => ['changelog'], 'description' => 'show version release notes'],
+            ['name' => 'upgrade', 'aliases' => [], 'description' => 'show upgrade instructions'],
+            ['name' => 'session', 'aliases' => [], 'description' => 'show current session info'],
+            ['name' => 'add-dir', 'aliases' => [], 'description' => 'add directory to allowed paths', 'help' => 'add directory to allowed paths (/add-dir <path>)'],
+            ['name' => 'pr-comments', 'aliases' => ['pr_comments'], 'description' => 'fetch GitHub PR comments', 'help' => 'fetch PR comments (/pr-comments [number])'],
+            ['name' => 'agents', 'aliases' => [], 'description' => 'list available tools and agents'],
+            ['name' => 'feedback', 'aliases' => [], 'description' => 'submit feedback or bug report'],
+            ['name' => 'login', 'aliases' => [], 'description' => 'set or update API key'],
+            ['name' => 'logout', 'aliases' => [], 'description' => 'clear API key and session'],
+            ['name' => 'keybindings', 'aliases' => [], 'description' => 'open keybindings configuration'],
         ];
     }
 

@@ -37,8 +37,6 @@ use App\Tools\Skill\SkillLoader;
 use App\Tools\ToolRegistry;
 use App\Tools\ToolUseContext;
 use Illuminate\Console\Command;
-use Symfony\Component\Console\Terminal;
-
 class HaoCodeCommand extends Command
 {
     protected $signature = 'hao-code
@@ -134,16 +132,6 @@ class HaoCodeCommand extends Command
             $this->line($line);
         }
         $this->line($this->formatter()->helpHint());
-
-        // Show buddy greeting if hatched
-        $buddy = app(BuddyManager::class);
-        if ($buddy->isHatched() && !$buddy->isMuted()) {
-            $companion = $buddy->getCompanion();
-            if ($companion !== null) {
-                $moodEmoji = $buddy->getMoodEmoji();
-                $this->line("  <fg=gray>{$moodEmoji} Your companion {$companion['name']} the {$companion['species']} says hello! (/buddy for details)</>");
-            }
-        }
 
         $this->line('');
     }
@@ -243,28 +231,37 @@ class HaoCodeCommand extends Command
 
     private function runSinglePrompt(AgentLoop $agent, string $prompt): int
     {
-        $streamedOutput = false;
+        $streamTextOutput = $this->shouldStreamAssistantText();
+        $renderedLiveText = false;
         $markdownRenderer = app(MarkdownRenderer::class);
         $markdownOutput = $this->createStreamingMarkdownOutput($markdownRenderer);
         $turnStatus = $this->createTurnStatusRenderer($prompt);
         $previousAlarmHandler = $this->startTurnStatusTicker($turnStatus);
 
         try {
+            $this->recordTurnHudEvent('turn.started', $this->summarizeTurnDetail($prompt));
             $turnStatus->start();
 
             $response = $agent->run(
                 userInput: $prompt,
-                onTextDelta: function (string $text) use (&$streamedOutput, $turnStatus, $markdownOutput) {
+                onTextDelta: function (string $text) use (&$renderedLiveText, $turnStatus, $markdownOutput, $streamTextOutput) {
                     $turnStatus->recordTextDelta($text);
+
+                    if (! $streamTextOutput) {
+                        return;
+                    }
+
                     $turnStatus->pause();
-                    $streamedOutput = true;
+                    $renderedLiveText = true;
                     $markdownOutput->append($text);
                 },
-                onToolStart: function (string $toolName, array $toolInput) use (&$streamedOutput, $turnStatus, $markdownOutput) {
+                onToolStart: function (string $toolName, array $toolInput) use ($turnStatus, $markdownOutput, $streamTextOutput) {
                     $turnStatus->pause();
-                    $streamedOutput = true;
-                    $markdownOutput->finalize();
+                    if ($streamTextOutput) {
+                        $markdownOutput->finalize();
+                    }
                     $args = $this->summarizeToolInput($toolName, $toolInput);
+                    $this->recordTurnHudEvent('tool.started', $this->summarizeTurnDetail(trim($toolName.($args !== '' ? ': '.$args : ''))));
                     $this->line("\n".$this->formatter()->toolCall($toolName, $args));
                     $turnStatus->setPhaseLabel($toolName);
                     $turnStatus->resume();
@@ -272,41 +269,57 @@ class HaoCodeCommand extends Command
                 onToolComplete: function (string $toolName, $result) use ($turnStatus) {
                     $turnStatus->pause();
                     $turnStatus->setPhaseLabel(null);
+                    $event = in_array($toolName, ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskStop'], true)
+                        ? 'plan.updated'
+                        : 'tool.completed';
+                    $detail = $toolName;
                     if ($result->isError) {
                         $message = trim((string) $result->output);
+                        $detail = trim($toolName.' · '.($message === '' ? 'Unknown error' : $message));
                         $this->line($this->formatter()->toolFailure($toolName, $message === '' ? 'Unknown error' : $message));
                     }
+                    $this->recordTurnHudEvent($event, $this->summarizeTurnDetail($detail));
                     $turnStatus->resume();
                 },
             );
 
             $turnStatus->pause();
-            $markdownOutput->finalize();
+            if ($streamTextOutput) {
+                $markdownOutput->finalize();
+            }
             if ($response === '(aborted)') {
-                if ($streamedOutput) {
+                $this->recordTurnHudEvent('turn.failed', 'aborted');
+                if ($renderedLiveText) {
                     $this->line('');
                 }
                 $this->line($this->formatter()->interruptedStatus());
                 return 130;
             }
-            if (! $streamedOutput && $response !== '') {
+            $this->recordTurnHudEvent('turn.completed', $this->summarizeTurnDetail($response));
+            if (! $renderedLiveText && $response !== '') {
                 $this->line($markdownRenderer->render($response));
-            } else {
+            } elseif ($renderedLiveText) {
                 $this->line('');
             }
             $this->printUsageStats($agent);
         } catch (ApiErrorException $e) {
             $turnStatus->pause();
-            $markdownOutput->finalize();
-            if ($streamedOutput) {
+            if ($streamTextOutput) {
+                $markdownOutput->finalize();
+            }
+            $this->recordTurnHudEvent('turn.failed', $this->summarizeTurnDetail($e->getMessage()));
+            if ($renderedLiveText) {
                 $this->line('');
             }
             $this->line("  <fg=red>API Error ({$e->getErrorType()}): {$e->getMessage()}</>");
             return 1;
         } catch (\Throwable $e) {
             $turnStatus->pause();
-            $markdownOutput->finalize();
-            if ($streamedOutput) {
+            if ($streamTextOutput) {
+                $markdownOutput->finalize();
+            }
+            $this->recordTurnHudEvent('turn.failed', $this->summarizeTurnDetail($e->getMessage()));
+            if ($renderedLiveText) {
                 $this->line('');
             }
             $this->line("  <fg=red>Error: {$e->getMessage()}</>");
@@ -734,6 +747,21 @@ class HaoCodeCommand extends Command
             'output-style' => $this->handleOutputStyle($args),
             'dream' => $this->handleDream($args),
             'buddy' => $this->handleBuddy($args),
+            'rename' => $this->handleRename($agent, $args),
+            'effort' => $this->handleEffort($args),
+            'vim' => $this->handleVim(),
+            'copy' => $this->handleCopy($agent),
+            'env' => $this->handleEnv(),
+            'release-notes' => $this->handleReleaseNotes(),
+            'upgrade' => $this->handleUpgrade(),
+            'session' => $this->handleSession($agent),
+            'add-dir' => $this->handleAddDir($args),
+            'pr-comments' => $this->handlePrComments($agent, $args),
+            'agents' => $this->handleAgents(),
+            'feedback' => $this->handleFeedback($args),
+            'login' => $this->handleLogin(),
+            'logout' => $this->handleLogout(),
+            'keybindings' => $this->handleKeybindings(),
             default => $this->line("<fg=yellow>Unknown command: {$command}</>. Type <fg=cyan>/help</> for available commands."),
         };
     }
@@ -796,13 +824,14 @@ class HaoCodeCommand extends Command
                 $this->formatter()->keyValue('Permission mode', $this->formatSettingValue($all['permission_mode'] ?? null)),
                 $this->formatter()->keyValue('Theme', $this->formatSettingValue($all['theme'] ?? null)),
                 $this->formatter()->keyValue('Output style', $this->formatSettingValue($all['output_style'] ?? null)),
+                $this->formatter()->keyValue('Stream output', $this->formatSettingValue($all['stream_output'] ?? null)),
                 $this->formatter()->keyValue('API base URL', $this->formatSettingValue($all['api_base_url'] ?? null), 'gray', 'gray'),
                 $this->formatter()->keyValue('Max tokens', $this->formatSettingValue($all['max_tokens'] ?? null), 'gray', 'gray'),
                 $this->formatter()->keyValue('API key', ! empty($all['api_key_set']) ? 'configured' : 'missing', 'gray', 'gray'),
                 $this->formatter()->keyValue('Configured providers', $this->formatSettingValue($all['configured_providers'] ?? []), 'gray', 'gray'),
                 '',
                 '<fg=gray>Use /config &lt;key&gt; to inspect or /config &lt;key&gt; &lt;value&gt; to change.</>',
-                '<fg=gray>Keys: model, active_provider, permission_mode, theme, output_style, api_base_url, max_tokens</>',
+                '<fg=gray>Keys: model, active_provider, permission_mode, theme, output_style, stream_output, api_base_url, max_tokens</>',
             ];
 
             $this->renderPanel('Runtime config', $lines);
@@ -816,7 +845,7 @@ class HaoCodeCommand extends Command
         if (in_array($verb, ['get', 'show'], true)) {
             $key = $this->normalizeConfigKey($parts[1] ?? '');
             if ($key === null) {
-                $this->line('<fg=red>Unknown config key.</> Supported keys: model, active_provider, permission_mode, theme, output_style, api_base_url, max_tokens');
+                $this->line('<fg=red>Unknown config key.</> Supported keys: model, active_provider, permission_mode, theme, output_style, stream_output, api_base_url, max_tokens');
 
                 return;
             }
@@ -836,7 +865,7 @@ class HaoCodeCommand extends Command
         }
 
         if ($key === null) {
-            $this->line('<fg=red>Unknown config key.</> Supported keys: model, active_provider, permission_mode, theme, output_style, api_base_url, max_tokens');
+            $this->line('<fg=red>Unknown config key.</> Supported keys: model, active_provider, permission_mode, theme, output_style, stream_output, api_base_url, max_tokens');
 
             return;
         }
@@ -2839,28 +2868,37 @@ class HaoCodeCommand extends Command
     private function runAgentTurn(AgentLoop $agent, string $input): void
     {
         $this->line('');
-        $streamedOutput = false;
+        $streamTextOutput = $this->shouldStreamAssistantText();
+        $renderedLiveText = false;
         $markdownRenderer = app(MarkdownRenderer::class);
         $markdownOutput = $this->createStreamingMarkdownOutput($markdownRenderer);
         $turnStatus = $this->createTurnStatusRenderer($input);
         $previousAlarmHandler = $this->startTurnStatusTicker($turnStatus);
 
         try {
+            $this->recordTurnHudEvent('turn.started', $this->summarizeTurnDetail($input));
             $turnStatus->start();
 
             $response = $agent->run(
                 userInput: $input,
-                onTextDelta: function (string $text) use (&$streamedOutput, $turnStatus, $markdownOutput) {
+                onTextDelta: function (string $text) use (&$renderedLiveText, $turnStatus, $markdownOutput, $streamTextOutput) {
                     $turnStatus->recordTextDelta($text);
+
+                    if (! $streamTextOutput) {
+                        return;
+                    }
+
                     $turnStatus->pause();
-                    $streamedOutput = true;
+                    $renderedLiveText = true;
                     $markdownOutput->append($text);
                 },
-                onToolStart: function (string $toolName, array $toolInput) use (&$streamedOutput, $turnStatus, $markdownOutput) {
+                onToolStart: function (string $toolName, array $toolInput) use ($turnStatus, $markdownOutput, $streamTextOutput) {
                     $turnStatus->pause();
-                    $streamedOutput = true;
-                    $markdownOutput->finalize();
+                    if ($streamTextOutput) {
+                        $markdownOutput->finalize();
+                    }
                     $args = $this->summarizeToolInput($toolName, $toolInput);
+                    $this->recordTurnHudEvent('tool.started', $this->summarizeTurnDetail(trim($toolName.($args !== '' ? ': '.$args : ''))));
                     $this->line("\n".$this->formatter()->toolCall($toolName, $args));
                     $turnStatus->setPhaseLabel($toolName);
                     $turnStatus->resume();
@@ -2868,24 +2906,34 @@ class HaoCodeCommand extends Command
                 onToolComplete: function (string $toolName, $result) use ($turnStatus) {
                     $turnStatus->pause();
                     $turnStatus->setPhaseLabel(null);
+                    $event = in_array($toolName, ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskStop'], true)
+                        ? 'plan.updated'
+                        : 'tool.completed';
+                    $detail = $toolName;
                     if ($result->isError) {
                         $message = trim((string) $result->output);
+                        $detail = trim($toolName.' · '.($message === '' ? 'Unknown error' : $message));
                         $this->line($this->formatter()->toolFailure($toolName, $message === '' ? 'Unknown error' : $message));
                     }
+                    $this->recordTurnHudEvent($event, $this->summarizeTurnDetail($detail));
                     $turnStatus->resume();
                 },
             );
 
             $turnStatus->pause();
-            $markdownOutput->finalize();
+            if ($streamTextOutput) {
+                $markdownOutput->finalize();
+            }
             if ($response === '(aborted)') {
-                if ($streamedOutput) {
+                $this->recordTurnHudEvent('turn.failed', 'aborted');
+                if ($renderedLiveText) {
                     $this->line('');
                 }
                 $this->line($this->formatter()->interruptedStatus());
                 return;
             }
-            if (! $streamedOutput && $response !== '') {
+            $this->recordTurnHudEvent('turn.completed', $this->summarizeTurnDetail($response));
+            if (! $renderedLiveText && $response !== '') {
                 $this->line($markdownRenderer->render($response));
             }
             $this->line("\n");
@@ -2929,10 +2977,12 @@ class HaoCodeCommand extends Command
         } catch (ApiErrorException $e) {
             $turnStatus->pause();
             $markdownOutput->finalize();
+            $this->recordTurnHudEvent('turn.failed', $this->summarizeTurnDetail($e->getMessage()));
             $this->line("\n  <fg=red>API Error ({$e->getErrorType()}): {$e->getMessage()}</>\n");
         } catch (\Throwable $e) {
             $turnStatus->pause();
             $markdownOutput->finalize();
+            $this->recordTurnHudEvent('turn.failed', $this->summarizeTurnDetail($e->getMessage()));
             $this->line("\n  <fg=red>Error: {$e->getMessage()}</>\n");
             if (config('app.debug')) {
                 $this->line("  <fg=gray>{$e->getFile()}:{$e->getLine()}</>\n");
@@ -3381,6 +3431,7 @@ PROMPT;
             'permission_mode', 'permission-mode', 'permission', 'permissions' => 'permission_mode',
             'theme' => 'theme',
             'output_style', 'output-style', 'style' => 'output_style',
+            'stream_output', 'stream-output', 'stream', 'streaming' => 'stream_output',
             default => null,
         };
     }
@@ -3558,11 +3609,17 @@ PROMPT;
         return new TurnStatusRenderer($this->output, $this->formatter(), $input);
     }
 
+    private function shouldStreamAssistantText(): bool
+    {
+        return app(SettingsManager::class)->isStreamOutputEnabled();
+    }
+
     private function createStreamingMarkdownOutput(?MarkdownRenderer $renderer = null): StreamingMarkdownOutput
     {
         return new StreamingMarkdownOutput(
             output: $this->output,
             renderer: $renderer ?? app(MarkdownRenderer::class),
+            minRenderIntervalMs: max(40, (int) config('haocode.stream_render_interval_ms', 120)),
         );
     }
 
@@ -3852,11 +3909,16 @@ PROMPT;
     private function renderPromptFooter(AgentLoop $agent): void
     {
         $settings = app(SettingsManager::class);
-        if (! $settings->isStatuslineEnabled()) {
+        $snapshot = $this->buildPromptHudSnapshot($agent);
+        $lines = $settings->isStatuslineEnabled()
+            ? $this->formatter()->promptFooterLines($snapshot)
+            : [];
+
+        if ($lines === []) {
             return;
         }
 
-        foreach ($this->formatter()->promptFooterLines($this->buildPromptHudSnapshot($agent)) as $line) {
+        foreach ($lines as $line) {
             $this->line($line);
         }
     }
@@ -3878,6 +3940,7 @@ PROMPT;
      *   context_state: string,
      *   cost: float,
      *   cost_warn: float,
+     *   turn: array{event: string, label: string, detail: string|null}|null,
      *   show_tools: bool,
      *   show_agents: bool,
      *   show_todos: bool,
@@ -3932,6 +3995,7 @@ PROMPT;
                 : (($contextState['isWarning'] ?? false) ? 'warning' : 'normal'),
             'cost' => $agent->getEstimatedCost(),
             'cost_warn' => $agent->getCostTracker()->getWarnThreshold(),
+            'turn' => $hud->summarizeTurn(),
             'show_tools' => $statusline['show_tools'],
             'show_agents' => $statusline['show_agents'],
             'show_todos' => $statusline['show_todos'],
@@ -3943,8 +4007,23 @@ PROMPT;
 
     private function refreshPromptHudState(AgentLoop $agent): void
     {
+        $hud = app(PromptHudState::class);
+        $turn = $hud->summarizeTurn();
         $entries = $agent->getSessionManager()->loadSession($agent->getSessionManager()->getSessionId());
-        app(PromptHudState::class)->hydrateFromSessionEntries($entries);
+        $hud->hydrateFromSessionEntries($entries);
+        $hud->restoreTurnSummary($turn);
+    }
+
+    private function recordTurnHudEvent(string $event, ?string $detail = null): void
+    {
+        app(PromptHudState::class)->recordTurnEvent($event, $detail);
+    }
+
+    private function summarizeTurnDetail(string $detail, int $max = 72): string
+    {
+        $normalized = preg_replace('/\s+/', ' ', trim($detail)) ?? '';
+
+        return $normalized === '' ? '' : $this->truncate($normalized, $max);
     }
 
     private function hudProjectLabel(GitContext $git, int $pathLevels): string
@@ -4265,5 +4344,442 @@ PROMPT;
     private function displayWidth(string $text): int
     {
         return function_exists('mb_strwidth') ? mb_strwidth($text, 'UTF-8') : strlen($text);
+    }
+
+    private function handleRename(AgentLoop $agent, string $args): void
+    {
+        $args = trim($args);
+        $sessionManager = $agent->getSessionManager();
+
+        if ($args !== '') {
+            $sessionManager->setTitle($args);
+            $this->line('<fg=green>Session renamed to:</> <fg=white>' . $args . '</>');
+            return;
+        }
+
+        $messages = $agent->getMessageHistory()->getMessages();
+        if (empty($messages)) {
+            $this->line('<fg=yellow>No conversation yet. Use /rename <title> to set a title.</>');
+            return;
+        }
+
+        $this->line('<fg=gray>Generating title from conversation...</>');
+        $this->runAgentTurn($agent, 'Generate a short, descriptive title (max 6 words) for this conversation. Reply with ONLY the title text, nothing else.');
+    }
+
+    private function handleEffort(string $args): void
+    {
+        $settings = app(SettingsManager::class);
+        $args = strtolower(trim($args));
+        $validLevels = ['low', 'medium', 'high', 'max', 'auto'];
+
+        if ($args === '') {
+            $current = $settings->getEffortLevel();
+            $lines = [
+                $this->formatter()->keyValue('Current', $current),
+                '<fg=gray>Available: ' . implode(', ', $validLevels) . '</>',
+                '<fg=gray>low/medium = standard, high = thinking (10K), max = thinking (32K)</>',
+            ];
+            $this->renderPanel('Reasoning effort', $lines);
+            return;
+        }
+
+        if (! in_array($args, $validLevels, true)) {
+            $this->line('<fg=red>Invalid effort level:</> <fg=white>' . $args . '</>');
+            $this->line('<fg=gray>Available: ' . implode(', ', $validLevels) . '</>');
+            return;
+        }
+
+        $settings->set('effort_level', $args);
+
+        match ($args) {
+            'low', 'medium', 'auto' => (function () use ($settings) {
+                $settings->set('thinking_enabled', false);
+            })(),
+            'high' => (function () use ($settings) {
+                $settings->set('thinking_enabled', true);
+                $settings->set('thinking_budget', 10000);
+            })(),
+            'max' => (function () use ($settings) {
+                $settings->set('thinking_enabled', true);
+                $settings->set('thinking_budget', 32000);
+            })(),
+        };
+
+        $this->line('<fg=green>Effort set to:</> <fg=white>' . $args . '</>');
+    }
+
+    private function handleVim(): void
+    {
+        $settings = app(SettingsManager::class);
+        $current = $settings->isVimMode();
+        $settings->set('vim_mode', ! $current);
+
+        if (! $current) {
+            $this->line('<fg=green>Vim mode enabled</> <fg=gray>— Escape to enter normal mode, i to insert</>');
+        } else {
+            $this->line('<fg=gray>Vim mode disabled</> — standard editing restored');
+        }
+    }
+
+    private function handleCopy(AgentLoop $agent): void
+    {
+        $text = $agent->getMessageHistory()->getLastAssistantText();
+
+        if ($text === null) {
+            $this->line('<fg=yellow>No assistant response to copy.</>');
+            return;
+        }
+
+        if ($this->copyToClipboard($text)) {
+            $len = mb_strlen($text);
+            $this->line("<fg=green>Copied to clipboard</> <fg=gray>({$len} chars)</>");
+        } else {
+            $this->line('<fg=red>Failed to copy — no clipboard utility found (pbcopy/xclip/xsel).</>');
+        }
+    }
+
+    private function copyToClipboard(string $text): bool
+    {
+        if (PHP_OS_FAMILY === 'Darwin') {
+            $proc = proc_open('pbcopy', [['pipe', 'r']], $pipes);
+            if (is_resource($proc)) {
+                fwrite($pipes[0], $text);
+                fclose($pipes[0]);
+                return proc_close($proc) === 0;
+            }
+        }
+
+        if (PHP_OS_FAMILY === 'Linux') {
+            foreach (['xclip -selection clipboard', 'xsel --clipboard --input', 'wl-copy'] as $cmd) {
+                $binary = explode(' ', $cmd)[0];
+                if (shell_exec("which {$binary} 2>/dev/null")) {
+                    $proc = proc_open($cmd, [['pipe', 'r']], $pipes);
+                    if (is_resource($proc)) {
+                        fwrite($pipes[0], $text);
+                        fclose($pipes[0]);
+                        return proc_close($proc) === 0;
+                    }
+                }
+            }
+        }
+
+        if (str_contains(strtolower(php_uname('r')), 'microsoft')) {
+            $proc = proc_open('clip.exe', [['pipe', 'r']], $pipes);
+            if (is_resource($proc)) {
+                fwrite($pipes[0], $text);
+                fclose($pipes[0]);
+                return proc_close($proc) === 0;
+            }
+        }
+
+        return false;
+    }
+
+    private function handleEnv(): void
+    {
+        $settings = app(SettingsManager::class);
+
+        $lines = [
+            $this->formatter()->keyValue('PHP', PHP_VERSION),
+            $this->formatter()->keyValue('Laravel', app()->version()),
+            $this->formatter()->keyValue('OS', PHP_OS_FAMILY . ' ' . php_uname('r')),
+            $this->formatter()->keyValue('Shell', getenv('SHELL') ?: 'unknown'),
+            $this->formatter()->keyValue('Terminal', getenv('TERM') ?: 'unknown'),
+            $this->formatter()->keyValue('CWD', (string) getcwd()),
+            $this->formatter()->keyValue('Model', $settings->getResolvedModelIdentifier()),
+            $this->formatter()->keyValue('Provider', (string) $settings->getActiveProviderName(), 'gray', 'gray'),
+            $this->formatter()->keyValue('API base', $settings->getBaseUrl()),
+            $this->formatter()->keyValue('Thinking', $settings->isThinkingEnabled() ? 'enabled ('.$settings->getThinkingBudget().' tokens)' : 'disabled', 'gray', 'gray'),
+            $this->formatter()->keyValue('Effort', $settings->getEffortLevel()),
+            $this->formatter()->keyValue('Stream', $settings->getStreamMode()),
+            $this->formatter()->keyValue('Permission', $settings->getPermissionMode()->value),
+        ];
+
+        $this->renderPanel('Environment', $lines);
+    }
+
+    private function handleReleaseNotes(): void
+    {
+        $changelogPath = base_path('CHANGELOG.md');
+
+        if (! file_exists($changelogPath)) {
+            $this->line('<fg=yellow>No CHANGELOG.md found.</>');
+            $this->line('<fg=gray>Visit https://github.com/sk-wang/hao-code/releases for release notes.</>');
+            return;
+        }
+
+        $content = (string) file_get_contents($changelogPath);
+        $lines = explode("\n", $content);
+        $output = [];
+        $inSection = false;
+
+        foreach ($lines as $line) {
+            if (preg_match('/^## /', $line)) {
+                if ($inSection) {
+                    break;
+                }
+                $inSection = true;
+            }
+            if ($inSection) {
+                $output[] = $line;
+            }
+        }
+
+        if ($output === []) {
+            $this->line('<fg=gray>No release notes found in CHANGELOG.md</>');
+            return;
+        }
+
+        $version = $this->displayPackageVersion();
+        $this->line('');
+        $this->line("  <fg=cyan;bold>Release Notes</> <fg=white>{$version}</>");
+        $this->line('');
+        foreach (array_slice($output, 0, 40) as $line) {
+            $this->line('  ' . $line);
+        }
+        $this->line('');
+    }
+
+    private function handleUpgrade(): void
+    {
+        $version = $this->displayPackageVersion();
+        $lines = [
+            $this->formatter()->keyValue('Current version', $version),
+            '',
+            '<fg=white>To upgrade hao-code:</>',
+            '<fg=green>  composer global update sk-wang/hao-code</>',
+            '',
+            '<fg=gray>Or if installed locally:</>',
+            '<fg=green>  composer update sk-wang/hao-code</>',
+            '',
+            '<fg=gray>Check latest version at:</>',
+            '<fg=cyan>  https://github.com/sk-wang/hao-code/releases</>',
+        ];
+
+        $this->renderPanel('Upgrade', $lines);
+    }
+
+    // ── Batch 2 command handlers ────────────────────────────────────
+
+    private function handleSession(AgentLoop $agent): void
+    {
+        $sm = $agent->getSessionManager();
+        $settings = app(SettingsManager::class);
+        $f = $this->formatter();
+
+        $lines = [
+            $f->keyValue('Session ID', $sm->getSessionId()),
+            $f->keyValue('Title', $sm->getTitle() ?? '<fg=gray>(untitled)</>'),
+            $f->keyValue('Model', $settings->getResolvedModelIdentifier()),
+            $f->keyValue('Provider', (string) ($settings->getActiveProviderName() ?? 'default')),
+            $f->keyValue('Messages', (string) $agent->getMessageHistory()->count()),
+            $f->keyValue('Input tokens', number_format($agent->getTotalInputTokens())),
+            $f->keyValue('Output tokens', number_format($agent->getTotalOutputTokens())),
+            $f->keyValue('Est. cost', '$'.$agent->getEstimatedCost()),
+            $f->keyValue('CWD', (string) getcwd()),
+            $f->keyValue('Permission', $settings->getPermissionMode()->value),
+        ];
+
+        $cacheWrite = $agent->getCacheCreationTokens();
+        $cacheRead = $agent->getCacheReadTokens();
+        if ($cacheWrite > 0) {
+            $lines[] = $f->keyValue('Cache write', number_format($cacheWrite));
+        }
+        if ($cacheRead > 0) {
+            $lines[] = $f->keyValue('Cache read', number_format($cacheRead));
+        }
+
+        $this->renderPanel('Session', $lines);
+    }
+
+    private function handleAddDir(string $args): void
+    {
+        $path = trim($args);
+
+        if ($path === '') {
+            $this->line('<fg=yellow>Usage:</> /add-dir <path>');
+            $this->line('<fg=gray>Adds a directory to the allowed paths for this session.</>');
+
+            return;
+        }
+
+        $resolved = realpath($path);
+        if ($resolved === false || ! is_dir($resolved)) {
+            $this->line("<fg=red>Directory not found:</> <fg=white>{$path}</>");
+
+            return;
+        }
+
+        $settings = app(SettingsManager::class);
+        $rule = "Read({$resolved}/*:*)";
+        $settings->addAllowRule($rule);
+
+        $bashRule = "Bash({$resolved}:*)";
+        $settings->addAllowRule($bashRule);
+
+        $this->line("<fg=green>Added directory:</> <fg=white>{$resolved}</>");
+        $this->line("<fg=gray>  + {$rule}</>");
+        $this->line("<fg=gray>  + {$bashRule}</>");
+        $this->line('<fg=gray>Use /permissions to review all rules.</>');
+    }
+
+    private function handlePrComments(AgentLoop $agent, string $args): void
+    {
+        $prNumber = trim($args);
+
+        $prompt = 'Fetch and summarize the comments on ';
+        if ($prNumber !== '' && is_numeric($prNumber)) {
+            $prompt .= "PR #{$prNumber}";
+        } else {
+            $prompt .= 'the current branch\'s open pull request';
+        }
+        $prompt .= ". Use the Bash tool to run:\n";
+        $prompt .= "1. `gh pr view" . ($prNumber !== '' ? " {$prNumber}" : '') . " --json number,title,url,body,author` to get PR info\n";
+        $prompt .= "2. `gh api repos/{owner}/{repo}/pulls/{number}/comments` to get review comments\n";
+        $prompt .= "3. `gh api repos/{owner}/{repo}/issues/{number}/comments` to get issue-level comments\n";
+        $prompt .= "Summarize all comments grouped by file, showing the author, comment body, and any code context (diff_hunk). ";
+        $prompt .= "Highlight any unresolved threads or action items.";
+
+        $this->line('<fg=gray>Fetching PR comments…</>');
+        $this->runAgentTurn($agent, $prompt);
+    }
+
+    private function handleAgents(): void
+    {
+        $registry = app(\App\Tools\ToolRegistry::class);
+        $tools = $registry->getAllTools();
+
+        if ($tools === []) {
+            $this->line('<fg=yellow>No tools registered.</>');
+
+            return;
+        }
+
+        $lines = [];
+        foreach ($tools as $name => $tool) {
+            $desc = $tool->description();
+            $readOnly = $tool->isReadOnly([]) ? '<fg=green>read-only</>' : '<fg=yellow>write</>';
+            $lines[] = "<fg=cyan>{$name}</> [{$readOnly}]";
+            if ($desc !== '') {
+                $truncated = mb_strlen($desc) > 80 ? mb_substr($desc, 0, 77).'...' : $desc;
+                $lines[] = "  <fg=gray>{$truncated}</>";
+            }
+        }
+
+        $this->renderPanel('Tools & Agents ('.count($tools).')', $lines);
+    }
+
+    private function handleFeedback(string $args): void
+    {
+        $this->line('');
+        $this->line('  <fg=cyan;bold>Feedback</>');
+        $this->line('');
+        $this->line('  <fg=white>Report bugs or request features:</>');
+        $this->line('  <fg=cyan>  https://github.com/sk-wang/hao-code/issues</>');
+        $this->line('');
+
+        if (trim($args) !== '') {
+            $this->line('  <fg=gray>Your feedback:</> <fg=white>'.trim($args).'</>');
+            $this->line('  <fg=gray>Please open an issue with the details above.</>');
+            $this->line('');
+        }
+    }
+
+    private function handleLogin(): void
+    {
+        $settings = app(SettingsManager::class);
+        $currentKey = $settings->getApiKey();
+
+        if ($currentKey !== '') {
+            $masked = substr($currentKey, 0, 8).'…'.substr($currentKey, -4);
+            $this->line("<fg=gray>Current API key:</> <fg=white>{$masked}</>");
+            $this->line('');
+        }
+
+        $this->line('<fg=cyan;bold>Set API Key</>');
+        $this->line('');
+        $this->line('<fg=white>Option 1:</> Set via environment variable');
+        $this->line('<fg=green>  export ANTHROPIC_API_KEY=sk-ant-...</>');
+        $this->line('');
+        $this->line('<fg=white>Option 2:</> Set in global settings');
+
+        $globalPath = ($_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir()).'/.haocode/settings.json';
+        $this->line("<fg=green>  echo '{\"api_key\": \"sk-ant-...\"}' > {$globalPath}</>");
+        $this->line('');
+        $this->line('<fg=white>Option 3:</> Set in project settings');
+        $this->line('<fg=green>  echo \'{"api_key": "sk-ant-..."}\' > .haocode/settings.json</>');
+        $this->line('');
+        $this->line('<fg=gray>Get your API key at: https://console.anthropic.com/settings/keys</>');
+        $this->line('');
+    }
+
+    private function handleLogout(): void
+    {
+        $settings = app(SettingsManager::class);
+        $currentKey = $settings->getApiKey();
+
+        if ($currentKey === '') {
+            $this->line('<fg=gray>No API key configured — already logged out.</>');
+
+            return;
+        }
+
+        $globalPath = ($_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir()).'/.haocode/settings.json';
+
+        if (file_exists($globalPath)) {
+            $globalSettings = json_decode((string) file_get_contents($globalPath), true) ?? [];
+            if (isset($globalSettings['api_key'])) {
+                unset($globalSettings['api_key']);
+                file_put_contents($globalPath, json_encode($globalSettings, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+                $this->line('<fg=green>Removed API key from global settings.</>');
+            }
+        }
+
+        $projectPath = getcwd().'/.haocode/settings.json';
+        if (file_exists($projectPath)) {
+            $projectSettings = json_decode((string) file_get_contents($projectPath), true) ?? [];
+            if (isset($projectSettings['api_key'])) {
+                unset($projectSettings['api_key']);
+                file_put_contents($projectPath, json_encode($projectSettings, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+                $this->line('<fg=green>Removed API key from project settings.</>');
+            }
+        }
+
+        $settings->set('model', $settings->getModel());
+
+        $this->line('<fg=gray>Logged out. Unset ANTHROPIC_API_KEY env var if set.</>');
+    }
+
+    private function handleKeybindings(): void
+    {
+        $globalDir = ($_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir()).'/.haocode';
+        $keybindingsPath = $globalDir.'/keybindings.json';
+
+        if (! file_exists($keybindingsPath)) {
+            if (! is_dir($globalDir)) {
+                mkdir($globalDir, 0755, true);
+            }
+
+            $template = json_encode([
+                '_comment' => 'Keybindings for hao-code. Keys use readline-style notation.',
+                'bindings' => [
+                    ['key' => 'ctrl+a', 'action' => 'beginning-of-line'],
+                    ['key' => 'ctrl+e', 'action' => 'end-of-line'],
+                    ['key' => 'ctrl+k', 'action' => 'kill-line'],
+                    ['key' => 'ctrl+u', 'action' => 'unix-line-discard'],
+                    ['key' => 'ctrl+w', 'action' => 'unix-word-rubout'],
+                    ['key' => 'ctrl+l', 'action' => 'clear-screen'],
+                ],
+            ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+
+            file_put_contents($keybindingsPath, $template);
+            $this->line("<fg=green>Created keybindings template:</> <fg=white>{$keybindingsPath}</>");
+        } else {
+            $this->line("<fg=gray>Keybindings file:</> <fg=white>{$keybindingsPath}</>");
+        }
+
+        $editor = getenv('EDITOR') ?: getenv('VISUAL') ?: 'vi';
+        $this->line("<fg=gray>Open with:</> <fg=cyan>{$editor} {$keybindingsPath}</>");
     }
 }

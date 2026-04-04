@@ -60,6 +60,22 @@ class StreamingMarkdownOutputTest extends TestCase
         $this->assertFalse($stream->hasReceivedContent());
     }
 
+    public function test_default_live_repaint_interval_is_less_aggressive(): void
+    {
+        $stream = new StreamingMarkdownOutput(
+            output: $this->buffered(),
+            renderer: new MarkdownRenderer(40),
+            terminalWidth: 40,
+            liveRepaint: true,
+        );
+
+        $ref = new \ReflectionClass($stream);
+        $prop = $ref->getProperty('minRenderIntervalMs');
+        $prop->setAccessible(true);
+
+        $this->assertSame(120, $prop->getValue($stream));
+    }
+
     // ─── finalize with no content ─────────────────────────────────────────
 
     public function test_finalize_with_no_content_writes_nothing(): void
