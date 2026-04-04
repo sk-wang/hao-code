@@ -1664,23 +1664,33 @@ class HaoCodeCommand extends Command
 
     private function handleDiff(): void
     {
-        $stat = shell_exec('git diff --stat HEAD 2>/dev/null');
-        if (empty(trim($stat ?? ''))) {
-            // Try staged only
-            $stat = shell_exec('git diff --cached --stat 2>/dev/null');
-        }
+        $stagedStat = trim(shell_exec('git diff --cached --stat 2>/dev/null') ?? '');
+        $unstagedStat = trim(shell_exec('git diff --stat 2>/dev/null') ?? '');
 
-        if (empty(trim($stat ?? ''))) {
+        if ($stagedStat === '' && $unstagedStat === '') {
             $this->line('<fg=gray>No uncommitted changes.</>');
 
             return;
         }
 
-        $this->line("\n  <fg=cyan;bold>Uncommitted Changes:</>");
-        $this->line("<fg=gray>{$stat}</>");
+        if ($stagedStat !== '') {
+            $this->line("\n  <fg=green;bold>Staged Changes:</>");
+            $this->line("<fg=gray>{$stagedStat}</>");
+        }
+
+        if ($unstagedStat !== '') {
+            $this->line("\n  <fg=yellow;bold>Unstaged Changes:</>");
+            $this->line("<fg=gray>{$unstagedStat}</>");
+        }
 
         // Show colored full diff if not too large
-        $fullDiff = shell_exec('git diff HEAD 2>/dev/null') ?: shell_exec('git diff --cached 2>/dev/null') ?: '';
+        $fullDiff = '';
+        if ($stagedStat !== '') {
+            $fullDiff .= shell_exec('git diff --cached 2>/dev/null') ?? '';
+        }
+        if ($unstagedStat !== '') {
+            $fullDiff .= shell_exec('git diff 2>/dev/null') ?? '';
+        }
 
         if (mb_strlen($fullDiff) > 8000) {
             $this->line('  <fg=gray>(diff too large to display — run `git diff` in your terminal)</>');
@@ -1692,6 +1702,7 @@ class HaoCodeCommand extends Command
             return;
         }
 
+        $this->line('');
         foreach (explode("\n", $fullDiff) as $line) {
             if (str_starts_with($line, '+++') || str_starts_with($line, '---')) {
                 $this->line("<fg=cyan>{$line}</>");
@@ -2186,9 +2197,26 @@ class HaoCodeCommand extends Command
             $name = $skill['name'] ?? 'unknown';
             $desc = $skill['description'] ?? '';
             $userInvocable = ($skill['user_invocable'] ?? false) ? '<fg=green>/</>' : '<fg=gray>auto</>';
-            $lines[] = "{$userInvocable} <fg=yellow>{$name}</> <fg=gray>{$desc}</>";
+            $source = isset($skill['source']) ? basename(dirname($skill['source'])) : '';
+            $argHint = $skill['argument_hint'] ?? null;
+
+            $line = "{$userInvocable} <fg=yellow>{$name}</>";
+            if ($argHint) {
+                $line .= " <fg=white>{$argHint}</>";
+            }
+            if ($desc !== '') {
+                $line .= " <fg=gray>— {$desc}</>";
+            }
+            if ($source !== '') {
+                $line .= " <fg=gray>[{$source}]</>";
+            }
+            $lines[] = $line;
         }
-        $this->renderPanel('Available skills', $lines);
+
+        $lines[] = '';
+        $lines[] = '<fg=gray>/ = user-invocable (/skill-name), auto = triggered automatically</>';
+        $lines[] = '<fg=gray>Skill directories: ~/.haocode/skills/, .haocode/skills/</>';
+        $this->renderPanel('Available skills ('.count($skills).')', $lines);
     }
 
     private function handlePermissions(string $args): void
@@ -2570,15 +2598,72 @@ class HaoCodeCommand extends Command
             $info['test_command'] = '';
         }
 
+        // Package manager detection
+        if (file_exists($cwd . '/composer.json')) {
+            $info['package_manager'] = 'Composer';
+        }
+        if (file_exists($cwd . '/pnpm-lock.yaml')) {
+            $info['package_manager'] = 'pnpm';
+        } elseif (file_exists($cwd . '/yarn.lock')) {
+            $info['package_manager'] = 'Yarn';
+        } elseif (file_exists($cwd . '/package-lock.json')) {
+            $info['package_manager'] = 'npm';
+        }
+        if (file_exists($cwd . '/Pipfile')) {
+            $info['package_manager'] = 'Pipenv';
+        } elseif (file_exists($cwd . '/poetry.lock')) {
+            $info['package_manager'] = 'Poetry';
+        } elseif (file_exists($cwd . '/requirements.txt')) {
+            $info['package_manager'] = $info['package_manager'] ?? 'pip';
+        }
+        if (file_exists($cwd . '/go.sum')) {
+            $info['package_manager'] = 'Go Modules';
+        }
+        if (file_exists($cwd . '/Cargo.lock')) {
+            $info['package_manager'] = 'Cargo';
+        }
+        if (file_exists($cwd . '/pom.xml')) {
+            $info['package_manager'] = 'Maven';
+            $info['framework'] = $info['framework'] ?? 'Java';
+            $info['test_command'] = $info['test_command'] ?? 'mvn test';
+        }
+        if (file_exists($cwd . '/build.gradle') || file_exists($cwd . '/build.gradle.kts')) {
+            $info['package_manager'] = 'Gradle';
+            $info['framework'] = $info['framework'] ?? 'Java';
+            $info['test_command'] = $info['test_command'] ?? './gradlew test';
+        }
+
         // Lint/format detection
+        $linters = [];
         if (file_exists($cwd . '/.php-cs-fixer.php') || file_exists($cwd . '/.php-cs-fixer.dist.php')) {
-            $info['linter'] = 'PHP-CS-Fixer';
-        } elseif (file_exists($cwd . '/pint.json')) {
-            $info['linter'] = 'Laravel Pint';
-        } elseif (file_exists($cwd . '/.eslintrc') || file_exists($cwd . '/.eslintrc.js') || file_exists($cwd . '/eslint.config.js')) {
-            $info['linter'] = 'ESLint';
-        } elseif (file_exists($cwd . '/.prettierrc')) {
-            $info['formatter'] = 'Prettier';
+            $linters[] = 'PHP-CS-Fixer';
+        }
+        if (file_exists($cwd . '/pint.json')) {
+            $linters[] = 'Laravel Pint';
+        }
+        if (file_exists($cwd . '/.eslintrc') || file_exists($cwd . '/.eslintrc.js') || file_exists($cwd . '/eslint.config.js') || file_exists($cwd . '/.eslintrc.json')) {
+            $linters[] = 'ESLint';
+        }
+        if (file_exists($cwd . '/.prettierrc') || file_exists($cwd . '/.prettierrc.json') || file_exists($cwd . '/prettier.config.js')) {
+            $linters[] = 'Prettier';
+        }
+        if (file_exists($cwd . '/biome.json') || file_exists($cwd . '/biome.jsonc')) {
+            $linters[] = 'Biome';
+        }
+        if (file_exists($cwd . '/rustfmt.toml') || file_exists($cwd . '/.rustfmt.toml')) {
+            $linters[] = 'rustfmt';
+        }
+        if (file_exists($cwd . '/pyproject.toml')) {
+            $pyproject = file_get_contents($cwd . '/pyproject.toml');
+            if (str_contains($pyproject, '[tool.ruff]') || str_contains($pyproject, 'ruff')) {
+                $linters[] = 'Ruff';
+            }
+            if (str_contains($pyproject, '[tool.black]') || str_contains($pyproject, 'black')) {
+                $linters[] = 'Black';
+            }
+        }
+        if ($linters !== []) {
+            $info['linter'] = implode(', ', $linters);
         }
 
         // CI detection
@@ -2586,6 +2671,15 @@ class HaoCodeCommand extends Command
             $info['ci'] = 'GitHub Actions';
         } elseif (file_exists($cwd . '/.gitlab-ci.yml')) {
             $info['ci'] = 'GitLab CI';
+        } elseif (file_exists($cwd . '/Jenkinsfile')) {
+            $info['ci'] = 'Jenkins';
+        } elseif (file_exists($cwd . '/.circleci/config.yml')) {
+            $info['ci'] = 'CircleCI';
+        }
+
+        // Monorepo detection
+        if (file_exists($cwd . '/lerna.json') || file_exists($cwd . '/pnpm-workspace.yaml')) {
+            $info['structure'] = 'monorepo';
         }
 
         return $info;
@@ -3356,9 +3450,24 @@ Git safety protocol:
 
 Task:
 1. Analyze the changes and infer the repository's commit style from recent history.
-2. Stage the relevant files.
-3. Create a single commit with a concise message focused on the intent of the change.
-4. After the commit succeeds, report the final commit hash and subject line.
+2. Stage the relevant files by name (avoid `git add -A` or `git add .`).
+3. Create a single commit with a concise message focused on the "why" rather than the "what".
+4. IMPORTANT: Pass the commit message via a HEREDOC to ensure correct formatting:
+   git commit -m "\$(cat <<'EOF'
+   <commit message here>
+
+   Co-Authored-By: Claude <noreply@anthropic.com>
+   EOF
+   )"
+5. After the commit succeeds, report the final commit hash and subject line.
+
+Commit message guidelines:
+- Follow the repository's commit style (look at recent commits above).
+- If no clear style, use conventional commits: type(scope): description
+  Types: feat, fix, refactor, docs, test, chore, perf, style, ci
+- Summarize the nature of the change in 1-2 sentences.
+- Focus on intent and purpose, not what files changed.
+- Always add Co-Authored-By attribution as shown above.
 PROMPT
         . ($extraInstruction !== '' ? "\n\nExtra user instruction:\n{$extraInstruction}\n" : '');
     }

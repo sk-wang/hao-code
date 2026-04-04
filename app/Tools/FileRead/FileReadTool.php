@@ -67,6 +67,13 @@ DESC;
         $limit = $input['limit'] ?? 2000;
 
         if (!file_exists($filePath)) {
+            // Still record the read attempt so Edit knows we tried
+        } else {
+            // Track that this file was read (for Edit read-before-write enforcement)
+            $context->recordFileRead($filePath);
+        }
+
+        if (!file_exists($filePath)) {
             return ToolResult::error("File does not exist: {$filePath}");
         }
 

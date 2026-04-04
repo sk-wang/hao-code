@@ -97,6 +97,8 @@ class AgentLoop
             // every subsequent turn — even after compaction has already cut the context.
             if ($this->contextCompactor->shouldAutoCompact($this->lastTurnInputTokens)) {
                 $this->contextCompactor->compact($this->messageHistory);
+            } elseif ($this->contextCompactor->shouldMicroCompact($this->lastTurnInputTokens)) {
+                $this->contextCompactor->microCompact($this->messageHistory);
             }
 
             // 2. Build system prompt

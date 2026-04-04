@@ -69,6 +69,14 @@ DESC;
             return ToolResult::error("File does not exist: {$filePath}");
         }
 
+        // Enforce read-before-write: file must have been read in this conversation
+        if (!$context->wasFileRead($filePath)) {
+            return ToolResult::error(
+                "You must use the Read tool to read this file before editing it. " .
+                "This tool will error if you attempt an edit without reading the file first."
+            );
+        }
+
         if (!is_writable($filePath)) {
             return ToolResult::error("File is not writable: {$filePath}");
         }

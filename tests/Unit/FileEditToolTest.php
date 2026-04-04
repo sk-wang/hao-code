@@ -24,6 +24,8 @@ class FileEditToolTest extends TestCase
     {
         $path = tempnam(sys_get_temp_dir(), 'edit_test_');
         file_put_contents($path, $content);
+        // Record file as read so edit read-before-write enforcement passes
+        $this->context->recordFileRead($path);
         return $path;
     }
 

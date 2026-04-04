@@ -111,6 +111,12 @@ class ContextCompactor
             && $this->compactFailures < self::MAX_COMPACT_FAILURES;
     }
 
+    public function shouldMicroCompact(int $totalInputTokens): bool
+    {
+        return $totalInputTokens > self::MICRO_COMPACT_THRESHOLD
+            && $totalInputTokens <= self::AUTO_COMPACT_THRESHOLD;
+    }
+
     /**
      * Return a tiered warning state based on current token usage.
      *
