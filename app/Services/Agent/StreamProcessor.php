@@ -17,6 +17,8 @@ class StreamProcessor
 
     private ?string $messageId = null;
 
+    private ?string $model = null;
+
     /** @var callable|null Callback invoked when a tool_use block completes during streaming */
     private $onToolBlockComplete = null;
 
@@ -71,6 +73,7 @@ class StreamProcessor
     private function handleMessageStart(array $data): void
     {
         $this->messageId = $data['message']['id'] ?? null;
+        $this->model = $data['message']['model'] ?? null;
         $this->usage = $data['message']['usage'] ?? [];
     }
 
@@ -219,6 +222,11 @@ class StreamProcessor
     public function getMessageId(): ?string
     {
         return $this->messageId;
+    }
+
+    public function getModel(): ?string
+    {
+        return $this->model;
     }
 
     public function getUsage(): array

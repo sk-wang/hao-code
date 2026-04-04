@@ -193,6 +193,7 @@ class StreamingClient
             'headers' => [
                 'x-api-key' => $this->resolveApiKey(),
                 'anthropic-version' => $this->apiVersion,
+                'anthropic-beta' => 'prompt-caching-2024-07-31',
                 'content-type' => 'application/json',
                 'accept' => 'text/event-stream',
             ],

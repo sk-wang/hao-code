@@ -142,7 +142,11 @@ class AgentLoop
                 $this->totalCacheCreationTokens += $usage['cache_creation_input_tokens'] ?? 0;
                 $this->totalCacheReadTokens += $usage['cache_read_input_tokens'] ?? 0;
 
-                // 5b. Cost tracking
+                // 5b. Cost tracking — set model for per-model pricing
+                $responseModel = $processor->getModel();
+                if ($responseModel !== null) {
+                    $this->costTracker->setModel($responseModel);
+                }
                 $this->costTracker->addUsage(
                     $usage['input_tokens'] ?? 0,
                     $usage['output_tokens'] ?? 0,
