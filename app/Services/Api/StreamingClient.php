@@ -390,6 +390,12 @@ class StreamingClient
 
     private function getRetryDelay(int $attempt, \Throwable $e): float
     {
+        // Respect Retry-After header from API if present
+        $retryAfter = $this->lastRateLimitHeaders['retry-after'] ?? null;
+        if ($retryAfter !== null && $retryAfter !== '' && is_numeric($retryAfter)) {
+            return min((float) $retryAfter, 120);
+        }
+
         if ($e instanceof ApiErrorException && $e->getErrorType() === 'rate_limit_error') {
             return min(2 ** $attempt, 30);
         }

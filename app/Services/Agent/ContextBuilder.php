@@ -120,16 +120,29 @@ PROMPT;
     {
         $cwd = getcwd();
         $date = date('Y-m-d');
+        $shell = getenv('SHELL') ?: 'unknown';
 
         $context = "\n\n# Environment\n";
         $context .= "- Current date: {$date}\n";
         $context .= "- Working directory: {$cwd}\n";
+        $context .= "- Shell: {$shell}\n";
         $context .= "- PHP: " . PHP_VERSION . "\n";
-        $context .= "- OS: " . PHP_OS_FAMILY . "\n";
+        $context .= "- OS: " . PHP_OS_FAMILY . ' ' . php_uname('r') . "\n";
 
-        $gitBranch = exec('git rev-parse --abbrev-ref HEAD 2>/dev/null');
-        if (!empty($gitBranch)) {
-            $context .= "- Git branch: {$gitBranch}\n";
+        exec('git rev-parse --is-inside-work-tree 2>/dev/null', $gitCheck, $gitExit);
+        $isGitRepo = $gitExit === 0;
+        $context .= '- Is git repo: ' . ($isGitRepo ? 'true' : 'false') . "\n";
+
+        if ($isGitRepo) {
+            $gitBranch = trim((string) shell_exec('git rev-parse --abbrev-ref HEAD 2>/dev/null'));
+            if ($gitBranch !== '') {
+                $context .= "- Git branch: {$gitBranch}\n";
+            }
+            $mainBranch = trim((string) shell_exec('git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null'));
+            if ($mainBranch !== '') {
+                $mainBranch = str_replace('refs/remotes/origin/', '', $mainBranch);
+                $context .= "- Main branch: {$mainBranch}\n";
+            }
         }
 
         return $context;
