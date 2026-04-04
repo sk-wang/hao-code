@@ -68,10 +68,27 @@ DESC;
             return filemtime($b) - filemtime($a);
         });
 
-        $output = "Found " . count($matches) . " file(s) matching '{$pattern}':\n\n";
+        $totalCount = count($matches);
+        $maxResults = 100;
+        $truncated = $totalCount > $maxResults;
+
+        if ($truncated) {
+            $matches = array_slice($matches, 0, $maxResults);
+        }
+
+        $output = "Found {$totalCount} file(s) matching '{$pattern}'";
+        if ($truncated) {
+            $output .= " (showing first {$maxResults})";
+        }
+        $output .= ":\n\n";
+
         foreach ($matches as $match) {
             $relative = str_replace($path . '/', '', $match);
             $output .= "  {$relative}\n";
+        }
+
+        if ($truncated) {
+            $output .= "\n[" . ($totalCount - $maxResults) . " more files not shown. Narrow your pattern to see more.]";
         }
 
         return ToolResult::success($output);
