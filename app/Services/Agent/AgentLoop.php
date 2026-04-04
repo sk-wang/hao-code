@@ -23,6 +23,7 @@ class AgentLoop
     private int $totalCacheReadTokens = 0;
     /** Tracks the most recent API call's input token count for auto-compact decisions. */
     private int $lastTurnInputTokens = 0;
+    private bool $autoTitleGenerated = false;
 
     public function __construct(
         private readonly QueryEngine $queryEngine,
@@ -197,6 +198,16 @@ class AgentLoop
 
                 // 9. Record transcript
                 $this->sessionManager->recordTurn($assistantMessage, $toolResults);
+
+                // 10. Auto-generate session title after first turn
+                if (!$this->autoTitleGenerated && $this->sessionManager->getTitle() === null) {
+                    $this->autoTitleGenerated = true;
+                    $firstInput = mb_substr($userInput, 0, 80);
+                    $title = preg_replace('/\s+/', ' ', trim($firstInput));
+                    if ($title !== '') {
+                        $this->sessionManager->setTitle($title);
+                    }
+                }
             } catch (\Throwable $e) {
                 $streamingExecutor->cleanup();
                 throw $e;

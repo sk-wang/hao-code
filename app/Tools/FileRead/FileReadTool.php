@@ -46,12 +46,17 @@ DESC;
                     'type' => 'integer',
                     'description' => 'The number of lines to read',
                 ],
+                'pages' => [
+                    'type' => 'string',
+                    'description' => 'Page range for PDF files (e.g., "1-5", "3", "10-20"). Max 20 pages per request.',
+                ],
             ],
             'required' => ['file_path'],
         ], [
             'file_path' => 'required|string',
             'offset' => 'nullable|integer|min:1',
             'limit' => 'nullable|integer|min:1',
+            'pages' => 'nullable|string',
         ]);
     }
 
@@ -91,7 +96,12 @@ DESC;
         // Handle PDF files
         $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
         if ($ext === 'pdf') {
-            return $this->readPdf($filePath);
+            return $this->readPdf($filePath, $input['pages'] ?? null);
+        }
+
+        // Handle Jupyter notebooks
+        if ($ext === 'ipynb') {
+            return $this->readNotebook($filePath);
         }
 
         $lines = file($filePath, FILE_IGNORE_NEW_LINES);
@@ -156,21 +166,48 @@ DESC;
         };
     }
 
-    private function readPdf(string $filePath): ToolResult
+    private function readPdf(string $filePath, ?string $pageRange = null): ToolResult
     {
         $size = filesize($filePath);
         if ($size > 32 * 1024 * 1024) {
             return ToolResult::error("PDF too large: " . round($size / 1024 / 1024, 1) . " MB (max 32 MB)");
         }
 
+        // Parse page range
+        $firstPage = null;
+        $lastPage = null;
+        if ($pageRange !== null) {
+            if (preg_match('/^(\d+)\s*-\s*(\d+)$/', trim($pageRange), $m)) {
+                $firstPage = (int) $m[1];
+                $lastPage = (int) $m[2];
+            } elseif (preg_match('/^(\d+)$/', trim($pageRange), $m)) {
+                $firstPage = (int) $m[1];
+                $lastPage = (int) $m[1];
+            }
+
+            if ($firstPage !== null && $lastPage !== null && ($lastPage - $firstPage + 1) > 20) {
+                return ToolResult::error("Maximum 20 pages per request. Requested: " . ($lastPage - $firstPage + 1));
+            }
+        }
+
         // Try using pdftotext for text extraction
         $pdftotextOutput = shell_exec("which pdftotext 2>/dev/null");
         if (!empty(trim($pdftotextOutput ?? ''))) {
-            $text = shell_exec("pdftotext -layout " . escapeshellarg($filePath) . " - 2>/dev/null");
+            $cmd = "pdftotext -layout";
+            if ($firstPage !== null) {
+                $cmd .= " -f {$firstPage}";
+            }
+            if ($lastPage !== null) {
+                $cmd .= " -l {$lastPage}";
+            }
+            $cmd .= " " . escapeshellarg($filePath) . " - 2>/dev/null";
+
+            $text = shell_exec($cmd);
             if (!empty($text)) {
                 $pageCount = shell_exec("pdfinfo " . escapeshellarg($filePath) . " 2>/dev/null | grep Pages | awk '{print $2}'");
                 $pages = trim($pageCount ?? 'unknown');
-                return ToolResult::success("[PDF: {$filePath}, {$pages} pages, text extracted]\n\n" . $text);
+                $rangeInfo = $pageRange !== null ? ", pages {$pageRange}" : '';
+                return ToolResult::success("[PDF: {$filePath}, {$pages} total pages{$rangeInfo}, text extracted]\n\n" . $text);
             }
         }
 
@@ -178,5 +215,56 @@ DESC;
         $data = file_get_contents($filePath);
         $base64 = base64_encode($data);
         return ToolResult::success("[PDF: {$filePath}, " . round($size / 1024, 1) . " KB, base64 encoded]\n[data:application/pdf;base64,{$base64}]");
+    }
+
+    private function readNotebook(string $filePath): ToolResult
+    {
+        $content = file_get_contents($filePath);
+        $notebook = json_decode($content, true);
+
+        if (!is_array($notebook) || !isset($notebook['cells'])) {
+            return ToolResult::error("Invalid Jupyter notebook format: {$filePath}");
+        }
+
+        $output = "[Jupyter Notebook: {$filePath}]\n\n";
+        $cellCount = count($notebook['cells']);
+
+        foreach ($notebook['cells'] as $i => $cell) {
+            $cellNum = $i + 1;
+            $cellType = $cell['cell_type'] ?? 'unknown';
+            $source = is_array($cell['source'] ?? null) ? implode('', $cell['source']) : ($cell['source'] ?? '');
+
+            $output .= "--- Cell {$cellNum}/{$cellCount} [{$cellType}] ---\n";
+
+            if ($cellType === 'code') {
+                $output .= "```\n{$source}\n```\n";
+
+                // Show outputs if present
+                $outputs = $cell['outputs'] ?? [];
+                foreach ($outputs as $cellOutput) {
+                    $outputType = $cellOutput['output_type'] ?? '';
+                    if ($outputType === 'stream') {
+                        $text = is_array($cellOutput['text'] ?? null) ? implode('', $cellOutput['text']) : ($cellOutput['text'] ?? '');
+                        $output .= "Output:\n{$text}\n";
+                    } elseif ($outputType === 'execute_result' || $outputType === 'display_data') {
+                        $data = $cellOutput['data'] ?? [];
+                        if (isset($data['text/plain'])) {
+                            $text = is_array($data['text/plain']) ? implode('', $data['text/plain']) : $data['text/plain'];
+                            $output .= "Output:\n{$text}\n";
+                        }
+                    } elseif ($outputType === 'error') {
+                        $ename = $cellOutput['ename'] ?? 'Error';
+                        $evalue = $cellOutput['evalue'] ?? '';
+                        $output .= "Error: {$ename}: {$evalue}\n";
+                    }
+                }
+            } else {
+                $output .= "{$source}\n";
+            }
+
+            $output .= "\n";
+        }
+
+        return ToolResult::success($output);
     }
 }

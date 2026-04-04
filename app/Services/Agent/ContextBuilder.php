@@ -158,29 +158,44 @@ PROMPT;
             }
         }
 
-        // Project-level instructions
-        $projectPaths = [
-            "{$cwd}/HAOCODE.md",
-            "{$cwd}/CLAUDE.md",
-            "{$cwd}/.haocode/instructions.md",
-            "{$cwd}/.haocode/HAOCODE.md",
-            "{$cwd}/.haocode/CLAUDE.md",
-        ];
-
-        foreach ($projectPaths as $path) {
-            if (file_exists($path) && is_readable($path)) {
-                $content .= "## Project Instructions ({$path})\n";
-                $content .= file_get_contents($path) . "\n\n";
+        // Walk parent directories from cwd to root for CLAUDE.md / HAOCODE.md
+        $visited = [];
+        $dir = $cwd;
+        while ($dir !== '' && $dir !== '/' && $dir !== $home) {
+            $realDir = realpath($dir);
+            if ($realDir === false || isset($visited[$realDir])) {
+                break;
             }
-        }
+            $visited[$realDir] = true;
 
-        // Load rule files from .haocode/rules/*.md
-        $rulesDir = "{$cwd}/.haocode/rules";
-        if (is_dir($rulesDir)) {
-            foreach (glob("{$rulesDir}/*.md") as $ruleFile) {
-                $content .= "## Rule: " . basename($ruleFile) . "\n";
-                $content .= file_get_contents($ruleFile) . "\n\n";
+            $label = $realDir === realpath($cwd) ? 'Project' : 'Parent';
+            $candidates = [
+                "{$realDir}/HAOCODE.md",
+                "{$realDir}/CLAUDE.md",
+                "{$realDir}/.haocode/instructions.md",
+                "{$realDir}/.haocode/HAOCODE.md",
+                "{$realDir}/.haocode/CLAUDE.md",
+                "{$realDir}/.claude/CLAUDE.md",
+            ];
+
+            foreach ($candidates as $path) {
+                if (file_exists($path) && is_readable($path)) {
+                    $content .= "## {$label} Instructions ({$path})\n";
+                    $content .= file_get_contents($path) . "\n\n";
+                }
             }
+
+            // Load rule files from .haocode/rules/*.md and .claude/rules/*.md
+            foreach (["{$realDir}/.haocode/rules", "{$realDir}/.claude/rules"] as $rulesDir) {
+                if (is_dir($rulesDir)) {
+                    foreach (glob("{$rulesDir}/*.md") as $ruleFile) {
+                        $content .= "## Rule: " . basename($ruleFile) . " ({$rulesDir})\n";
+                        $content .= file_get_contents($ruleFile) . "\n\n";
+                    }
+                }
+            }
+
+            $dir = dirname($dir);
         }
 
         return trim($content);

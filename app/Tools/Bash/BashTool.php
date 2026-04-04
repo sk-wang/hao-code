@@ -58,6 +58,10 @@ DESC;
                     'type' => 'boolean',
                     'description' => 'Run the command in the background',
                 ],
+                'dangerouslyDisableSandbox' => [
+                    'type' => 'boolean',
+                    'description' => 'Set to true to override sandbox mode and run without restrictions.',
+                ],
             ],
             'required' => ['command'],
         ], [
@@ -65,6 +69,7 @@ DESC;
             'description' => 'nullable|string',
             'timeout' => 'nullable|integer|min:1000|max:600000',
             'run_in_background' => 'nullable|boolean',
+            'dangerouslyDisableSandbox' => 'nullable|boolean',
         ]);
     }
 

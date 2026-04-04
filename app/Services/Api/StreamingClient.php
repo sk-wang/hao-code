@@ -11,6 +11,7 @@ class StreamingClient
 {
     private HttpClientInterface $httpClient;
     private int $maxRetries = 3;
+    private array $lastRateLimitHeaders = [];
 
     public function __construct(
         private readonly string $apiKey,
@@ -209,6 +210,7 @@ class StreamingClient
         }
 
         $this->throwForHttpError($response);
+        $this->extractRateLimitHeaders($response);
 
         $currentEvent = null;
         $currentDataLines = [];
@@ -464,6 +466,41 @@ class StreamingClient
         }
 
         return $e;
+    }
+
+    /**
+     * Extract rate limit headers from the API response.
+     */
+    private function extractRateLimitHeaders(ResponseInterface $response): void
+    {
+        $headers = $response->getHeaders(false);
+        $this->lastRateLimitHeaders = [];
+
+        $prefixes = [
+            'anthropic-ratelimit-',
+            'x-ratelimit-',
+            'retry-after',
+        ];
+
+        foreach ($headers as $name => $values) {
+            $lower = strtolower($name);
+            foreach ($prefixes as $prefix) {
+                if (str_starts_with($lower, $prefix) || $lower === 'retry-after') {
+                    $this->lastRateLimitHeaders[$lower] = $values[0] ?? '';
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
+     * Get the rate limit headers from the last API response.
+     *
+     * @return array<string, string>
+     */
+    public function getLastRateLimitHeaders(): array
+    {
+        return $this->lastRateLimitHeaders;
     }
 
     private function cancelResponse(ResponseInterface $response): void
