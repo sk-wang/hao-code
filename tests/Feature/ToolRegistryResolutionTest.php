@@ -13,5 +13,6 @@ class ToolRegistryResolutionTest extends TestCase
 
         $this->assertInstanceOf(ToolRegistry::class, $registry);
         $this->assertNotNull($registry->getTool('Agent'));
+        $this->assertNotNull($registry->getTool('SendMessage'));
     }
 }

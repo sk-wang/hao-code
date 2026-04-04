@@ -16,7 +16,7 @@ class ExitPlanModeTool extends BaseTool
 
     public function description(): string
     {
-        return 'Exit plan mode and return to normal implementation mode. The plan has been presented to the user for approval.';
+        return 'Signal that planning is complete. The assistant must ask the user to run /plan off before implementation can begin.';
     }
 
     public function inputSchema(): ToolInputSchema
@@ -30,7 +30,7 @@ class ExitPlanModeTool extends BaseTool
     public function call(array $input, ToolUseContext $context): ToolResult
     {
         return ToolResult::success(
-            "Exiting plan mode. Ready to implement the plan."
+            'Planning is complete. Ask the user to run /plan off before implementing changes.'
         );
     }
 

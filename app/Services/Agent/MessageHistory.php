@@ -49,7 +49,10 @@ class MessageHistory
             $messages[$cacheIdx] = $this->addCacheControl($messages[$cacheIdx]);
         }
 
-        return $messages;
+        return array_map(
+            fn (array $message): array => $this->normalizeMessageForApi($message),
+            $messages,
+        );
     }
 
     /**
@@ -69,6 +72,25 @@ class MessageHistory
             // Content blocks: add cache_control to the last block
             $lastIdx = count($message['content']) - 1;
             $message['content'][$lastIdx]['cache_control'] = ['type' => 'ephemeral'];
+        }
+
+        return $message;
+    }
+
+    private function normalizeMessageForApi(array $message): array
+    {
+        if (! is_array($message['content'] ?? null)) {
+            return $message;
+        }
+
+        foreach ($message['content'] as $index => $block) {
+            if (($block['type'] ?? null) !== 'tool_use') {
+                continue;
+            }
+
+            if (($block['input'] ?? null) === []) {
+                $message['content'][$index]['input'] = (object) [];
+            }
         }
 
         return $message;

@@ -64,6 +64,16 @@ class SettingsManagerExtendedTest extends TestCase
         $this->assertSame('terse', $manager->getOutputStyle());
     }
 
+    public function test_set_append_and_system_prompt_overrides(): void
+    {
+        $manager = $this->makeManager();
+        $manager->set('append_system_prompt', 'append me');
+        $manager->set('system_prompt', 'replace me');
+
+        $this->assertSame('append me', $manager->getAppendSystemPrompt());
+        $this->assertSame('replace me', $manager->getSystemPrompt());
+    }
+
     public function test_set_unknown_key_is_silently_ignored(): void
     {
         $manager = $this->makeManager();
@@ -136,6 +146,9 @@ class SettingsManagerExtendedTest extends TestCase
         $this->assertArrayHasKey('api_base_url', $all);
         $this->assertArrayHasKey('max_tokens', $all);
         $this->assertArrayHasKey('permission_mode', $all);
+        $this->assertArrayHasKey('theme', $all);
+        $this->assertArrayHasKey('output_style', $all);
+        $this->assertArrayHasKey('statusline_enabled', $all);
         $this->assertArrayHasKey('api_key_set', $all);
     }
 
@@ -196,5 +209,39 @@ class SettingsManagerExtendedTest extends TestCase
         $manager = $this->makeManager();
         $manager->set('output_style', 'verbose');
         $this->assertSame('verbose', $manager->getOutputStyle());
+    }
+
+    public function test_theme_defaults_to_dark(): void
+    {
+        $manager = $this->makeManager();
+        $this->assertSame('dark', $manager->getTheme());
+    }
+
+    public function test_theme_set_via_runtime_override(): void
+    {
+        $manager = $this->makeManager();
+        $manager->set('theme', 'ansi');
+        $this->assertSame('ansi', $manager->getTheme());
+    }
+
+    public function test_statusline_enabled_defaults_true_and_can_be_overridden(): void
+    {
+        $manager = $this->makeManager();
+        $this->assertTrue($manager->isStatuslineEnabled());
+
+        $manager->set('statusline_enabled', false);
+
+        $this->assertFalse($manager->isStatuslineEnabled());
+    }
+
+    public function test_statusline_helpers_are_available_from_feature_manager(): void
+    {
+        $manager = $this->makeManager();
+
+        $this->assertSame('expanded', $manager->getStatuslineLayout());
+        $this->assertSame(2, $manager->getStatuslinePathLevels());
+        $this->assertTrue($manager->shouldShowStatuslineTools());
+        $this->assertTrue($manager->shouldShowStatuslineAgents());
+        $this->assertTrue($manager->shouldShowStatuslineTodos());
     }
 }

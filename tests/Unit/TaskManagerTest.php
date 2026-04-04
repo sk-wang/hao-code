@@ -74,6 +74,15 @@ class TaskManagerTest extends TestCase
         $this->assertNull($task->description);
     }
 
+    public function test_create_with_id_uses_the_supplied_identifier(): void
+    {
+        $manager = $this->makeManager();
+        $task = $manager->createWithId('agent_demo', 'Task', 'Tasking');
+
+        $this->assertSame('agent_demo', $task->id);
+        $this->assertSame('agent_demo', $manager->get('agent_demo')?->id);
+    }
+
     public function test_created_task_is_retrievable_via_get(): void
     {
         $manager = $this->makeManager();

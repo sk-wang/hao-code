@@ -1,378 +1,492 @@
-<div align="center">
-
 # Hao Code
+An interactive CLI coding agent built with Laravel for Claude-, Kimi-, and Anthropic-compatible endpoints.
 
-**An Interactive AI-Powered CLI Coding Agent**
+[![PHP](https://img.shields.io/badge/PHP-%3E%3D8.2-777BB4?style=flat-square&logo=php&logoColor=white)](https://php.net)
+[![Laravel](https://img.shields.io/badge/Laravel-12-FF2D20?style=flat-square&logo=laravel&logoColor=white)](https://laravel.com)
+[![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 
-Built with Laravel 12 · Powered by Anthropic API · Runs in Your Terminal
+`REPL` · `Streaming` · `Sub-agents` · `Tasks` · `Hooks` · `Skills` · `Session HUD`
 
-[![PHP](https://img.shields.io/badge/PHP-%3E%3D8.2-777BB4?style=for-the-badge&logo=php&logoColor=white)](https://php.net)
-[![Laravel](https://img.shields.io/badge/Laravel-12-FF2D20?style=for-the-badge&logo=laravel&logoColor=white)](https://laravel.com)
-[![Tests](https://img.shields.io/badge/Tests-1070%20%7C%201764%20assertions-00D084?style=for-the-badge)]()
-[![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
+## Preview
 
-> Claude &middot; Kimi &middot; Any Anthropic-compatible endpoint — all in your terminal.
+![Hao Code terminal screenshot](docs/images/hao-code-terminal.png)
 
-</div>
+_Real terminal session running `php artisan hao-code`._
+
+## Highlights
+
+- Interactive REPL with history, multiline input, transcript browsing, and slash-command autocomplete.
+- Streaming Markdown output with live tool execution and a built-in HUD footer.
+- 30+ tools for shell, files, search, LSP, web, cron, tasks, worktrees, and notebooks.
+- Session restore, branching, background agents, permissions, hooks, and reusable skills.
 
 ---
 
-## Features
+## Jump To
 
-<table>
-<tr>
-<td width="50%">
+[Quick Start](#quick-start) · [Launch Modes](#launch-modes) · [Built-in HUD](#built-in-hud) · [Slash Commands](#slash-commands) · [Built-in Tools](#built-in-tools) · [Configuration](#configuration) · [Architecture](#architecture) · [Skills System](#skills-system) · [Permissions and Hooks](#permissions-and-hooks) · [Testing](#testing)
 
-### Core Engine
+---
 
-- **Interactive REPL** — readline history, multiline input, 30+ slash commands
-- **30 Built-in Tools** — Bash, File I/O, Grep, Glob, Agent, Web, LSP, Cron, Tasks & more
-- **Streaming Responses** — real-time AI output with live Markdown rendering
-- **Forked Tool Execution** — read-only tools run in parallel via `pcntl_fork` during streaming
-- **Extended Thinking** — Claude 3.7+ extended thinking mode with configurable budget
+## Why Hao Code
 
-</td>
-<td width="50%">
+### Terminal-first coding workflow
 
-### Intelligence
+- Interactive REPL with readline history, multiline input, reverse search, transcript browsing, and slash-command autocomplete.
+- Streaming Markdown output with live tool execution.
+- A built-in HUD footer that keeps project, git, context health, recent tools, background agents, and todo progress visible.
 
-- **Context Compression** — auto/manual LLM-powered structured summarization
-- **Cost Tracking** — real-time token & spend monitoring with warn/stop thresholds
-- **Session Management** — auto-saved JSONL sessions, resume, AI-generated titles
-- **Memory System** — cross-session persistent memory with `MEMORY.md` indexing
-- **Secret Scanner** — 30+ credential patterns detected on file writes
+### Real agent behavior
 
-</td>
-</tr>
-<tr>
-<td width="50%">
+- 30+ built-in tools covering shell, files, search, LSP, web, cron, tasks, worktrees, skills, and notebook editing.
+- Read-only tools can execute in parallel with `pcntl_fork`.
+- Background agents persist across turns and can be resumed, messaged, and inspected later.
 
-### Developer Experience
+### Practical safety and control
 
-- **Permission System** — 4 modes, fine-grained allow/deny rules, dangerous-pattern detection
-- **Hook System** — 8 event types, shell intercepts with JSON input modification
-- **LSP Integration** — go-to-definition, find references, hover, document symbols
-- **Background Tasks** — spawn, monitor, and stop long-running processes
-- **Cron Scheduling** — recurring & one-shot timers with persistence across restarts
+- Permission modes with allow and deny rules.
+- Hook system for pre/post tool interception and mutation.
+- Cost tracking with warning and hard-stop thresholds.
+- Context compaction and transcript-based session restore/branching.
 
-</td>
-<td width="50%">
+### Extensible by design
 
-### Terminal & UX
-
-- **Rich Terminal UI** — GFM-to-ANSI renderer, streaming Markdown, animated spinners
-- **Skills System** — custom reusable skills with parameter substitution & model override
-- **Git Worktree** — isolated parallel development with auto-cleanup
-- **Output Styles** — customizable AI output format via `.haocode/output_style.md`
-- **Notifications** — iTerm2, Kitty, Ghostty, bell alerts
-- **Sleep Prevention** — auto-caffeinate during long tasks on macOS
-
-</td>
-</tr>
-</table>
+- Project and global config in `.haocode/settings.json` and `~/.haocode/settings.json`.
+- Reusable skills from `.haocode/skills/` or `~/.haocode/skills/`.
+- Compatible with Anthropic-style endpoints, including Kimi coding mode.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Clone & install
 git clone https://github.com/your-username/hao-code.git
 cd hao-code
 composer install
 cp .env.example .env
 php artisan key:generate
+```
 
-# Configure your API key
+Add your API key:
+
+```bash
 echo "ANTHROPIC_API_KEY=sk-ant-your-key-here" >> .env
+```
 
-# Launch
+Launch the REPL:
+
+```bash
 php artisan hao-code
 ```
 
-### Configuration
+---
 
-Edit `.env` or use `~/.haocode/settings.json` for global settings:
+## Launch Modes
+
+### Interactive
+
+```bash
+php artisan hao-code
+```
+
+### Single-shot
+
+```bash
+php artisan hao-code --print="Explain what AgentLoop.php does"
+```
+
+### Resume the latest session
+
+```bash
+php artisan hao-code --continue
+```
+
+### Resume a specific session
+
+```bash
+php artisan hao-code --resume=20260404_abcdef12
+```
+
+### Resume and fork into a new branch
+
+```bash
+php artisan hao-code --resume=20260404_abcdef12 --fork-session --name="alt-approach"
+```
+
+### Useful CLI flags
+
+- `-p, --print=`: run once and exit.
+- `-c, --continue`: reopen the latest session for the current working directory when possible.
+- `-r, --resume=`: restore a saved session by ID.
+- `--fork-session`: branch into a new transcript when resuming or continuing.
+- `--name=`: set the session display name.
+- `--system-prompt=`: replace the session system prompt.
+- `--append-system-prompt=`: append extra session instructions.
+- `--model=`: override the model for this launch.
+- `--permission-mode=`: override the permission mode for this launch.
+
+---
+
+## Built-in HUD
+
+The status footer is built into the REPL. It is not a separate plugin.
+
+By default it shows:
+
+- model and session title
+- project path and git branch
+- message count and permission mode
+- context usage bar and estimated cost
+- recent tool activity
+- background agents and bash tasks
+- todo progress from `TodoWrite` and task tools
+
+Configure it with `/statusline`:
+
+```text
+/statusline
+/statusline on
+/statusline off
+/statusline layout compact
+/statusline layout expanded
+/statusline paths 1
+/statusline paths 2
+/statusline tools off
+/statusline agents off
+/statusline todos off
+/statusline reset
+```
+
+Current supported HUD options:
+
+- `layout`: `expanded` or `compact`
+- `path_levels`: `1`, `2`, or `3`
+- `show_tools`: `on` or `off`
+- `show_agents`: `on` or `off`
+- `show_todos`: `on` or `off`
+
+---
+
+## Slash Commands
+
+See [CLAUDE_CODE_PARITY.md](CLAUDE_CODE_PARITY.md) for the parity audit against the local `~/git/claude-code` reference.
+
+<details>
+<summary><strong>Session and Navigation</strong></summary>
+
+- `/help`
+- `/exit`
+- `/clear`
+- `/history`
+- `/resume [id]`
+- `/branch [title]`
+- `/rewind`
+- `/snapshot [name]`
+- `/transcript`
+- `/search`
+
+</details>
+
+<details>
+<summary><strong>Context, Status, and Output</strong></summary>
+
+- `/status`
+- `/statusline [subcommand]`
+- `/stats`
+- `/context`
+- `/cost`
+- `/model [name]`
+- `/fast`
+- `/theme`
+- `/output-style`
+
+</details>
+
+<details>
+<summary><strong>Workspace and Project Operations</strong></summary>
+
+- `/files`
+- `/diff`
+- `/commit [hint]`
+- `/review [pr]`
+- `/memory`
+- `/config [key] [value]`
+- `/permissions`
+- `/hooks`
+- `/skills`
+- `/mcp`
+- `/init`
+- `/doctor`
+- `/version`
+
+</details>
+
+<details>
+<summary><strong>Planning, Tasks, and Automation</strong></summary>
+
+- `/plan [request]`
+- `/tasks`
+- `/loop [interval] [cmd]`
+
+</details>
+
+---
+
+## Built-in Tools
+
+Hao Code ships with 30+ tools. The main groups are below.
+
+### Shell and files
+
+- `Bash`: shell execution, timeouts, background support, dangerous-pattern detection.
+- `Read`: read files, images, PDFs, notebooks.
+- `Edit`: precise string-replacement editing.
+- `Write`: overwrite files with secret scanning.
+- `Glob`: fast file matching.
+- `Grep`: ripgrep-accelerated content search.
+
+### Agents and planning
+
+- `Agent`: spawn sub-agents for general, Explore, or Plan work.
+- `SendMessage`: continue a background sub-agent later.
+- `TodoWrite`: maintain structured todos for the current session.
+- `EnterPlanMode`
+- `ExitPlanMode`
+
+### Tasks and automation
+
+- `TaskCreate`
+- `TaskGet`
+- `TaskList`
+- `TaskUpdate`
+- `TaskStop`
+- `CronCreate`
+- `CronDelete`
+- `CronList`
+- `Sleep`
+
+### Code intelligence and workspace control
+
+- `LspTool`
+- `NotebookEdit`
+- `EnterWorktree`
+- `ExitWorktree`
+
+### Web and interaction
+
+- `WebSearch`
+- `WebFetch`
+- `AskUserQuestion`
+- `ToolSearch`
+- `Skill`
+- `Config`
+
+---
+
+## Configuration
+
+Hao Code reads:
+
+- global settings from `~/.haocode/settings.json`
+- project settings from `.haocode/settings.json`
+- environment variables from `.env`
+
+### Common environment variables
 
 ```env
-ANTHROPIC_API_KEY=sk-ant-...              # Required
-HAOCODE_MODEL=claude-sonnet-4-20250514    # Default model
-HAOCODE_MAX_TOKENS=16384                  # Max output tokens
-HAOCODE_PERMISSION_MODE=default           # default | plan | accept_edits | bypass_permissions
-HAOCODE_API_BASE_URL=https://api.anthropic.com  # Compatible endpoints (e.g. Kimi)
-HAOCODE_THINKING=false                    # Extended thinking (Claude 3.7+)
-HAOCODE_THINKING_BUDGET=10000             # Thinking token budget
-HAOCODE_COST_WARN=5.00                    # Cost warning threshold (USD)
-HAOCODE_COST_STOP=50.00                   # Hard cost stop (USD)
+ANTHROPIC_API_KEY=sk-ant-...
+HAOCODE_MODEL=claude-sonnet-4-20250514
+HAOCODE_MAX_TOKENS=16384
+HAOCODE_PERMISSION_MODE=default
+HAOCODE_API_BASE_URL=https://api.anthropic.com
+HAOCODE_THINKING=false
+HAOCODE_THINKING_BUDGET=10000
+HAOCODE_COST_WARN=5.00
+HAOCODE_COST_STOP=50.00
+HAOCODE_BACKGROUND_AGENT_IDLE_TIMEOUT=300
+HAOCODE_BACKGROUND_AGENT_POLL_INTERVAL_MS=250
 ```
 
-### Supported Models
+### Supported model IDs
 
-| Model | ID | Notes |
-|:------|:---|:------|
-| **Claude Sonnet 4** | `claude-sonnet-4-20250514` | Default |
-| **Claude Opus 4** | `claude-opus-4-20250514` | Most capable |
-| **Claude Haiku 4** | `claude-haiku-4-20250514` | Fastest |
-| **Claude 3.7 Sonnet** | `claude-3-7-sonnet-20250219` | Extended thinking |
-| **Claude 3.5 Sonnet** | `claude-3-5-sonnet-20241022` | |
-| **Claude 3.5 Haiku** | `claude-3-5-haiku-20241022` | |
-| **Kimi** | `kimi-for-coding` | HTTP/1.1 compatible |
+- `claude-sonnet-4-20250514`
+- `claude-opus-4-20250514`
+- `claude-haiku-4-20250514`
+- `claude-3-7-sonnet-20250219`
+- `claude-3-5-sonnet-20241022`
+- `claude-3-5-haiku-20241022`
+- `kimi-for-coding`
 
----
+### Project instruction files
 
-## Usage
+Hao Code auto-loads these files when present:
 
-### Interactive REPL
-
-```bash
-php artisan hao-code
-```
-
-### Single-shot (non-interactive)
-
-```bash
-php artisan hao-code --prompt="Explain what AgentLoop.php does"
-```
-
-### CLI Options
-
-| Flag | Description |
-|:-----|:------------|
-| `--prompt=` | Non-interactive single command |
-| `--model=` | Override default model |
-| `--permission-mode=` | Override permission mode |
-| `--resume=` | Resume a saved session by ID |
-
-### Slash Commands
-
-<details>
-<summary><strong>Click to expand all 30+ commands</strong></summary>
-
-| Command | Description |
-|:--------|:------------|
-| `/help` | Show help information |
-| `/exit` | Exit the REPL |
-| `/clear` | Clear conversation history |
-| `/history` | Show message count |
-| `/compact` | Manually compress context |
-| `/cost` | Show token usage and cost |
-| `/model [name]` | View or switch model |
-| `/fast` | Toggle fast mode (Haiku) |
-| `/status` | Show session status |
-| `/context` | Show context usage & warnings |
-| `/resume [id]` | Resume a past session |
-| `/memory` | Manage session memory |
-| `/tasks` | List background tasks |
-| `/diff` | View uncommitted changes (colored) |
-| `/rewind` | Undo last conversation turn |
-| `/doctor` | Run environment diagnostics |
-| `/theme` | Switch terminal theme (dark/light/ansi) |
-| `/skills` | List available skills |
-| `/permissions` | View/manage permission rules |
-| `/snapshot [name]` | Export session as Markdown |
-| `/init` | Initialize `.haocode/settings.json` |
-| `/version` | Show version info |
-| `/output-style` | View or set output style |
-| `/loop [interval] [cmd]` | Schedule recurring task |
-
-</details>
-
----
-
-## Built-in Tools (30)
-
-<details>
-<summary><strong>Click to expand tool reference</strong></summary>
-
-| Tool | Description |
-|:-----|:------------|
-| `Bash` | Execute shell commands with timeout & background support |
-| `Read` | Read files (images, PDF, Jupyter notebooks) |
-| `Edit` | Precise string-replacement file editing |
-| `Write` | Write/overwrite files (with secret scanning) |
-| `Grep` | Regex content search (ripgrep-accelerated) |
-| `Glob` | Glob pattern file matching |
-| `Agent` | Spawn sub-agents (general / Explore / Plan types) |
-| `WebSearch` | Web search (DuckDuckGo / Google) |
-| `WebFetch` | Fetch URL content with AI extraction |
-| `LspTool` | LSP operations (definitions, references, symbols) |
-| `NotebookEdit` | Edit Jupyter notebook cells |
-| `CronCreate` | Create recurring or one-shot timers |
-| `CronDelete` | Delete a cron job |
-| `CronList` | List all cron jobs |
-| `TaskCreate` | Create a background task |
-| `TaskGet` | Query task details |
-| `TaskList` | List all tasks |
-| `TaskUpdate` | Update task status |
-| `TaskStop` | Stop a background task |
-| `TodoWrite` | Manage todo lists |
-| `Skill` | Invoke a custom skill |
-| `EnterPlanMode` | Enter planning mode |
-| `ExitPlanMode` | Exit planning mode & submit plan |
-| `EnterWorktree` | Create & enter a Git worktree |
-| `ExitWorktree` | Exit a Git worktree |
-| `Config` | Modify config at runtime |
-| `AskUserQuestion` | Ask user (single/multi-select) |
-| `ToolSearch` | Search available tools |
-| `Sleep` | Short delay (max 30s) |
-| `SendMessage` | Send message to sub-agent |
-
-</details>
-
----
-
-## Architecture
-
-```
-app/
-├── Console/Commands/
-│   └── HaoCodeCommand.php              CLI entry — REPL, slash commands, non-interactive mode
-├── Contracts/
-│   └── ToolInterface.php               Tool contract
-├── Services/
-│   ├── Agent/                          Agent core
-│   │   ├── AgentLoop.php               Main loop: user input → API → tool execution → response
-│   │   ├── AgentLoopFactory.php        Isolated AgentLoop instances (sub-agents)
-│   │   ├── QueryEngine.php             API query engine (wraps StreamingClient)
-│   │   ├── StreamProcessor.php         SSE event processing (extended thinking)
-│   │   ├── StreamingToolExecutor.php   Parallel read-only tool execution (pcntl_fork)
-│   │   ├── ToolOrchestrator.php        Tool pipeline: permission → hook → validate → execute
-│   │   ├── ContextBuilder.php          System prompt builder (memory, git, skills, output style)
-│   │   └── MessageHistory.php          Message history with cache_control breakpoints
-│   ├── Api/                            API client layer
-│   │   ├── StreamingClient.php         SSE streaming client (retry, compatible endpoints, cache)
-│   │   ├── StreamEvent.php             SSE event parser
-│   │   └── ApiErrorException.php       API error exception
-│   ├── Compact/ContextCompactor.php    LLM summarization + micro-compaction (9-section)
-│   ├── Cost/CostTracker.php            Token counting, cost estimation, threshold control
-│   ├── FileHistory/                    File snapshot management
-│   ├── Git/GitContext.php              Git status, recent commits, branch info
-│   ├── Hooks/                          Hook system (definition, executor, result)
-│   ├── Lsp/                            LSP client & server process
-│   ├── Memory/SessionMemory.php        Cross-session memory persistence
-│   ├── Notification/Notifier.php       iTerm2 / Kitty / Ghostty / bell notifications
-│   ├── OutputStyle/OutputStyleLoader.md Custom output format injection
-│   ├── Permissions/                    Permission checker, decision, denial tracker, patterns
-│   ├── Security/SecretScanner.php      30+ credential type regex detection
-│   ├── Session/                        Session manager, AI title generator, away summary
-│   ├── Settings/SettingsManager.php    Global + project settings merge
-│   ├── System/PreventSleep.php         macOS caffeinate wrapper
-│   └── Task/TaskManager.php            Background task queue (proc_open)
-├── Support/Terminal/                   Terminal rendering
-│   ├── MarkdownRenderer.php            GFM → ANSI conversion
-│   ├── StreamingMarkdownOutput.php     Real-time incremental Markdown redraw
-│   ├── ReplFormatter.php               Prompt, banner, tool card formatting
-│   ├── TurnStatusRenderer.php          Turn status animations (spinner, timing, tokens)
-│   ├── TranscriptBuffer.php            Conversation transcript buffering
-│   ├── TranscriptRenderer.php          Transcript rendering
-│   ├── TerminalOutput.php              Core terminal output
-│   └── InputSanitizer.php              User input sanitization
-├── Tools/                              30 built-in tools (21 directories + 5 base files)
-└── Providers/                          Service providers (Agent, Tool, App)
-```
+- `HAOCODE.md`
+- `CLAUDE.md`
+- `.haocode/rules/*.md`
+- `.haocode/memory/MEMORY.md`
+- `.haocode/output_style.md`
 
 ---
 
 ## Skills System
 
-Create custom skills in `.haocode/skills/` (project) or `~/.haocode/skills/` (global):
+Create custom skills in either location:
 
+```text
+.haocode/skills/
+~/.haocode/skills/
 ```
+
+Example layout:
+
+```text
 .haocode/skills/
 ├── commit/SKILL.md
 ├── review/SKILL.md
 └── test/SKILL.md
 ```
 
-Skills support:
-- `$ARGUMENTS` parameter substitution
-- Session variable injection (`$CLAUDE_SESSION_ID`, etc.)
-- Tool restrictions (`allowedTools`)
-- Model override (`model`)
-- Inline shell commands (`$(command)`)
+Supported behavior includes:
 
-Use `/skills` to list all available skills, invoke with `/<skill-name>`.
+- `$ARGUMENTS` substitution
+- session variable injection such as `$CLAUDE_SESSION_ID`
+- `allowedTools`
+- model overrides
+- inline shell interpolation such as `$(command)`
+
+Use `/skills` to inspect what is available.
 
 ---
 
-## Permission Modes
+## Permissions and Hooks
 
-| Mode | Behavior |
-|:-----|:---------|
-| `default` | Dangerous ops require confirmation, safe ops auto-allowed |
-| `plan` | Planning mode — write operations disabled |
-| `accept_edits` | Auto-accept file edits |
-| `bypass_permissions` | Skip all checks (use with caution) |
+### Permission modes
 
-Fine-grained rules in `.haocode/settings.json`:
+- `default`: dangerous operations ask for confirmation.
+- `plan`: write operations are disabled.
+- `accept_edits`: file edits are auto-accepted.
+- `bypass_permissions`: skip permission checks.
+
+### Example permission rules
 
 ```json
 {
   "permissions": {
     "allow": ["Bash(git:*)", "Read(*:*)"],
-    "deny":  ["Bash(rm -rf *)"]
+    "deny": ["Bash(rm -rf *)"]
   }
 }
 ```
 
----
-
-## Hook System
-
-Configure shell hooks in `.haocode/settings.json`:
+### Example hooks
 
 ```json
 {
   "hooks": {
-    "PreToolUse":  [{ "command": "echo 'About to run a tool'", "matcher": "Bash" }],
-    "PostToolUse": [{ "command": "notify-send 'Tool done'" }]
+    "PreToolUse": [
+      { "command": "echo 'About to run a tool'", "matcher": "Bash" }
+    ],
+    "PostToolUse": [
+      { "command": "notify-send 'Tool done'" }
+    ]
   }
 }
 ```
 
-**Events:** `SessionStart` · `Stop` · `PreToolUse` · `PostToolUse` · `PostToolUseFailure` · `PreCompact` · `PostCompact` · `Notification`
+Hook events:
 
-Hooks can return `deny`/`block`/`no` to block execution, or JSON `{"allow": true, "input": {...}}` to modify tool input.
+- `SessionStart`
+- `Stop`
+- `PreToolUse`
+- `PostToolUse`
+- `PostToolUseFailure`
+- `PreCompact`
+- `PostCompact`
+- `Notification`
+
+Hooks can block execution or return modified JSON input for the tool pipeline.
 
 ---
 
-## Project Config Files
+## Architecture
 
-Hao Code auto-loads these files (by priority):
-
-| File | Purpose |
-|:-----|:--------|
-| `HAOCODE.md` | Project-level instructions |
-| `CLAUDE.md` | Claude Code compatible instructions |
-| `.haocode/rules/*.md` | Rule files |
-| `.haocode/memory/MEMORY.md` | Persistent memory index |
-| `.haocode/output_style.md` | Output style definition |
+```text
+app/
+├── Console/Commands/
+│   └── HaoCodeCommand.php              CLI entry, REPL, slash commands, startup flags
+├── Contracts/
+│   └── ToolInterface.php               Tool contract
+├── Providers/
+│   ├── AgentServiceProvider.php
+│   └── ToolServiceProvider.php
+├── Services/
+│   ├── Agent/
+│   │   ├── AgentLoop.php
+│   │   ├── AgentLoopFactory.php
+│   │   ├── BackgroundAgentManager.php
+│   │   ├── ContextBuilder.php
+│   │   ├── MessageHistory.php
+│   │   ├── QueryEngine.php
+│   │   ├── StreamingToolExecutor.php
+│   │   └── ToolOrchestrator.php
+│   ├── Api/
+│   ├── Compact/
+│   ├── Cost/
+│   ├── Git/
+│   ├── Hooks/
+│   ├── Memory/
+│   ├── Notification/
+│   ├── Permissions/
+│   ├── Session/
+│   ├── Settings/
+│   └── Task/
+├── Support/Terminal/
+│   ├── Autocomplete/
+│   ├── MarkdownRenderer.php
+│   ├── PromptHudState.php
+│   ├── ReplFormatter.php
+│   ├── StreamingMarkdownOutput.php
+│   ├── TranscriptBuffer.php
+│   ├── TranscriptRenderer.php
+│   └── TurnStatusRenderer.php
+└── Tools/
+```
 
 ---
 
 ## Testing
 
+Run the full suite:
+
 ```bash
 composer test
-# or
+```
+
+Or use PHPUnit directly:
+
+```bash
 php vendor/bin/phpunit
 ```
 
-**1070 tests &middot; 1764 assertions** — all passing.
+For targeted work on the HUD and statusline:
+
+```bash
+php artisan test \
+  tests/Unit/PromptHudStateTest.php \
+  tests/Unit/ReplFormatterTest.php \
+  tests/Unit/SettingsManagerTest.php
+```
 
 ---
 
 ## Requirements
 
-- PHP >= 8.2
+- PHP 8.2 or newer
 - Composer
-- `pcntl` extension (recommended — signal handling & parallel tool execution)
-- `ripgrep` (recommended — Grep tool acceleration)
+- `pcntl` recommended for signal handling and parallel read-only tools
+- `ripgrep` recommended for fast grep operations
 
 ---
 
-<div align="center">
-
-**[MIT License](LICENSE)** · Built with Laravel 12 · Powered by Anthropic
-
-</div>
+**[MIT License](LICENSE)** · Built with Laravel 12 · Powered by Anthropic-compatible APIs

@@ -45,4 +45,9 @@ class InputSanitizerTest extends TestCase
         $this->assertStringContainsString('before', $result);
         $this->assertStringContainsString('after', $result);
     }
+
+    public function test_it_handles_incomplete_multibyte_sequence_without_warning(): void
+    {
+        $this->assertSame('', InputSanitizer::sanitize("\xE3"));
+    }
 }

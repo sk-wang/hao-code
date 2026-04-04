@@ -50,4 +50,12 @@ return [
     |--------------------------------------------------------------------------
     */
     'global_settings_path' => env('HAOCODE_GLOBAL_SETTINGS_PATH', null),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Background Agent Lifecycle
+    |--------------------------------------------------------------------------
+    */
+    'background_agent_idle_timeout' => (int) env('HAOCODE_BACKGROUND_AGENT_IDLE_TIMEOUT', 300),
+    'background_agent_poll_interval_ms' => (int) env('HAOCODE_BACKGROUND_AGENT_POLL_INTERVAL_MS', 250),
 ];

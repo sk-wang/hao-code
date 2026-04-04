@@ -140,4 +140,71 @@ class QueryEngineTest extends TestCase
         $processor = $qe->query([], []);
         $this->assertSame('', $processor->getAccumulatedText());
     }
+
+    public function test_query_tracks_usage_tokens(): void
+    {
+        $events = [
+            new StreamEvent('message_start', ['message' => ['id' => 'msg_1', 'usage' => ['input_tokens' => 100, 'output_tokens' => 0]]]),
+            new StreamEvent('content_block_delta', ['index' => 0, 'delta' => ['type' => 'text_delta', 'text' => 'ok']]),
+            new StreamEvent('message_delta', ['delta' => ['stop_reason' => 'end_turn'], 'usage' => ['output_tokens' => 10]]),
+        ];
+
+        $qe = new QueryEngine($this->makeClient($events), $this->makeRegistry());
+        $processor = $qe->query([], []);
+        $usage = $processor->getUsage();
+
+        $this->assertSame(100, $usage['input_tokens']);
+        $this->assertSame(10, $usage['output_tokens']);
+    }
+
+    public function test_query_ignores_events_after_abort(): void
+    {
+        $events = [
+            new StreamEvent('message_start', ['message' => ['id' => 'msg_1', 'usage' => ['input_tokens' => 5]]]),
+            new StreamEvent('content_block_start', ['index' => 0, 'content_block' => ['type' => 'text', 'text' => '']]),
+            new StreamEvent('content_block_delta', ['index' => 0, 'delta' => ['type' => 'text_delta', 'text' => 'first']]),
+            new StreamEvent('content_block_delta', ['index' => 0, 'delta' => ['type' => 'text_delta', 'text' => 'second']]),
+        ];
+
+        $yieldedCount = 0;
+        $client = $this->createMock(StreamingClient::class);
+        $client->method('streamMessages')->willReturnCallback(
+            function ($systemPrompt, $messages, $tools, $onRawEvent = null, $shouldAbort = null) use ($events, &$yieldedCount) {
+                foreach ($events as $event) {
+                    yield $event;
+                    $yieldedCount++;
+                    if ($shouldAbort && $shouldAbort()) {
+                        break;
+                    }
+                }
+            }
+        );
+
+        $qe = new QueryEngine($client, $this->makeRegistry());
+        $abortAfterFirstDelta = function () use (&$yieldedCount) {
+            return $yieldedCount >= 3;
+        };
+        $processor = $qe->query([], [], shouldAbort: $abortAfterFirstDelta);
+
+        $this->assertSame('first', $processor->getAccumulatedText());
+    }
+
+    public function test_query_accumulates_tool_use_input(): void
+    {
+        $events = [
+            new StreamEvent('message_start', ['message' => ['id' => 'msg_1', 'usage' => ['input_tokens' => 5]]]),
+            new StreamEvent('content_block_start', ['index' => 0, 'content_block' => ['type' => 'tool_use', 'id' => 'tid', 'name' => 'Bash', 'input' => '']]),
+            new StreamEvent('content_block_delta', ['index' => 0, 'delta' => ['type' => 'input_json_delta', 'partial_json' => '{"command']]),
+            new StreamEvent('content_block_delta', ['index' => 0, 'delta' => ['type' => 'input_json_delta', 'partial_json' => '":"ls"}']]),
+            new StreamEvent('content_block_stop', ['index' => 0]),
+        ];
+
+        $qe = new QueryEngine($this->makeClient($events), $this->makeRegistry());
+        $processor = $qe->query([], []);
+        $blocks = $processor->getIndexedToolUseBlocks();
+
+        $this->assertCount(1, $blocks);
+        $this->assertSame('Bash', $blocks[0]['name']);
+        $this->assertSame(['command' => 'ls'], $blocks[0]['input']);
+    }
 }

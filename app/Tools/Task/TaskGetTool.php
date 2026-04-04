@@ -2,6 +2,7 @@
 
 namespace App\Tools\Task;
 
+use App\Services\Agent\BackgroundAgentManager;
 use App\Services\Task\TaskManager;
 use App\Tools\BaseTool;
 use App\Tools\ToolInputSchema;
@@ -38,15 +39,41 @@ class TaskGetTool extends BaseTool
         }
 
         $age = time() - $task->createdAt;
-        return ToolResult::success(
-            "Task: {$task->id}\n" .
-            "Subject: {$task->subject}\n" .
-            "Status: {$task->status}\n" .
-            "Active: {$task->activeForm}\n" .
-            "Age: {$age}s\n" .
-            ($task->description ? "Description: {$task->description}\n" : '') .
-            ($task->result ? "Result: {$task->result}\n" : '')
-        );
+        $lines = [
+            "Task: {$task->id}",
+            "Subject: {$task->subject}",
+            "Status: {$task->status}",
+            "Active: {$task->activeForm}",
+            "Age: {$age}s",
+        ];
+
+        if ($task->description) {
+            $lines[] = "Description: {$task->description}";
+        }
+
+        if ($task->result) {
+            $lines[] = "Result: {$task->result}";
+        }
+
+        $agent = app(BackgroundAgentManager::class)->get($task->id);
+        if ($agent !== null) {
+            $lines[] = "Agent status: {$agent['status']}";
+            if (! empty($agent['pid'])) {
+                $lines[] = "PID: {$agent['pid']}";
+            }
+            $lines[] = "Pending messages: " . ($agent['pending_messages'] ?? 0);
+            if (! empty($agent['stop_requested'])) {
+                $lines[] = 'Stop requested: yes';
+            }
+            if (! empty($agent['error'])) {
+                $lines[] = "Agent error: {$agent['error']}";
+            }
+            if (! empty($agent['last_result'])) {
+                $lines[] = "Last response: {$agent['last_result']}";
+            }
+        }
+
+        return ToolResult::success(implode("\n", $lines));
     }
 
     public function isReadOnly(array $input): bool { return true; }

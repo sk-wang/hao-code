@@ -23,14 +23,27 @@ class TaskManager
 
     public function create(string $subject, string $activeForm, ?string $description = null): Task
     {
-        $task = new Task(
+        return $this->createWithId(
             id: 'task_' . bin2hex(random_bytes(4)),
             subject: $subject,
             activeForm: $activeForm,
             description: $description,
+        );
+    }
+
+    public function createWithId(string $id, string $subject, string $activeForm, ?string $description = null): Task
+    {
+        $this->loadTasks();
+
+        $timestamp = time();
+        $task = new Task(
+            id: $id,
+            subject: $subject,
+            activeForm: $activeForm,
+            description: $description,
             status: 'pending',
-            createdAt: time(),
-            updatedAt: time(),
+            createdAt: $timestamp,
+            updatedAt: $timestamp,
         );
 
         $this->tasks[$task->id] = $task;
@@ -41,6 +54,8 @@ class TaskManager
 
     public function get(string $id): ?Task
     {
+        $this->loadTasks();
+
         return $this->tasks[$id] ?? null;
     }
 
@@ -49,6 +64,8 @@ class TaskManager
      */
     public function list(?string $status = null): array
     {
+        $this->loadTasks();
+
         $tasks = array_values($this->tasks);
         if ($status) {
             $tasks = array_filter($tasks, fn($t) => $t->status === $status);
@@ -58,6 +75,8 @@ class TaskManager
 
     public function update(string $id, string $status, ?string $result = null): ?Task
     {
+        $this->loadTasks();
+
         $task = $this->tasks[$id] ?? null;
         if (!$task) return null;
 
@@ -77,6 +96,8 @@ class TaskManager
 
     public function remove(string $id): bool
     {
+        $this->loadTasks();
+
         if (!isset($this->tasks[$id])) return false;
         unset($this->tasks[$id]);
         $this->persist();
@@ -91,13 +112,16 @@ class TaskManager
         }
         file_put_contents(
             $this->storagePath . '/tasks.json',
-            json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
+            json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE),
+            LOCK_EX,
         );
     }
 
     private function loadTasks(): void
     {
         $file = $this->storagePath . '/tasks.json';
+        $this->tasks = [];
+
         if (!file_exists($file)) return;
 
         $data = json_decode(file_get_contents($file), true) ?: [];

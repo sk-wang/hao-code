@@ -53,6 +53,12 @@ class CostTracker
         $this->totalCost = $cost;
     }
 
+    public function reset(): void
+    {
+        $this->totalCost = 0.0;
+        $this->warnedAtThreshold = false;
+    }
+
     public function getTotalCost(): float
     {
         return $this->totalCost;

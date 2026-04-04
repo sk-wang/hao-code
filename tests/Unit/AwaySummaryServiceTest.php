@@ -107,4 +107,27 @@ class AwaySummaryServiceTest extends TestCase
         $result = $svc->generateSummary($entries);
         $this->assertNull($result); // null due to network, truncation happened internally
     }
+
+    public function test_kimi_endpoint_uses_local_summary_generation(): void
+    {
+        $svc = new AwaySummaryService('fake-key', 'https://api.kimi.com/coding/');
+        $entries = [
+            ['type' => 'user_message', 'content' => 'Inspect the repo and explain the bug'],
+            [
+                'type' => 'assistant_turn',
+                'message' => [
+                    'content' => [
+                        ['type' => 'tool_use', 'name' => 'Read'],
+                        ['type' => 'tool_use', 'name' => 'Bash'],
+                    ],
+                ],
+            ],
+        ];
+
+        $summary = $svc->generateSummary($entries);
+
+        $this->assertNotNull($summary);
+        $this->assertStringContainsString('Inspect the repo and explain the bug', $summary);
+        $this->assertStringContainsString('Read and Bash', $summary);
+    }
 }

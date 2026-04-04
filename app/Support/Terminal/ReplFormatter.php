@@ -56,7 +56,7 @@ class ReplFormatter
 
     public function helpHint(): string
     {
-        return "  <fg=gray>/help commands · Ctrl+O transcript · Ctrl+R history · Ctrl+C interrupt · Ctrl+D exit · \\ multiline</>";
+        return "  <fg=gray>/help commands · Tab/↑↓ autocomplete · Ctrl+O transcript · Ctrl+R history · Ctrl+C interrupt · Ctrl+D exit · \\ multiline</>";
     }
 
     public function readlinePrompt(string $cwd): string
@@ -69,31 +69,331 @@ class ReplFormatter
         return $this->wrapAnsiForReadline($this->outputFormatter->format($this->continuationPrompt()));
     }
 
-    public function promptFooter(
-        string $model,
-        int $messageCount,
-        string $permissionMode,
-        bool $fastMode = false,
-        ?string $title = null,
-    ): string {
-        $parts = [];
+    /**
+     * @param  array{
+     *   model: string,
+     *   message_count: int,
+     *   permission_mode: string,
+     *   fast_mode?: bool,
+     *   layout?: string,
+     *   title?: string|null,
+     *   project?: string|null,
+     *   branch?: string|null,
+     *   git_dirty?: bool,
+     *   context_percent?: float,
+     *   context_tokens?: int,
+     *   context_limit?: int,
+     *   context_state?: string,
+     *   cost?: float,
+     *   cost_warn?: float,
+     *   show_tools?: bool,
+     *   show_agents?: bool,
+     *   show_todos?: bool,
+     *   tools?: array{
+     *     running?: array<int, array{name: string, target: string|null}>,
+     *     completed?: array<int, array{name: string, count: int}>
+     *   },
+     *   agents?: array{
+     *     bash_tasks?: int,
+     *     entries?: array<int, array{
+     *       status: string,
+     *       agent_type: string,
+     *       description?: string|null,
+     *       elapsed_seconds?: int,
+     *       pending_messages?: int
+     *     }>
+     *   },
+     *   todo?: array{
+     *     current: string|null,
+     *     completed: int,
+     *     total: int,
+     *     all_completed: bool
+     *   }|null
+     * }  $snapshot
+     */
+    public function promptFooter(array $snapshot): string
+    {
+        return implode("\n", $this->promptFooterLines($snapshot));
+    }
 
-        if ($title !== null && trim($title) !== '') {
-            $parts[] = $this->truncate($title, 24);
+    /**
+     * @param  array{
+     *   model: string,
+     *   message_count: int,
+     *   permission_mode: string,
+     *   fast_mode?: bool,
+     *   layout?: string,
+     *   title?: string|null,
+     *   project?: string|null,
+     *   branch?: string|null,
+     *   git_dirty?: bool,
+     *   context_percent?: float,
+     *   context_tokens?: int,
+     *   context_limit?: int,
+     *   context_state?: string,
+     *   cost?: float,
+     *   cost_warn?: float,
+     *   show_tools?: bool,
+     *   show_agents?: bool,
+     *   show_todos?: bool,
+     *   tools?: array{
+     *     running?: array<int, array{name: string, target: string|null}>,
+     *     completed?: array<int, array{name: string, count: int}>
+     *   },
+     *   agents?: array{
+     *     bash_tasks?: int,
+     *     entries?: array<int, array{
+     *       status: string,
+     *       agent_type: string,
+     *       description?: string|null,
+     *       elapsed_seconds?: int,
+     *       pending_messages?: int
+     *     }>
+     *   },
+     *   todo?: array{
+     *     current: string|null,
+     *     completed: int,
+     *     total: int,
+     *     all_completed: bool
+     *   }|null
+     * }  $snapshot
+     * @return array<int, string>
+     */
+    public function promptFooterLines(array $snapshot): array
+    {
+        $layout = strtolower((string) ($snapshot['layout'] ?? 'expanded'));
+        if ($layout === 'compact') {
+            return $this->compactPromptFooterLines($snapshot);
         }
 
-        $parts[] = $this->truncate($model, 26);
-        $parts[] = $messageCount . ' msgs';
-        $parts[] = $permissionMode;
+        $identitySegments = [];
+        $model = $this->truncate((string) ($snapshot['model'] ?? 'unknown'), 28);
+        $identitySegments[] = '<fg=cyan>['.$this->escape($model).']</>';
 
-        if ($fastMode) {
-            $parts[] = 'fast';
+        $title = trim((string) ($snapshot['title'] ?? ''));
+        if ($title !== '') {
+            $identitySegments[] = '<fg=white>'.$this->escape($this->truncate($title, 24)).'</>';
         }
 
-        $parts[] = 'Ctrl+O transcript';
-        $parts[] = 'Ctrl+R history';
+        $project = trim((string) ($snapshot['project'] ?? ''));
+        $branch = trim((string) ($snapshot['branch'] ?? ''));
+        if ($project !== '' || $branch !== '') {
+            $projectSegment = $project !== ''
+                ? '<fg=yellow>'.$this->escape($this->truncate($project, 24)).'</>'
+                : '';
+            $gitSegment = $branch !== ''
+                ? '<fg=magenta>git:(</><fg=cyan>'.$this->escape($this->truncate(
+                    $branch.((bool) ($snapshot['git_dirty'] ?? false) ? '*' : ''),
+                    24,
+                )).'</><fg=magenta>)</>'
+                : '';
 
-        return '  <fg=gray>' . $this->escape(implode(' · ', $parts)) . '</>';
+            $identitySegments[] = trim($projectSegment.' '.$gitSegment);
+        }
+
+        $meta = [
+            ((int) ($snapshot['message_count'] ?? 0)).' msgs',
+            (string) ($snapshot['permission_mode'] ?? 'default'),
+        ];
+
+        if ((bool) ($snapshot['fast_mode'] ?? false)) {
+            $meta[] = 'fast';
+        }
+
+        $identitySegments[] = '<fg=gray>'.$this->escape(implode(' · ', $meta)).'</>';
+
+        $contextPercent = max(0.0, min(100.0, (float) ($snapshot['context_percent'] ?? 0.0)));
+        $contextState = (string) ($snapshot['context_state'] ?? 'normal');
+        $contextColor = $this->contextColor($contextState);
+        $contextLine = implode(' <fg=gray>·</> ', array_filter([
+            '<fg=gray>Context</> <fg='.$contextColor.'>'.$this->contextBar($contextPercent).'</> '
+                .'<fg='.$contextColor.'>'.$this->escape(
+                    sprintf(
+                        '%s (%s/%s)',
+                        (string) ((int) round($contextPercent)).'%',
+                        $this->formatCompactNumber((int) ($snapshot['context_tokens'] ?? 0)),
+                        $this->formatCompactNumber((int) ($snapshot['context_limit'] ?? 180000)),
+                    ),
+                ).'</>',
+            '<fg=gray>Cost</> <fg='.$this->costColor(
+                (float) ($snapshot['cost'] ?? 0.0),
+                (float) ($snapshot['cost_warn'] ?? 0.0),
+            ).'>$'.$this->formatCost((float) ($snapshot['cost'] ?? 0.0)).'</>'
+                .'<fg=gray>/'.$this->escape('$'.$this->formatCost((float) ($snapshot['cost_warn'] ?? 0.0)).' warn').'</>',
+            '<fg=gray>Ctrl+O transcript · Ctrl+R history</>',
+        ]));
+
+        $lines = [
+            '  '.implode(' <fg=gray>·</> ', array_filter($identitySegments, static fn (string $segment): bool => $segment !== '')),
+            '  '.$contextLine,
+        ];
+
+        if ((bool) ($snapshot['show_tools'] ?? true)) {
+            $toolParts = [];
+            foreach (($snapshot['tools']['running'] ?? []) as $tool) {
+                $toolParts[] = '<fg=yellow>◐</> <fg=cyan>'.$this->escape($this->truncate((string) ($tool['name'] ?? 'tool'), 16)).'</>'
+                    .($this->stringValue($tool['target'] ?? null) !== null
+                        ? '<fg=gray>: '.$this->escape($this->truncate((string) $tool['target'], 24)).'</>'
+                        : '');
+            }
+            foreach (($snapshot['tools']['completed'] ?? []) as $tool) {
+                $toolParts[] = '<fg=green>✓</> <fg=cyan>'.$this->escape($this->truncate((string) ($tool['name'] ?? 'tool'), 16)).'</>'
+                    .'<fg=gray>×'.$this->escape((string) ($tool['count'] ?? 0)).'</>';
+            }
+            if ($toolParts !== []) {
+                $lines[] = '  <fg=gray>Tools</> '.implode(' <fg=gray>·</> ', $toolParts);
+            }
+        }
+
+        if ((bool) ($snapshot['show_agents'] ?? true)) {
+            $agentParts = [];
+            $bashTasks = (int) ($snapshot['agents']['bash_tasks'] ?? 0);
+            if ($bashTasks > 0) {
+                $agentParts[] = '<fg=yellow>◐</> <fg=cyan>bash</><fg=gray>×'.$this->escape((string) $bashTasks).'</>';
+            }
+
+            foreach (($snapshot['agents']['entries'] ?? []) as $agent) {
+                $agentParts[] = $this->formatAgentFooterEntry($agent);
+            }
+            if ($agentParts !== []) {
+                $lines[] = '  <fg=gray>Background</> '.implode(' <fg=gray>·</> ', $agentParts);
+            }
+        }
+
+        $todo = $snapshot['todo'] ?? null;
+        if ((bool) ($snapshot['show_todos'] ?? true) && is_array($todo) && ((int) ($todo['total'] ?? 0)) > 0) {
+            $progress = '<fg=gray>('.$this->escape((string) ($todo['completed'] ?? 0).'/'.(string) ($todo['total'] ?? 0)).')</>';
+
+            if ((bool) ($todo['all_completed'] ?? false)) {
+                $lines[] = '  <fg=gray>Todo</> <fg=green>✓</> <fg=white>all complete</> '.$progress;
+            } elseif ($this->stringValue($todo['current'] ?? null) !== null) {
+                $lines[] = '  <fg=gray>Todo</> <fg=yellow>▸</> <fg=white>'.$this->escape(
+                    $this->truncate((string) $todo['current'], 52),
+                ).'</> '.$progress;
+            }
+        }
+
+        return $lines;
+    }
+
+    /**
+     * @param  array{
+     *   model: string,
+     *   message_count: int,
+     *   permission_mode: string,
+     *   fast_mode?: bool,
+     *   title?: string|null,
+     *   project?: string|null,
+     *   branch?: string|null,
+     *   git_dirty?: bool,
+     *   context_percent?: float,
+     *   context_tokens?: int,
+     *   context_limit?: int,
+     *   cost?: float,
+     *   show_tools?: bool,
+     *   show_agents?: bool,
+     *   show_todos?: bool,
+     *   tools?: array{
+     *     running?: array<int, array{name: string, target: string|null}>,
+     *     completed?: array<int, array{name: string, count: int}>
+     *   },
+     *   agents?: array{
+     *     bash_tasks?: int,
+     *     entries?: array<int, array{
+     *       status: string,
+     *       agent_type: string,
+     *       description?: string|null,
+     *       elapsed_seconds?: int,
+     *       pending_messages?: int
+     *     }>
+     *   },
+     *   todo?: array{
+     *     current: string|null,
+     *     completed: int,
+     *     total: int,
+     *     all_completed: bool
+     *   }|null
+     * }  $snapshot
+     * @return array<int, string>
+     */
+    private function compactPromptFooterLines(array $snapshot): array
+    {
+        $contextColor = $this->contextColor((string) ($snapshot['context_state'] ?? 'normal'));
+        $segments = [];
+        $segments[] = '<fg=cyan>['.$this->escape($this->truncate((string) ($snapshot['model'] ?? 'unknown'), 18)).']</>';
+
+        $title = $this->stringValue($snapshot['title'] ?? null);
+        if ($title !== null) {
+            $segments[] = '<fg=white>'.$this->escape($this->truncate($title, 18)).'</>';
+        }
+
+        $project = $this->stringValue($snapshot['project'] ?? null);
+        if ($project !== null) {
+            $git = $this->stringValue($snapshot['branch'] ?? null);
+            $projectText = $project;
+            if ($git !== null) {
+                $projectText .= ' git:('.$git.((bool) ($snapshot['git_dirty'] ?? false) ? '*' : '').')';
+            }
+            $segments[] = '<fg=yellow>'.$this->escape($this->truncate($projectText, 28)).'</>';
+        }
+
+        $meta = ((int) ($snapshot['message_count'] ?? 0)).' msgs/'.(string) ($snapshot['permission_mode'] ?? 'default');
+        if ((bool) ($snapshot['fast_mode'] ?? false)) {
+            $meta .= '/fast';
+        }
+        $segments[] = '<fg=gray>'.$this->escape($meta).'</>';
+        $segments[] = '<fg=gray>ctx</> <fg='.$contextColor.'>'.$this->contextBar((float) ($snapshot['context_percent'] ?? 0.0), 6).'</> <fg='.$contextColor.'>'.$this->escape((string) ((int) round((float) ($snapshot['context_percent'] ?? 0.0))).'%').'</>';
+        $segments[] = '<fg=gray>$'.$this->formatCost((float) ($snapshot['cost'] ?? 0.0)).'</>';
+
+        $lines = [
+            '  '.implode(' <fg=gray>·</> ', $segments),
+        ];
+
+        $activity = [];
+
+        $todo = $snapshot['todo'] ?? null;
+        if ((bool) ($snapshot['show_todos'] ?? true) && is_array($todo) && ((int) ($todo['total'] ?? 0)) > 0) {
+            if ((bool) ($todo['all_completed'] ?? false)) {
+                $activity[] = '<fg=green>todo</> <fg=gray>'.$this->escape((string) ($todo['completed'] ?? 0).'/'.(string) ($todo['total'] ?? 0)).'</>';
+            } elseif ($this->stringValue($todo['current'] ?? null) !== null) {
+                $activity[] = '<fg=yellow>todo</> <fg=white>'.$this->escape(
+                    $this->truncate((string) $todo['current'], 28),
+                ).'</> <fg=gray>'.$this->escape((string) ($todo['completed'] ?? 0).'/'.(string) ($todo['total'] ?? 0)).'</>';
+            }
+        }
+
+        if ((bool) ($snapshot['show_agents'] ?? true)) {
+            $bashTasks = (int) ($snapshot['agents']['bash_tasks'] ?? 0);
+            if ($bashTasks > 0) {
+                $activity[] = '<fg=yellow>bg</> <fg=cyan>bash×'.$this->escape((string) $bashTasks).'</>';
+            }
+
+            $agent = ($snapshot['agents']['entries'][0] ?? null);
+            if (is_array($agent)) {
+                $activity[] = '<fg=yellow>bg</> <fg=magenta>'.$this->escape($this->truncate((string) ($agent['agent_type'] ?? 'agent'), 14)).'</> <fg=gray>'.$this->escape(
+                    $this->formatElapsed((int) ($agent['elapsed_seconds'] ?? 0)),
+                ).'</>';
+            }
+        }
+
+        if ((bool) ($snapshot['show_tools'] ?? true)) {
+            $tools = [];
+            foreach (array_slice(($snapshot['tools']['completed'] ?? []), 0, 2) as $tool) {
+                if (! is_array($tool)) {
+                    continue;
+                }
+                $tools[] = $this->truncate((string) ($tool['name'] ?? 'tool'), 12).'×'.(string) ($tool['count'] ?? 0);
+            }
+            if ($tools !== []) {
+                $activity[] = '<fg=yellow>tools</> <fg=cyan>'.$this->escape(implode(' ', $tools)).'</>';
+            }
+        }
+
+        if ($activity !== []) {
+            $lines[] = '  '.implode(' <fg=gray>·</> ', $activity);
+        }
+
+        return $lines;
     }
 
     public function transcriptFooter(
@@ -316,5 +616,112 @@ class ReplFormatter
     private function stripMarkup(string $text): string
     {
         return preg_replace('/<[^>]+>/', '', $text) ?? $text;
+    }
+
+    private function contextBar(float $percent, int $width = 10): string
+    {
+        $filled = max(0, min($width, (int) round(($percent / 100) * $width)));
+
+        return str_repeat('█', $filled).str_repeat('░', $width - $filled);
+    }
+
+    private function contextColor(string $state): string
+    {
+        return match ($state) {
+            'critical' => 'red',
+            'warning' => 'yellow',
+            default => 'green',
+        };
+    }
+
+    private function costColor(float $cost, float $warn): string
+    {
+        if ($warn > 0 && $cost >= $warn) {
+            return 'yellow';
+        }
+
+        return 'gray';
+    }
+
+    private function formatCompactNumber(int $value): string
+    {
+        if ($value >= 1_000_000) {
+            return number_format($value / 1_000_000, 1).'m';
+        }
+
+        if ($value >= 1_000) {
+            return number_format($value / 1_000, $value >= 10_000 ? 0 : 1).'k';
+        }
+
+        return (string) $value;
+    }
+
+    /**
+     * @param  array{
+     *   status: string,
+     *   agent_type: string,
+     *   description?: string|null,
+     *   elapsed_seconds?: int,
+     *   pending_messages?: int
+     * }  $agent
+     */
+    private function formatAgentFooterEntry(array $agent): string
+    {
+        $status = (string) ($agent['status'] ?? 'running');
+        $icon = match ($status) {
+            'completed' => '<fg=green>✓</>',
+            'error' => '<fg=red>✗</>',
+            default => '<fg=yellow>◐</>',
+        };
+
+        $parts = [
+            $icon.' <fg=magenta>'.$this->escape($this->truncate((string) ($agent['agent_type'] ?? 'agent'), 16)).'</>',
+        ];
+
+        $description = $this->stringValue($agent['description'] ?? null);
+        if ($description !== null) {
+            $parts[] = '<fg=gray>: '.$this->escape($this->truncate($description, 28)).'</>';
+        }
+
+        $elapsed = max(0, (int) ($agent['elapsed_seconds'] ?? 0));
+        $meta = $this->formatElapsed($elapsed);
+        $pending = (int) ($agent['pending_messages'] ?? 0);
+        if ($pending > 0) {
+            $meta .= ' · '.$pending.' queued';
+        }
+
+        $parts[] = '<fg=gray>('.$this->escape($meta).')</>';
+
+        return implode('', $parts);
+    }
+
+    private function formatElapsed(int $seconds): string
+    {
+        if ($seconds < 60) {
+            return $seconds.'s';
+        }
+
+        $minutes = intdiv($seconds, 60);
+        $remainingSeconds = $seconds % 60;
+
+        if ($minutes < 60) {
+            return $minutes.'m '.$remainingSeconds.'s';
+        }
+
+        $hours = intdiv($minutes, 60);
+        $remainingMinutes = $minutes % 60;
+
+        return $hours.'h '.$remainingMinutes.'m';
+    }
+
+    private function stringValue(mixed $value): ?string
+    {
+        if (! is_string($value) && ! is_int($value) && ! is_float($value)) {
+            return null;
+        }
+
+        $string = trim((string) $value);
+
+        return $string === '' ? null : $string;
     }
 }

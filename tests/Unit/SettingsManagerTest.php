@@ -115,7 +115,88 @@ class SettingsManagerTest extends TestCase
         $this->assertArrayHasKey('api_base_url', $all);
         $this->assertArrayHasKey('max_tokens', $all);
         $this->assertArrayHasKey('permission_mode', $all);
+        $this->assertArrayHasKey('theme', $all);
+        $this->assertArrayHasKey('output_style', $all);
+        $this->assertArrayHasKey('statusline_enabled', $all);
+        $this->assertArrayHasKey('statusline_layout', $all);
+        $this->assertArrayHasKey('statusline_path_levels', $all);
+        $this->assertArrayHasKey('statusline_show_tools', $all);
+        $this->assertArrayHasKey('statusline_show_agents', $all);
+        $this->assertArrayHasKey('statusline_show_todos', $all);
         $this->assertArrayHasKey('api_key_set', $all);
+    }
+
+    public function test_statusline_defaults_to_enabled_and_supports_runtime_override(): void
+    {
+        $settings = new SettingsManager;
+        $this->assertTrue($settings->isStatuslineEnabled());
+
+        $settings->set('statusline_enabled', false);
+
+        $this->assertFalse($settings->isStatuslineEnabled());
+    }
+
+    public function test_statusline_defaults_include_layout_path_depth_and_section_toggles(): void
+    {
+        $settings = new SettingsManager;
+        $statusline = $settings->getStatuslineConfig();
+
+        $this->assertSame('expanded', $statusline['layout']);
+        $this->assertSame(2, $statusline['path_levels']);
+        $this->assertTrue($statusline['show_tools']);
+        $this->assertTrue($statusline['show_agents']);
+        $this->assertTrue($statusline['show_todos']);
+    }
+
+    public function test_statusline_runtime_overrides_are_normalized(): void
+    {
+        $settings = new SettingsManager;
+        $settings->set('statusline_layout', 'compact');
+        $settings->set('statusline_path_levels', 9);
+        $settings->set('statusline_show_tools', 'off');
+        $settings->set('statusline_show_agents', '0');
+        $settings->set('statusline_show_todos', 'yes');
+
+        $statusline = $settings->getStatuslineConfig();
+
+        $this->assertSame('compact', $statusline['layout']);
+        $this->assertSame(3, $statusline['path_levels']);
+        $this->assertFalse($statusline['show_tools']);
+        $this->assertFalse($statusline['show_agents']);
+        $this->assertTrue($statusline['show_todos']);
+    }
+
+    public function test_statusline_setters_persist_project_configuration(): void
+    {
+        $tmpDir = sys_get_temp_dir() . '/smtest_statusline_' . getmypid() . '_' . uniqid();
+        mkdir($tmpDir . '/.haocode', 0755, true);
+
+        config(['haocode.global_settings_path' => '/nonexistent/path/settings.json']);
+
+        $origDir = getcwd();
+        chdir($tmpDir);
+
+        try {
+            $settings = new SettingsManager;
+            $settings->setStatuslineLayout('compact');
+            $settings->setStatuslinePathLevels(1);
+            $settings->setStatuslineSectionVisibility('tools', false);
+            $settings->setStatuslineSectionVisibility('agents', false);
+
+            $reloaded = new SettingsManager;
+            $statusline = $reloaded->getStatuslineConfig();
+
+            $this->assertSame('compact', $statusline['layout']);
+            $this->assertSame(1, $statusline['path_levels']);
+            $this->assertFalse($statusline['show_tools']);
+            $this->assertFalse($statusline['show_agents']);
+            $this->assertTrue($statusline['show_todos']);
+        } finally {
+            chdir($origDir);
+            @unlink($tmpDir . '/.haocode/settings.json');
+            @rmdir($tmpDir . '/.haocode');
+            @rmdir($tmpDir);
+        }
     }
 
     // ─── permissions merge from global + project settings ─────────────────

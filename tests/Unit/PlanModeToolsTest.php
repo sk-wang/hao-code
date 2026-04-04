@@ -92,4 +92,10 @@ class PlanModeToolsTest extends TestCase
         $result = (new ExitPlanModeTool)->call([], $this->context);
         $this->assertStringContainsString('implement', strtolower($result->output));
     }
+
+    public function test_exit_call_tells_user_to_run_plan_off(): void
+    {
+        $result = (new ExitPlanModeTool)->call([], $this->context);
+        $this->assertStringContainsString('/plan off', $result->output);
+    }
 }

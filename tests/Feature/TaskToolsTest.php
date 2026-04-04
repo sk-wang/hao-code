@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Services\Agent\BackgroundAgentManager;
 use App\Services\Task\TaskManager;
 use App\Tools\Task\TaskCreateTool;
 use App\Tools\Task\TaskGetTool;
@@ -16,6 +17,8 @@ class TaskToolsTest extends TestCase
     private ToolUseContext $context;
     private TaskManager $manager;
     private string $tmpDir;
+    private string $agentTmpDir;
+    private BackgroundAgentManager $backgroundAgentManager;
 
     protected function setUp(): void
     {
@@ -40,6 +43,11 @@ class TaskToolsTest extends TestCase
         $tasksProp->setValue($this->manager, []);
 
         $this->app->instance(TaskManager::class, $this->manager);
+
+        $this->agentTmpDir = sys_get_temp_dir() . '/agent_tools_test_' . uniqid();
+        mkdir($this->agentTmpDir, 0755, true);
+        $this->backgroundAgentManager = new BackgroundAgentManager($this->agentTmpDir);
+        $this->app->instance(BackgroundAgentManager::class, $this->backgroundAgentManager);
     }
 
     protected function tearDown(): void
@@ -48,6 +56,10 @@ class TaskToolsTest extends TestCase
         $file = $this->tmpDir . '/tasks.json';
         if (file_exists($file)) unlink($file);
         @rmdir($this->tmpDir);
+        foreach (glob($this->agentTmpDir . '/*') ?: [] as $agentFile) {
+            @unlink($agentFile);
+        }
+        @rmdir($this->agentTmpDir);
     }
 
     // ─── TaskCreateTool ───────────────────────────────────────────────────
@@ -141,6 +153,19 @@ class TaskToolsTest extends TestCase
     public function test_get_tool_is_read_only(): void
     {
         $this->assertTrue((new TaskGetTool)->isReadOnly([]));
+    }
+
+    public function test_get_tool_includes_background_agent_metadata(): void
+    {
+        $task = $this->manager->createWithId('agent_demo', 'Repo agent', 'Running');
+        $this->backgroundAgentManager->create('agent_demo', 'Inspect repo', 'Explore', 'Repo agent', 4321);
+        $this->backgroundAgentManager->markRunning('agent_demo');
+
+        $result = (new TaskGetTool)->call(['id' => $task->id], $this->context);
+
+        $this->assertStringContainsString('Agent status: running', $result->output);
+        $this->assertStringContainsString('PID: 4321', $result->output);
+        $this->assertStringContainsString('Pending messages: 0', $result->output);
     }
 
     // ─── TaskListTool ─────────────────────────────────────────────────────
@@ -270,5 +295,18 @@ class TaskToolsTest extends TestCase
     public function test_stop_tool_is_not_read_only(): void
     {
         $this->assertFalse((new TaskStopTool)->isReadOnly([]));
+    }
+
+    public function test_stop_tool_requests_background_agent_shutdown(): void
+    {
+        $this->manager->createWithId('agent_demo', 'Repo agent', 'Running');
+        $this->backgroundAgentManager->create('agent_demo', 'Inspect repo', 'Explore');
+        $this->backgroundAgentManager->markRunning('agent_demo');
+
+        $result = (new TaskStopTool)->call(['id' => 'agent_demo'], $this->context);
+
+        $this->assertFalse($result->isError);
+        $this->assertStringContainsString('Stop requested', $result->output);
+        $this->assertTrue($this->backgroundAgentManager->isStopRequested('agent_demo'));
     }
 }

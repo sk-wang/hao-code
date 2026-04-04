@@ -118,4 +118,95 @@ class HaoCodeCommandTest extends TestCase
         $this->assertTrue($prefix);
         $this->assertFalse($nonMatch);
     }
+
+    public function test_normalize_config_key_accepts_claude_style_aliases(): void
+    {
+        $command = new HaoCodeCommand;
+
+        $permission = $this->invoke($command, 'normalizeConfigKey', 'permission-mode');
+        $outputStyle = $this->invoke($command, 'normalizeConfigKey', 'output-style');
+        $api = $this->invoke($command, 'normalizeConfigKey', 'api');
+
+        $this->assertSame('permission_mode', $permission);
+        $this->assertSame('output_style', $outputStyle);
+        $this->assertSame('api_base_url', $api);
+    }
+
+    public function test_extract_context_files_deduplicates_and_relativizes_paths(): void
+    {
+        $command = new HaoCodeCommand;
+        $cwd = getcwd();
+
+        $messages = [
+            [
+                'role' => 'assistant',
+                'content' => [
+                    [
+                        'type' => 'tool_use',
+                        'name' => 'Read',
+                        'input' => ['file_path' => $cwd.'/app/Console/Commands/HaoCodeCommand.php'],
+                    ],
+                    [
+                        'type' => 'tool_use',
+                        'name' => 'Edit',
+                        'input' => ['file_path' => './README.md'],
+                    ],
+                    [
+                        'type' => 'tool_use',
+                        'name' => 'Read',
+                        'input' => ['file_path' => $cwd.'/app/Console/Commands/HaoCodeCommand.php'],
+                    ],
+                ],
+            ],
+        ];
+
+        $files = $this->invoke($command, 'extractContextFiles', $messages);
+
+        $this->assertSame([
+            'app/Console/Commands/HaoCodeCommand.php',
+            'README.md',
+        ], $files);
+    }
+
+    public function test_tokenize_arguments_preserves_quoted_segments(): void
+    {
+        $command = new HaoCodeCommand;
+
+        $tokens = $this->invoke($command, 'tokenizeArguments', 'add sentry "npx -y @acme/server" --scope global');
+
+        $this->assertSame(['add', 'sentry', 'npx -y @acme/server', '--scope', 'global'], $tokens);
+    }
+
+    public function test_parse_long_options_separates_positionals_and_options(): void
+    {
+        $command = new HaoCodeCommand;
+
+        [$options, $positionals] = $this->invoke($command, 'parseLongOptions', [
+            'demo',
+            'https://example.test/mcp',
+            '--scope=global',
+            '--transport',
+            'http',
+            '--env',
+            'TOKEN=abc',
+        ]);
+
+        $this->assertSame(['demo', 'https://example.test/mcp'], $positionals);
+        $this->assertSame(['global'], $options['scope']);
+        $this->assertSame(['http'], $options['transport']);
+        $this->assertSame(['TOKEN=abc'], $options['env']);
+    }
+
+    public function test_choose_startup_prompt_prefers_print_option_then_prompt_then_argument(): void
+    {
+        $command = new HaoCodeCommand;
+
+        $prompt = $this->invoke($command, 'chooseStartupPrompt', 'from-print', 'from-prompt', 'from-arg');
+        $deprecated = $this->invoke($command, 'chooseStartupPrompt', null, 'from-prompt', 'from-arg');
+        $argument = $this->invoke($command, 'chooseStartupPrompt', null, null, 'from-arg');
+
+        $this->assertSame('from-print', $prompt);
+        $this->assertSame('from-prompt', $deprecated);
+        $this->assertSame('from-arg', $argument);
+    }
 }

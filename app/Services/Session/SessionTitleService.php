@@ -52,6 +52,10 @@ PROMPT;
             return null;
         }
 
+        if ($this->shouldPreferLocalGeneration()) {
+            return $this->buildLocalTitle($messages);
+        }
+
         try {
             return $this->callHaiku($text);
         } catch (\Throwable) {
@@ -99,7 +103,7 @@ PROMPT;
                 'content-type' => 'application/json',
             ],
             'json' => [
-                'model' => self::HAIKU_MODEL,
+                'model' => $this->resolveModel(),
                 'max_tokens' => 64,
                 'system' => self::PROMPT,
                 'messages' => [
@@ -120,5 +124,76 @@ PROMPT;
         return isset($decoded['title']) && is_string($decoded['title'])
             ? trim($decoded['title'])
             : null;
+    }
+
+    private function shouldPreferLocalGeneration(): bool
+    {
+        return $this->isKimiCodingEndpoint();
+    }
+
+    private function isKimiCodingEndpoint(): bool
+    {
+        return str_contains(strtolower($this->baseUrl), 'api.kimi.com/coding');
+    }
+
+    private function resolveModel(): string
+    {
+        return $this->isKimiCodingEndpoint()
+            ? 'kimi-for-coding'
+            : self::HAIKU_MODEL;
+    }
+
+    private function buildLocalTitle(array $messages): ?string
+    {
+        foreach ($messages as $message) {
+            if (($message['role'] ?? null) !== 'user') {
+                continue;
+            }
+
+            $text = $this->extractMessageText($message['content'] ?? '');
+            if ($text === '') {
+                continue;
+            }
+
+            return $this->truncateTitle($text);
+        }
+
+        return $this->truncateTitle($this->extractText($messages));
+    }
+
+    private function extractMessageText(mixed $content): string
+    {
+        $parts = [];
+
+        if (is_string($content)) {
+            $parts[] = $content;
+        } elseif (is_array($content)) {
+            foreach ($content as $block) {
+                if (($block['type'] ?? null) === 'text' && is_string($block['text'] ?? null)) {
+                    $parts[] = $block['text'];
+                }
+            }
+        }
+
+        $text = preg_replace('/\s+/u', ' ', trim(implode(' ', $parts))) ?? '';
+        $text = trim($text, " \t\n\r\0\x0B\"'`“”‘’");
+
+        return rtrim($text, ".!?\x{3002}\x{FF01}\x{FF1F}");
+    }
+
+    private function truncateTitle(string $title): ?string
+    {
+        $title = $this->extractMessageText($title);
+        if ($title === '') {
+            return null;
+        }
+
+        if (function_exists('mb_strimwidth')) {
+            return mb_strimwidth($title, 0, 48, '…', 'UTF-8');
+        }
+
+        return strlen($title) > 48
+            ? substr($title, 0, 45) . '...'
+            : $title;
     }
 }

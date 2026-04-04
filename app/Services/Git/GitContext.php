@@ -55,6 +55,16 @@ class GitContext
     }
 
     /**
+     * Whether the working tree has tracked or untracked changes.
+     */
+    public function hasUncommittedChanges(): bool
+    {
+        exec('git status --porcelain 2>/dev/null', $output, $exitCode);
+
+        return $exitCode === 0 && trim(implode("\n", $output)) !== '';
+    }
+
+    /**
      * Get the remote URL.
      */
     public function getRemoteUrl(): string

@@ -171,4 +171,42 @@ class SessionManagerTest extends TestCase
             $this->assertIsArray($entry);
         }
     }
+
+    public function test_branch_session_creates_new_transcript_and_switches_session(): void
+    {
+        $manager = new SessionManager;
+        $manager->setTitle('Feature Work');
+        $manager->recordUserMessage('Implement the new command');
+        $manager->recordTurn(['role' => 'assistant', 'content' => 'Working on it'], []);
+
+        $branch = $manager->branchSession();
+
+        $this->assertNotSame($branch['source_session_id'], $branch['session_id']);
+        $this->assertSame($branch['session_id'], $manager->getSessionId());
+        $this->assertSame($branch['title'], $manager->getTitle());
+        $this->assertSame('Feature Work (Branch)', $branch['title']);
+
+        $entries = $manager->loadSession($branch['session_id']);
+        $this->assertNotEmpty($entries);
+        $this->assertSame('session_title', $entries[0]['type']);
+        $this->assertSame('session_branch', $entries[1]['type']);
+        $this->assertSame($branch['source_session_id'], $entries[1]['source_session_id']);
+    }
+
+    public function test_find_most_recent_session_id_prefers_matching_cwd(): void
+    {
+        $manager = new SessionManager;
+        $manager->recordEntry(['type' => 'user_message', 'content' => 'current cwd']);
+
+        $otherSessionId = '1999-01-01_000000_deadbeef';
+        file_put_contents($this->tmpDir.'/'.$otherSessionId.'.jsonl', json_encode([
+            'timestamp' => date('c', time() + 60),
+            'session_id' => $otherSessionId,
+            'cwd' => '/tmp/somewhere-else',
+            'type' => 'user_message',
+            'content' => 'other cwd',
+        ])."\n");
+
+        $this->assertSame($manager->getSessionId(), $manager->findMostRecentSessionId(getcwd()));
+    }
 }

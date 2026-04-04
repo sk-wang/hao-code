@@ -18,7 +18,7 @@ class ConfigTool extends BaseTool
     public function description(): string
     {
         return <<<DESC
-Get or set runtime configuration values. Supported keys: model, api_base_url, max_tokens, permission_mode.
+Get or set runtime configuration values. Supported keys: model, api_base_url, max_tokens, permission_mode, theme, output_style.
 
 Usage:
 - To get all settings: call with no arguments
@@ -37,15 +37,15 @@ DESC;
                 'key' => [
                     'type' => 'string',
                     'description' => 'The config key to get or set',
-                    'enum' => ['model', 'api_base_url', 'max_tokens', 'permission_mode'],
+                    'enum' => ['model', 'api_base_url', 'max_tokens', 'permission_mode', 'theme', 'output_style'],
                 ],
                 'value' => [
-                    'type' => 'string',
+                    'type' => ['string', 'null'],
                     'description' => 'The value to set (omit to get current value)',
                 ],
             ],
         ], [
-            'key' => 'nullable|string|in:model,api_base_url,max_tokens,permission_mode',
+            'key' => 'nullable|string|in:model,api_base_url,max_tokens,permission_mode,theme,output_style',
             'value' => 'nullable|string',
         ]);
     }
@@ -62,7 +62,7 @@ DESC;
             $all = $settings->all();
             $lines = [];
             foreach ($all as $k => $v) {
-                $lines[] = "  {$k}: {$v}";
+                $lines[] = "  {$k}: ".$this->displayValue($v);
             }
             return ToolResult::success("Current settings:\n" . implode("\n", $lines));
         }
@@ -70,8 +70,8 @@ DESC;
         // Get specific key
         if ($value === null) {
             $all = $settings->all();
-            $current = $all[$key] ?? 'unknown';
-            return ToolResult::success("{$key} = {$current}");
+            $current = array_key_exists($key, $all) ? $all[$key] : 'unknown';
+            return ToolResult::success("{$key} = ".$this->displayValue($current));
         }
 
         // Validate and set
@@ -80,9 +80,14 @@ DESC;
             return ToolResult::error($error);
         }
 
-        $settings->set($key, $value);
+        $settings->set(
+            $key,
+            $key === 'output_style' && in_array(strtolower($value), ['off', 'none'], true) ? null : $value,
+        );
 
-        return ToolResult::success("Set {$key} = {$value}");
+        return ToolResult::success("Set {$key} = ".$this->displayValue(
+            $key === 'output_style' && in_array(strtolower($value), ['off', 'none'], true) ? null : $value,
+        ));
     }
 
     private function validateValue(string $key, string $value): ?string
@@ -94,8 +99,29 @@ DESC;
             'permission_mode' => in_array($value, ['default', 'plan', 'accept_edits', 'bypass_permissions'])
                 ? null
                 : "Invalid permission mode. Must be: default, plan, accept_edits, or bypass_permissions",
+            'theme' => in_array($value, ['dark', 'light', 'ansi'], true)
+                ? null
+                : "Invalid theme. Must be: dark, light, or ansi",
+            'output_style' => null,
             default => "Unknown config key: {$key}",
         };
+    }
+
+    private function displayValue(mixed $value): string
+    {
+        if ($value === null) {
+            return 'off';
+        }
+
+        if (is_bool($value)) {
+            return $value ? 'true' : 'false';
+        }
+
+        if (is_scalar($value)) {
+            return (string) $value;
+        }
+
+        return json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: 'unknown';
     }
 
     public function isReadOnly(array $input): bool

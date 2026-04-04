@@ -2,6 +2,7 @@
 
 namespace App\Services\Agent;
 
+use App\Services\Buddy\BuddyManager;
 use App\Services\Git\GitContext;
 use App\Services\Memory\SessionMemory;
 use App\Services\OutputStyle\OutputStyleLoader;
@@ -51,6 +52,13 @@ class ContextBuilder
 
         $prompt .= $this->getHaoCodeConventions();
 
+        // Inject companion intro if hatched
+        $buddy = app(BuddyManager::class);
+        $companionIntro = $buddy->getCompanionIntroText();
+        if ($companionIntro) {
+            $prompt .= "\n\n# Companion\n\n" . $companionIntro;
+        }
+
         // Append git context (current diff, branch info)
         $gitContext = $this->gitContext->getDiffContext();
         if ($gitContext) {
@@ -71,6 +79,11 @@ class ContextBuilder
 
     private function getDefaultSystemPrompt(): string
     {
+        $override = $this->settings->getSystemPrompt();
+        if (is_string($override) && trim($override) !== '') {
+            return $override;
+        }
+
         $path = resource_path('prompts/system.md');
         if (file_exists($path)) {
             return file_get_contents($path);

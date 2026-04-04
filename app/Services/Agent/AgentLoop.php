@@ -215,6 +215,11 @@ class AgentLoop
         return $this->totalInputTokens;
     }
 
+    public function getLastTurnInputTokens(): int
+    {
+        return $this->lastTurnInputTokens;
+    }
+
     public function getTotalOutputTokens(): int
     {
         return $this->totalOutputTokens;
@@ -248,6 +253,18 @@ class AgentLoop
     public function getSessionManager(): SessionManager
     {
         return $this->sessionManager;
+    }
+
+    public function resetSessionMetrics(): void
+    {
+        $this->aborted = false;
+        $this->sessionStarted = false;
+        $this->totalInputTokens = 0;
+        $this->totalOutputTokens = 0;
+        $this->totalCacheCreationTokens = 0;
+        $this->totalCacheReadTokens = 0;
+        $this->lastTurnInputTokens = 0;
+        $this->costTracker->reset();
     }
 
     /**

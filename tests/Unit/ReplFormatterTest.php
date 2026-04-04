@@ -55,7 +55,7 @@ class ReplFormatterTest extends TestCase
         $formatter = new ReplFormatter;
 
         $this->assertSame(
-            "  <fg=gray>/help commands · Ctrl+O transcript · Ctrl+R history · Ctrl+C interrupt · Ctrl+D exit · \\ multiline</>",
+            "  <fg=gray>/help commands · Tab/↑↓ autocomplete · Ctrl+O transcript · Ctrl+R history · Ctrl+C interrupt · Ctrl+D exit · \\ multiline</>",
             $formatter->helpHint(),
         );
     }
@@ -159,30 +159,138 @@ class ReplFormatterTest extends TestCase
     {
         $formatter = new ReplFormatter;
 
-        $this->assertSame(
-            '  <fg=gray>Fix interrupt flow · claude-sonnet-4-20250514 · 12 msgs · default · Ctrl+O transcript · Ctrl+R history</>',
-            $formatter->promptFooter(
-                model: 'claude-sonnet-4-20250514',
-                messageCount: 12,
-                permissionMode: 'default',
-                fastMode: false,
-                title: 'Fix interrupt flow',
-            ),
-        );
+        $lines = $formatter->promptFooterLines([
+            'model' => 'claude-sonnet-4-20250514',
+            'message_count' => 12,
+            'permission_mode' => 'default',
+            'fast_mode' => true,
+            'title' => 'Fix interrupt flow',
+            'project' => 'hao-code/app',
+            'branch' => 'main',
+            'git_dirty' => true,
+            'context_percent' => 42.0,
+            'context_tokens' => 76000,
+            'context_limit' => 180000,
+            'context_state' => 'warning',
+            'cost' => 0.034017,
+            'cost_warn' => 5.0,
+            'tools' => [
+                'running' => [],
+                'completed' => [
+                    ['name' => 'Read', 'count' => 3],
+                    ['name' => 'Edit', 'count' => 1],
+                ],
+            ],
+            'agents' => [
+                'bash_tasks' => 1,
+                'entries' => [
+                    [
+                        'status' => 'running',
+                        'agent_type' => 'Explore',
+                        'description' => 'Finding auth code',
+                        'elapsed_seconds' => 135,
+                        'pending_messages' => 2,
+                    ],
+                ],
+            ],
+            'todo' => [
+                'current' => 'Add regression tests',
+                'completed' => 1,
+                'total' => 3,
+                'all_completed' => false,
+            ],
+        ]);
+
+        $this->assertCount(5, $lines);
+        $this->assertStringContainsString('[claude-sonnet-4-20250514]', $lines[0]);
+        $this->assertStringContainsString('Fix interrupt flow', $lines[0]);
+        $this->assertStringContainsString('git:(', $lines[0]);
+        $this->assertStringContainsString('fast', $lines[0]);
+        $this->assertStringContainsString('Context', $lines[1]);
+        $this->assertStringContainsString('42%', $lines[1]);
+        $this->assertStringContainsString('Cost', $lines[1]);
+        $this->assertStringContainsString('Tools', $lines[2]);
+        $this->assertStringContainsString('Read', $lines[2]);
+        $this->assertStringContainsString('Background', $lines[3]);
+        $this->assertStringContainsString('Explore', $lines[3]);
+        $this->assertStringContainsString('Todo', $lines[4]);
+        $this->assertStringContainsString('Add regression tests', $lines[4]);
     }
 
-    public function test_prompt_footer_includes_fast_badge_when_enabled(): void
+    public function test_prompt_footer_omits_optional_hud_lines_when_empty(): void
     {
         $formatter = new ReplFormatter;
 
-        $footer = $formatter->promptFooter(
-            model: 'claude-haiku-4-20250514',
-            messageCount: 3,
-            permissionMode: 'acceptEdits',
-            fastMode: true,
-        );
+        $lines = $formatter->promptFooterLines([
+            'model' => 'claude-haiku-4-20250514',
+            'message_count' => 3,
+            'permission_mode' => 'acceptEdits',
+            'context_percent' => 5.0,
+            'context_tokens' => 9000,
+            'context_limit' => 180000,
+            'context_state' => 'normal',
+            'cost' => 0.001,
+            'cost_warn' => 5.0,
+            'tools' => ['running' => [], 'completed' => []],
+            'agents' => ['bash_tasks' => 0, 'entries' => []],
+            'todo' => null,
+        ]);
 
-        $this->assertStringContainsString('fast', $footer);
+        $this->assertCount(2, $lines);
+        $this->assertStringContainsString('claude-haiku-4-20250514', $lines[0]);
+        $this->assertStringContainsString('Context', $lines[1]);
+    }
+
+    public function test_prompt_footer_supports_compact_layout_and_section_toggles(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $lines = $formatter->promptFooterLines([
+            'model' => 'claude-haiku-4-20250514',
+            'message_count' => 4,
+            'permission_mode' => 'default',
+            'layout' => 'compact',
+            'project' => 'hao-code/app',
+            'branch' => 'feature/hud',
+            'git_dirty' => false,
+            'context_percent' => 18.0,
+            'context_tokens' => 32000,
+            'context_limit' => 180000,
+            'cost' => 0.0123,
+            'show_tools' => false,
+            'show_agents' => true,
+            'show_todos' => true,
+            'tools' => [
+                'running' => [],
+                'completed' => [
+                    ['name' => 'Read', 'count' => 2],
+                ],
+            ],
+            'agents' => [
+                'bash_tasks' => 1,
+                'entries' => [
+                    [
+                        'status' => 'running',
+                        'agent_type' => 'Plan',
+                        'elapsed_seconds' => 61,
+                        'pending_messages' => 0,
+                    ],
+                ],
+            ],
+            'todo' => [
+                'current' => 'Wire compact HUD',
+                'completed' => 1,
+                'total' => 2,
+                'all_completed' => false,
+            ],
+        ]);
+
+        $this->assertCount(2, $lines);
+        $this->assertStringContainsString('ctx', $lines[0]);
+        $this->assertStringContainsString('git:(', $lines[0]);
+        $this->assertStringContainsString('todo', $lines[1]);
+        $this->assertStringContainsString('bg', $lines[1]);
+        $this->assertStringNotContainsString('tools', $lines[1]);
     }
 
     public function test_it_formats_a_transcript_footer(): void

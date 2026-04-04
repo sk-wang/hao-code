@@ -42,6 +42,13 @@ class GitContextTest extends TestCase
         $this->assertNotSame('', $branch);
     }
 
+    public function test_has_uncommitted_changes_returns_bool(): void
+    {
+        $ctx = new GitContext;
+
+        $this->assertIsBool($ctx->hasUncommittedChanges());
+    }
+
     // ─── getGitRoot ───────────────────────────────────────────────────────
 
     public function test_get_git_root_returns_string(): void

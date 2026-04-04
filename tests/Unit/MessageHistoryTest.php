@@ -130,6 +130,21 @@ class MessageHistoryTest extends TestCase
         $this->assertTrue($blocks[1]['is_error']);
     }
 
+    public function test_empty_tool_input_is_normalized_to_object_for_api(): void
+    {
+        $history = new MessageHistory;
+        $history->addAssistantMessage([
+            'role' => 'assistant',
+            'content' => [
+                ['type' => 'tool_use', 'id' => 'toolu_1', 'name' => 'ExitPlanMode', 'input' => []],
+            ],
+        ]);
+
+        $messages = $history->getMessagesForApi();
+
+        $this->assertSame('{}', json_encode($messages[0]['content'][0]['input']));
+    }
+
     // ─── getLastAssistantText ───────────────────────────────────────────────
 
     public function test_get_last_assistant_text_returns_null_when_empty(): void

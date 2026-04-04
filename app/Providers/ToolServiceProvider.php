@@ -17,6 +17,7 @@ use App\Tools\PlanMode\EnterPlanModeTool;
 use App\Tools\PlanMode\ExitPlanModeTool;
 use App\Tools\Lsp\LspTool;
 use App\Tools\Agent\AgentTool;
+use App\Tools\Agent\SendMessageTool;
 use App\Tools\Skill\SkillTool;
 use App\Tools\Notebook\NotebookEditTool;
 use App\Tools\Config\ConfigTool;
@@ -57,6 +58,7 @@ class ToolServiceProvider extends ServiceProvider
 
             // Agent tools
             $registry->register($app->make(AgentTool::class));
+            $registry->register($app->make(SendMessageTool::class));
             $registry->register($app->make(SkillTool::class));
 
             // Code intelligence

@@ -2,6 +2,7 @@
 
 namespace App\Tools\Task;
 
+use App\Services\Agent\BackgroundAgentManager;
 use App\Services\Task\TaskManager;
 use App\Tools\BaseTool;
 use App\Tools\ToolInputSchema;
@@ -37,10 +38,25 @@ class TaskListTool extends BaseTool
         }
 
         $lines = ["Tasks (" . count($tasks) . "):"];
+        $backgroundAgents = app(BackgroundAgentManager::class);
         foreach ($tasks as $task) {
             $age = time() - $task->createdAt;
             $status = $task->status;
-            $lines[] = "  {$task->id} [{$status}] {$task->subject} ({$age}s)";
+            $details = [];
+            $agent = $backgroundAgents->get($task->id);
+            if ($agent !== null) {
+                $details[] = 'agent:' . ($agent['status'] ?? 'unknown');
+                $pending = (int) ($agent['pending_messages'] ?? 0);
+                if ($pending > 0) {
+                    $details[] = $pending . ' msg queued';
+                }
+                if (! empty($agent['stop_requested'])) {
+                    $details[] = 'stop requested';
+                }
+            }
+
+            $suffix = $details === [] ? '' : ' · ' . implode(' · ', $details);
+            $lines[] = "  {$task->id} [{$status}] {$task->subject} ({$age}s{$suffix})";
         }
 
         return ToolResult::success(implode("\n", $lines));

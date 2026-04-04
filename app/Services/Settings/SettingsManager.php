@@ -6,6 +6,15 @@ use App\Services\Permissions\PermissionMode;
 
 class SettingsManager
 {
+    private const DEFAULT_STATUSLINE = [
+        'enabled' => true,
+        'layout' => 'expanded',
+        'path_levels' => 2,
+        'show_tools' => true,
+        'show_agents' => true,
+        'show_todos' => true,
+    ];
+
     private ?array $cachedSettings = null;
     private array $runtimeOverrides = [];
 
@@ -48,8 +57,23 @@ class SettingsManager
 
     public function getAppendSystemPrompt(): ?string
     {
+        if (array_key_exists('append_system_prompt', $this->runtimeOverrides)) {
+            return $this->runtimeOverrides['append_system_prompt'];
+        }
+
         $settings = $this->loadProjectSettings();
         return $settings['append_system_prompt'] ?? null;
+    }
+
+    public function getSystemPrompt(): ?string
+    {
+        if (array_key_exists('system_prompt', $this->runtimeOverrides)) {
+            return $this->runtimeOverrides['system_prompt'];
+        }
+
+        $settings = $this->loadProjectSettings();
+
+        return $settings['system_prompt'] ?? null;
     }
 
     public function getAllowRules(): array
@@ -76,12 +100,170 @@ class SettingsManager
             ?? null;
     }
 
+    public function getTheme(): string
+    {
+        return $this->runtimeOverrides['theme']
+            ?? $this->loadProjectSettings()['theme']
+            ?? 'dark';
+    }
+
+    public function isStatuslineEnabled(): bool
+    {
+        return (bool) $this->getStatuslineConfig()['enabled'];
+    }
+
+    public function setStatuslineEnabled(bool $enabled): void
+    {
+        $this->modifyProjectSettings(function (array &$settings) use ($enabled) {
+            $settings['statusline'] ??= [];
+            $settings['statusline']['enabled'] = $enabled;
+        });
+    }
+
+    /**
+     * @return array{
+     *   enabled: bool,
+     *   layout: string,
+     *   path_levels: int,
+     *   show_tools: bool,
+     *   show_agents: bool,
+     *   show_todos: bool
+     * }
+     */
+    public function getStatuslineConfig(): array
+    {
+        $settings = $this->loadProjectSettings();
+        $statusline = is_array($settings['statusline'] ?? null) ? $settings['statusline'] : [];
+
+        return [
+            'enabled' => (bool) (
+                $this->runtimeOverrides['statusline_enabled']
+                ?? $statusline['enabled']
+                ?? self::DEFAULT_STATUSLINE['enabled']
+            ),
+            'layout' => $this->normalizeStatuslineLayout(
+                $this->runtimeOverrides['statusline_layout']
+                ?? $statusline['layout']
+                ?? self::DEFAULT_STATUSLINE['layout']
+            ),
+            'path_levels' => $this->normalizeStatuslinePathLevels(
+                $this->runtimeOverrides['statusline_path_levels']
+                ?? $statusline['path_levels']
+                ?? self::DEFAULT_STATUSLINE['path_levels']
+            ),
+            'show_tools' => $this->normalizeStatuslineToggle(
+                $this->runtimeOverrides['statusline_show_tools']
+                ?? $statusline['show_tools']
+                ?? self::DEFAULT_STATUSLINE['show_tools'],
+                self::DEFAULT_STATUSLINE['show_tools'],
+            ),
+            'show_agents' => $this->normalizeStatuslineToggle(
+                $this->runtimeOverrides['statusline_show_agents']
+                ?? $statusline['show_agents']
+                ?? self::DEFAULT_STATUSLINE['show_agents'],
+                self::DEFAULT_STATUSLINE['show_agents'],
+            ),
+            'show_todos' => $this->normalizeStatuslineToggle(
+                $this->runtimeOverrides['statusline_show_todos']
+                ?? $statusline['show_todos']
+                ?? self::DEFAULT_STATUSLINE['show_todos'],
+                self::DEFAULT_STATUSLINE['show_todos'],
+            ),
+        ];
+    }
+
+    public function getStatuslineLayout(): string
+    {
+        return $this->getStatuslineConfig()['layout'];
+    }
+
+    public function getStatuslinePathLevels(): int
+    {
+        return $this->getStatuslineConfig()['path_levels'];
+    }
+
+    public function shouldShowStatuslineTools(): bool
+    {
+        return $this->getStatuslineConfig()['show_tools'];
+    }
+
+    public function shouldShowStatuslineAgents(): bool
+    {
+        return $this->getStatuslineConfig()['show_agents'];
+    }
+
+    public function shouldShowStatuslineTodos(): bool
+    {
+        return $this->getStatuslineConfig()['show_todos'];
+    }
+
+    public function setStatuslineLayout(string $layout): void
+    {
+        $layout = $this->normalizeStatuslineLayout($layout);
+
+        $this->modifyProjectSettings(function (array &$settings) use ($layout) {
+            $settings['statusline'] ??= [];
+            $settings['statusline']['layout'] = $layout;
+        });
+    }
+
+    public function setStatuslinePathLevels(int $levels): void
+    {
+        $levels = $this->normalizeStatuslinePathLevels($levels);
+
+        $this->modifyProjectSettings(function (array &$settings) use ($levels) {
+            $settings['statusline'] ??= [];
+            $settings['statusline']['path_levels'] = $levels;
+        });
+    }
+
+    public function setStatuslineSectionVisibility(string $section, bool $enabled): void
+    {
+        $key = match ($section) {
+            'tools' => 'show_tools',
+            'agents' => 'show_agents',
+            'todos' => 'show_todos',
+            default => null,
+        };
+
+        if ($key === null) {
+            throw new \InvalidArgumentException("Unknown statusline section: {$section}");
+        }
+
+        $this->modifyProjectSettings(function (array &$settings) use ($key, $enabled) {
+            $settings['statusline'] ??= [];
+            $settings['statusline'][$key] = $enabled;
+        });
+    }
+
+    public function resetStatuslineConfig(): void
+    {
+        $this->modifyProjectSettings(function (array &$settings) {
+            unset($settings['statusline']);
+        });
+    }
+
     /**
      * Set a runtime override for a config key.
      */
     public function set(string $key, mixed $value): void
     {
-        $allowedKeys = ['model', 'api_base_url', 'max_tokens', 'permission_mode', 'output_style', 'theme'];
+        $allowedKeys = [
+            'model',
+            'api_base_url',
+            'max_tokens',
+            'permission_mode',
+            'output_style',
+            'theme',
+            'statusline_enabled',
+            'statusline_layout',
+            'statusline_path_levels',
+            'statusline_show_tools',
+            'statusline_show_agents',
+            'statusline_show_todos',
+            'append_system_prompt',
+            'system_prompt',
+        ];
         if (in_array($key, $allowedKeys)) {
             $this->runtimeOverrides[$key] = $value;
         }
@@ -144,11 +326,21 @@ class SettingsManager
      */
     public function all(): array
     {
+        $statusline = $this->getStatuslineConfig();
+
         return [
             'model' => $this->getModel(),
             'api_base_url' => $this->getBaseUrl(),
             'max_tokens' => $this->getMaxTokens(),
             'permission_mode' => $this->getPermissionMode()->value,
+            'theme' => $this->getTheme(),
+            'output_style' => $this->getOutputStyle(),
+            'statusline_enabled' => $statusline['enabled'],
+            'statusline_layout' => $statusline['layout'],
+            'statusline_path_levels' => $statusline['path_levels'],
+            'statusline_show_tools' => $statusline['show_tools'],
+            'statusline_show_agents' => $statusline['show_agents'],
+            'statusline_show_todos' => $statusline['show_todos'],
             'api_key_set' => !empty($this->getApiKey()),
         ];
     }
@@ -240,5 +432,50 @@ class SettingsManager
 
         // Invalidate cache
         $this->cachedSettings = null;
+    }
+
+    private function normalizeStatuslineLayout(mixed $layout): string
+    {
+        if (! is_string($layout)) {
+            return self::DEFAULT_STATUSLINE['layout'];
+        }
+
+        $normalized = strtolower(trim($layout));
+
+        return in_array($normalized, ['expanded', 'compact'], true)
+            ? $normalized
+            : self::DEFAULT_STATUSLINE['layout'];
+    }
+
+    private function normalizeStatuslinePathLevels(mixed $levels): int
+    {
+        if (! is_int($levels) && ! is_numeric($levels)) {
+            return self::DEFAULT_STATUSLINE['path_levels'];
+        }
+
+        return max(1, min(3, (int) $levels));
+    }
+
+    private function normalizeStatuslineToggle(mixed $value, bool $default): bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if (is_string($value)) {
+            $normalized = strtolower(trim($value));
+            if (in_array($normalized, ['1', 'true', 'yes', 'on'], true)) {
+                return true;
+            }
+            if (in_array($normalized, ['0', 'false', 'no', 'off'], true)) {
+                return false;
+            }
+        }
+
+        if (is_int($value)) {
+            return $value !== 0;
+        }
+
+        return $default;
     }
 }

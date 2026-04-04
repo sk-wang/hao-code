@@ -28,6 +28,7 @@ class ContextBuilderTest extends TestCase
     private function makeSettings(array $stubs = []): SettingsManager
     {
         $m = $this->createMock(SettingsManager::class);
+        $m->method('getSystemPrompt')->willReturn($stubs['systemPrompt'] ?? null);
         $m->method('getAppendSystemPrompt')->willReturn($stubs['appendPrompt'] ?? null);
         $m->method('getOutputStyle')->willReturn($stubs['outputStyle'] ?? null);
         return $m;
@@ -105,6 +106,15 @@ class ContextBuilderTest extends TestCase
         $settings = $this->makeSettings(['appendPrompt' => 'Extra instructions here']);
         $result = $this->makeBuilder(['settings' => $settings])->buildSystemPrompt();
         $this->assertStringContainsString('Extra instructions here', $result[0]['text']);
+    }
+
+    public function test_system_prompt_override_replaces_default_prompt(): void
+    {
+        $settings = $this->makeSettings(['systemPrompt' => 'You are a startup override.']);
+        $result = $this->makeBuilder(['settings' => $settings])->buildSystemPrompt();
+
+        $this->assertStringContainsString('You are a startup override.', $result[0]['text']);
+        $this->assertStringNotContainsString('You are Hao Code, an interactive CLI agent powered by Anthropic', $result[0]['text']);
     }
 
     public function test_session_memory_is_included_when_non_empty(): void

@@ -217,4 +217,53 @@ class StreamingToolExecutorTest extends TestCase
         $this->assertCount(1, $results);
         $this->assertSame('toolu_123', $results[0]['tool_use_id']);
     }
+
+    public function test_early_execution_count_returns_count_of_forks(): void
+    {
+        $executor = new StreamingToolExecutor(
+            $this->createMock(ToolOrchestrator::class),
+            $this->makeRegistry(readOnly: true, concurrencySafe: true),
+        );
+
+        $executor->setContext(new ToolUseContext('/tmp', 'test'), null, null);
+        $executor->onToolBlockReady($this->makeBlock('a'), 0);
+        $executor->onToolBlockReady($this->makeBlock('b'), 1);
+
+        $this->assertSame(2, $executor->earlyExecutionCount());
+    }
+
+    public function test_early_execution_count_zero_when_no_forks(): void
+    {
+        $executor = new StreamingToolExecutor(
+            $this->createMock(ToolOrchestrator::class),
+            $this->makeRegistry(),
+        );
+        $this->assertSame(0, $executor->earlyExecutionCount());
+    }
+
+    public function test_read_only_concurrency_safe_tool_registers_early_execution(): void
+    {
+        $executor = new StreamingToolExecutor(
+            $this->createMock(ToolOrchestrator::class),
+            $this->makeRegistry(readOnly: true, concurrencySafe: true),
+        );
+        $executor->setContext(new ToolUseContext('/tmp', 'test'), null, null);
+
+        $executor->onToolBlockReady($this->makeBlock(), 0);
+
+        // Should register as an early execution (forked or queued depending on pcntl availability)
+        $this->assertTrue($executor->hasEarlyExecutions() || $executor->collectResults() !== []);
+    }
+
+    public function test_cleanup_prevents_queued_execution(): void
+    {
+        $orchestrator = $this->createMock(ToolOrchestrator::class);
+        $orchestrator->expects($this->never())->method('executeToolBlock');
+
+        $executor = new StreamingToolExecutor($orchestrator, $this->makeRegistry());
+        $executor->setContext(new ToolUseContext('/tmp', 'test'), null, null);
+        $executor->onToolBlockReady($this->makeBlock(), 0);
+        $executor->cleanup();
+        $executor->collectResults();
+    }
 }

@@ -91,4 +91,15 @@ class SessionTitleServiceTest extends TestCase
         $result = $svc->generateTitle($messages);
         $this->assertNull($result); // network fail, not empty
     }
+
+    public function test_kimi_endpoint_uses_local_title_generation(): void
+    {
+        $svc = new SessionTitleService('fake-key', 'https://api.kimi.com/coding/');
+        $messages = [
+            ['role' => 'user', 'content' => 'Fix the login bug on mobile devices'],
+            ['role' => 'assistant', 'content' => 'Got it'],
+        ];
+
+        $this->assertSame('Fix the login bug on mobile devices', $svc->generateTitle($messages));
+    }
 }

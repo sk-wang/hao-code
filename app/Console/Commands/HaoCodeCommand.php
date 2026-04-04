@@ -3,34 +3,54 @@
 namespace App\Console\Commands;
 
 use App\Services\Agent\AgentLoop;
+use App\Services\Agent\BackgroundAgentManager;
 use App\Services\Agent\MessageHistory;
+use App\Services\Buddy\BuddyManager;
 use App\Services\Api\ApiErrorException;
 use App\Services\Compact\ContextCompactor;
 use App\Services\Cost\CostTracker;
+use App\Services\Git\GitContext;
 use App\Services\Hooks\HookExecutor;
+use App\Services\Mcp\McpServerConfigManager;
 use App\Services\Memory\SessionMemory;
 use App\Services\OutputStyle\OutputStyleLoader;
+use App\Services\Permissions\PermissionMode;
 use App\Services\Session\AwaySummaryService;
 use App\Services\Session\SessionManager;
+use App\Services\Session\SessionStatsService;
 use App\Services\Session\SessionTitleService;
 use App\Services\Settings\SettingsManager;
+use App\Services\Task\TaskManager;
+use App\Support\Terminal\Autocomplete\AutocompleteEngine;
+use App\Support\Terminal\Autocomplete\SlashCommandCatalog;
 use App\Support\Terminal\InputSanitizer;
 use App\Support\Terminal\MarkdownRenderer;
+use App\Support\Terminal\PromptHudState;
 use App\Support\Terminal\ReplFormatter;
 use App\Support\Terminal\StreamingMarkdownOutput;
 use App\Support\Terminal\TranscriptBuffer;
 use App\Support\Terminal\TranscriptRenderer;
 use App\Support\Terminal\TurnStatusRenderer;
 use App\Tools\Bash\BashTool;
+use App\Tools\Config\ConfigTool;
 use App\Tools\Skill\SkillLoader;
 use App\Tools\ToolRegistry;
+use App\Tools\ToolUseContext;
 use Illuminate\Console\Command;
 use Symfony\Component\Console\Terminal;
 
 class HaoCodeCommand extends Command
 {
     protected $signature = 'hao-code
-        {--prompt= : Non-interactive mode: execute a single prompt}
+        {promptText? : Optional prompt text for print mode}
+        {--prompt= : Deprecated alias for --print}
+        {--p|print= : Print response and exit}
+        {--c|continue : Continue the most recent conversation}
+        {--r|resume= : Resume a saved session by ID}
+        {--fork-session : Fork into a new session when resuming or continuing}
+        {--name= : Set a display name for this session}
+        {--system-prompt= : Replace the default system prompt for this session}
+        {--append-system-prompt= : Append extra system prompt instructions for this session}
         {--model= : Override the default model}
         {--permission-mode= : Override the permission mode}
     ';
@@ -50,15 +70,23 @@ class HaoCodeCommand extends Command
     /** @var array<int, string> */
     private array $sessionAllowRules = [];
 
+    private ?string $previousPermissionMode = null;
+
     public function handle(): int
     {
-        $this->printBanner();
-
         $settings = app(SettingsManager::class);
+        $this->applyStartupOverrides($settings);
+
         if (empty($settings->getApiKey())) {
             $this->error('ANTHROPIC_API_KEY is not set. Please set it in your environment or .haocode/settings.json');
 
             return 1;
+        }
+
+        $prompt = $this->resolveStartupPrompt();
+
+        if ($prompt === null) {
+            $this->printBanner();
         }
 
         /** @var AgentLoop $agent */
@@ -82,9 +110,18 @@ class HaoCodeCommand extends Command
             });
         }
 
-        $prompt = $this->option('prompt');
+        if (! $this->initializeSessionFromStartupOptions($agent, $prompt !== null)) {
+            return 1;
+        }
 
-        if ($prompt) {
+        $name = trim((string) ($this->option('name') ?? ''));
+        if ($name !== '') {
+            $agent->getSessionManager()->setTitle($name);
+        }
+
+        $this->refreshPromptHudState($agent);
+
+        if ($prompt !== null) {
             return $this->runSinglePrompt($agent, $prompt);
         }
 
@@ -97,7 +134,50 @@ class HaoCodeCommand extends Command
             $this->line($line);
         }
         $this->line($this->formatter()->helpHint());
+
+        // Show buddy greeting if hatched
+        $buddy = app(BuddyManager::class);
+        if ($buddy->isHatched() && !$buddy->isMuted()) {
+            $companion = $buddy->getCompanion();
+            if ($companion !== null) {
+                $moodEmoji = $buddy->getMoodEmoji();
+                $this->line("  <fg=gray>{$moodEmoji} Your companion {$companion['name']} the {$companion['species']} says hello! (/buddy for details)</>");
+            }
+        }
+
         $this->line('');
+    }
+
+    private function applyStartupOverrides(SettingsManager $settings): void
+    {
+        $model = $this->option('model');
+        if (is_string($model) && trim($model) !== '') {
+            $settings->set('model', trim($model));
+        }
+
+        $permissionMode = $this->option('permission-mode');
+        if (is_string($permissionMode) && trim($permissionMode) !== '') {
+            $settings->set('permission_mode', trim($permissionMode));
+        }
+
+        $systemPrompt = $this->option('system-prompt');
+        if (is_string($systemPrompt) && trim($systemPrompt) !== '') {
+            $settings->set('system_prompt', $systemPrompt);
+        }
+
+        $appendSystemPrompt = $this->option('append-system-prompt');
+        if (is_string($appendSystemPrompt) && trim($appendSystemPrompt) !== '') {
+            $settings->set('append_system_prompt', $appendSystemPrompt);
+        }
+    }
+
+    private function resolveStartupPrompt(): ?string
+    {
+        return $this->chooseStartupPrompt(
+            $this->option('print'),
+            $this->option('prompt'),
+            $this->argument('promptText'),
+        );
     }
 
     private function runRepl(AgentLoop $agent): int
@@ -112,6 +192,16 @@ class HaoCodeCommand extends Command
 
         if ($this->supportsReadline() && file_exists($historyFile)) {
             @readline_read_history($historyFile);
+        }
+
+        // Register readline tab completion for slash commands and @file paths
+        if ($this->supportsReadline()) {
+            readline_completion_function(function (string $input, int $index): array {
+                $engine = app(AutocompleteEngine::class);
+                $suggestions = $engine->getSuggestions($input);
+
+                return array_map(fn (array $s) => $s['label'], $suggestions);
+            });
         }
 
         while (! $this->shouldExit) {
@@ -226,6 +316,7 @@ class HaoCodeCommand extends Command
             return 1;
         } finally {
             $this->stopTurnStatusTicker($turnStatus, $previousAlarmHandler);
+            $this->refreshPromptHudState($agent);
         }
 
         return 0;
@@ -234,6 +325,10 @@ class HaoCodeCommand extends Command
     private function readInput(AgentLoop $agent, array &$history, int &$historyPtr): ?string
     {
         $this->renderPromptFooter($agent);
+
+        if ($this->supportsRawInput()) {
+            return $this->readInputRaw($agent, $history, $historyPtr);
+        }
 
         if ($this->supportsReadline()) {
             return $this->readInputWithReadline();
@@ -277,7 +372,7 @@ class HaoCodeCommand extends Command
     private function readInputRaw(AgentLoop $agent, array &$history, int &$historyPtr): ?string
     {
         $cwd = basename(getcwd());
-        $this->output->write($this->formatter()->prompt($cwd));
+        $autocomplete = app(AutocompleteEngine::class);
 
         $handle = fopen('php://stdin', 'r');
         if ($handle === false) {
@@ -295,12 +390,46 @@ class HaoCodeCommand extends Command
 
         $lines = [];
         $currentLine = '';
+        $continuationPrompt = false;
+        $liveSuggestions = [];
+        $selectedSuggestionIndex = 0;
+
+        $this->redrawRawEditorLine(
+            cwd: $cwd,
+            currentLine: $currentLine,
+            autocomplete: $autocomplete,
+            continuationPrompt: $continuationPrompt,
+            suggestions: $liveSuggestions,
+            selectedSuggestionIndex: $selectedSuggestionIndex,
+        );
 
         try {
             while (true) {
-                $char = fread($handle, 1);
+                $char = $this->readRawCharacter($handle);
+                if ($char === false || $char === '') {
+                    continue;
+                }
 
                 if ($char === "\r" || $char === "\n") {
+                    $selectedSuggestion = $liveSuggestions[$selectedSuggestionIndex] ?? null;
+                    if ($selectedSuggestion !== null) {
+                        $completed = $this->applySelectedSuggestion($autocomplete, $currentLine, $selectedSuggestion['label']);
+                        if ($completed !== null && $completed !== $currentLine) {
+                            $currentLine = $completed;
+                            [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                            $this->redrawRawEditorLine(
+                                cwd: $cwd,
+                                currentLine: $currentLine,
+                                autocomplete: $autocomplete,
+                                continuationPrompt: $continuationPrompt,
+                                suggestions: $liveSuggestions,
+                                selectedSuggestionIndex: $selectedSuggestionIndex,
+                            );
+
+                            continue;
+                        }
+                    }
+
                     // Enter key
                     if ($sttyMode) {
                         echo "\r\n";
@@ -311,7 +440,16 @@ class HaoCodeCommand extends Command
                         $currentLine = rtrim($currentLine, ' \\');
                         $lines[] = $currentLine;
                         $currentLine = '';
-                        $this->output->write($this->formatter()->continuationPrompt());
+                        $continuationPrompt = true;
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                        $this->redrawRawEditorLine(
+                            cwd: $cwd,
+                            currentLine: $currentLine,
+                            autocomplete: $autocomplete,
+                            continuationPrompt: $continuationPrompt,
+                            suggestions: $liveSuggestions,
+                            selectedSuggestionIndex: $selectedSuggestionIndex,
+                        );
 
                         continue;
                     }
@@ -334,7 +472,7 @@ class HaoCodeCommand extends Command
                     }
 
                     $this->openTranscriptMode($agent, alreadyRaw: true, inputHandle: $handle);
-                    $this->redrawRawInputScreen($agent, $cwd, $currentLine);
+                    $this->redrawRawInputScreen($agent, $cwd, $currentLine, $continuationPrompt, $liveSuggestions, $selectedSuggestionIndex);
 
                     continue;
                 }
@@ -343,6 +481,15 @@ class HaoCodeCommand extends Command
                     $match = $this->readReverseHistorySearch($handle, $history, $currentLine, $cwd);
                     if ($match !== null) {
                         $currentLine = $match;
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                        $this->redrawRawEditorLine(
+                            cwd: $cwd,
+                            currentLine: $currentLine,
+                            autocomplete: $autocomplete,
+                            continuationPrompt: $continuationPrompt,
+                            suggestions: $liveSuggestions,
+                            selectedSuggestionIndex: $selectedSuggestionIndex,
+                        );
                     }
                     continue;
                 }
@@ -359,24 +506,63 @@ class HaoCodeCommand extends Command
                 if ($char === "\x1b") { // Escape sequence
                     $seq = fread($handle, 2);
                     if ($seq === '[A') { // Up arrow
+                        if ($liveSuggestions !== []) {
+                            $selectedSuggestionIndex = $this->wrapSuggestionIndex($selectedSuggestionIndex - 1, count($liveSuggestions));
+                            $this->redrawRawEditorLine(
+                                cwd: $cwd,
+                                currentLine: $currentLine,
+                                autocomplete: $autocomplete,
+                                continuationPrompt: $continuationPrompt,
+                                suggestions: $liveSuggestions,
+                                selectedSuggestionIndex: $selectedSuggestionIndex,
+                            );
+
+                            continue;
+                        }
+
                         if ($historyPtr > 0) {
                             $historyPtr--;
-                            // Clear current line
-                            echo "\r\033[K";
-                            $prompt = "\e[32m{$cwd}\e[0m \e[36m❯\e[0m ";
-                            echo $prompt.$history[$historyPtr];
                             $currentLine = $history[$historyPtr];
+                            [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                            $this->redrawRawEditorLine(
+                                cwd: $cwd,
+                                currentLine: $currentLine,
+                                autocomplete: $autocomplete,
+                                continuationPrompt: $continuationPrompt,
+                                suggestions: $liveSuggestions,
+                                selectedSuggestionIndex: $selectedSuggestionIndex,
+                            );
                         }
 
                         continue;
                     }
                     if ($seq === '[B') { // Down arrow
+                        if ($liveSuggestions !== []) {
+                            $selectedSuggestionIndex = $this->wrapSuggestionIndex($selectedSuggestionIndex + 1, count($liveSuggestions));
+                            $this->redrawRawEditorLine(
+                                cwd: $cwd,
+                                currentLine: $currentLine,
+                                autocomplete: $autocomplete,
+                                continuationPrompt: $continuationPrompt,
+                                suggestions: $liveSuggestions,
+                                selectedSuggestionIndex: $selectedSuggestionIndex,
+                            );
+
+                            continue;
+                        }
+
                         if ($historyPtr < count($history) - 1) {
                             $historyPtr++;
-                            echo "\r\033[K";
-                            $prompt = "\e[32m{$cwd}\e[0m \e[36m❯\e[0m ";
-                            echo $prompt.$history[$historyPtr];
                             $currentLine = $history[$historyPtr];
+                            [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                            $this->redrawRawEditorLine(
+                                cwd: $cwd,
+                                currentLine: $currentLine,
+                                autocomplete: $autocomplete,
+                                continuationPrompt: $continuationPrompt,
+                                suggestions: $liveSuggestions,
+                                selectedSuggestionIndex: $selectedSuggestionIndex,
+                            );
                         }
 
                         continue;
@@ -387,9 +573,68 @@ class HaoCodeCommand extends Command
                 }
 
                 if ($char === "\x7f" || $char === "\x08") { // Backspace
-                    if (strlen($currentLine) > 0) {
-                        $currentLine = substr($currentLine, 0, -1);
-                        echo "\x08 \x08";
+                    if ($currentLine !== '') {
+                        $currentLine = $this->trimLastCharacter($currentLine);
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                        $this->redrawRawEditorLine(
+                            cwd: $cwd,
+                            currentLine: $currentLine,
+                            autocomplete: $autocomplete,
+                            continuationPrompt: $continuationPrompt,
+                            suggestions: $liveSuggestions,
+                            selectedSuggestionIndex: $selectedSuggestionIndex,
+                        );
+                    }
+
+                    continue;
+                }
+
+                if ($char === "\t") { // Tab - autocomplete
+                    if ($liveSuggestions !== []) {
+                        $currentLine = $autocomplete->acceptSuggestion($currentLine, $liveSuggestions[$selectedSuggestionIndex]['label']);
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                        $this->redrawRawEditorLine(
+                            cwd: $cwd,
+                            currentLine: $currentLine,
+                            autocomplete: $autocomplete,
+                            continuationPrompt: $continuationPrompt,
+                            suggestions: $liveSuggestions,
+                            selectedSuggestionIndex: $selectedSuggestionIndex,
+                        );
+
+                        continue;
+                    }
+
+                    $suggestions = $autocomplete->getSuggestions($currentLine);
+
+                    if (count($suggestions) === 1) {
+                        // Single match: auto-complete
+                        $completed = $autocomplete->acceptSuggestion($currentLine, $suggestions[0]['label']);
+                        $currentLine = $completed;
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                        $this->redrawRawEditorLine(
+                            cwd: $cwd,
+                            currentLine: $currentLine,
+                            autocomplete: $autocomplete,
+                            continuationPrompt: $continuationPrompt,
+                            suggestions: $liveSuggestions,
+                            selectedSuggestionIndex: $selectedSuggestionIndex,
+                        );
+                    } elseif (count($suggestions) > 1) {
+                        // Multiple matches: show suggestions
+                        echo "\r\n";
+                        foreach ($suggestions as $s) {
+                            $this->line($autocomplete->renderSuggestion($s));
+                        }
+                        // Redraw prompt and current input
+                        $this->redrawRawEditorLine(
+                            cwd: $cwd,
+                            currentLine: $currentLine,
+                            autocomplete: $autocomplete,
+                            continuationPrompt: $continuationPrompt,
+                            suggestions: $liveSuggestions,
+                            selectedSuggestionIndex: $selectedSuggestionIndex,
+                        );
                     }
 
                     continue;
@@ -397,15 +642,23 @@ class HaoCodeCommand extends Command
 
                 if ($char === "\x0c") { // Ctrl+L
                     echo "\033[H\033[2J";
-                    $this->redrawRawInputScreen($agent, $cwd, $currentLine);
+                    $this->redrawRawInputScreen($agent, $cwd, $currentLine, $continuationPrompt, $liveSuggestions, $selectedSuggestionIndex);
 
                     continue;
                 }
 
                 // Normal printable character
-                if (ord($char) >= 32 || $char === "\t") {
+                if (ord($char) >= 32) {
                     $currentLine .= $char;
-                    echo $char;
+                    [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                    $this->redrawRawEditorLine(
+                        cwd: $cwd,
+                        currentLine: $currentLine,
+                        autocomplete: $autocomplete,
+                        continuationPrompt: $continuationPrompt,
+                        suggestions: $liveSuggestions,
+                        selectedSuggestionIndex: $selectedSuggestionIndex,
+                    );
                 }
             }
         } finally {
@@ -425,38 +678,61 @@ class HaoCodeCommand extends Command
         return function_exists('readline') && function_exists('readline_add_history') && stream_isatty(STDIN);
     }
 
+    private function supportsRawInput(): bool
+    {
+        if (! stream_isatty(STDIN) || ! function_exists('shell_exec')) {
+            return false;
+        }
+
+        return trim((string) shell_exec('stty -g 2>/dev/null')) !== '';
+    }
+
     private function handleSlashCommand(string $input, AgentLoop $agent): void
     {
         $parts = explode(' ', $input, 2);
         $command = $parts[0];
         $args = $parts[1] ?? '';
+        $resolved = app(SlashCommandCatalog::class)->resolve($command);
 
-        match ($command) {
-            '/exit', '/quit', '/q' => $this->handleExit(),
-            '/help', '/h', '/?' => $this->handleHelp(),
-            '/clear' => $this->handleClear($agent),
-            '/history' => $this->handleHistory($agent),
-            '/compact' => $this->handleCompact($agent),
-            '/model' => $this->handleModel($args),
-            '/cost', '/usage' => $this->printUsageStats($agent),
-            '/status' => $this->handleStatus($agent),
-            '/transcript', '/t' => $this->handleTranscript($agent, $args),
-            '/search' => $this->handleTranscript($agent, $args),
-            '/tasks' => $this->handleTasks(),
-            '/resume' => $this->handleResume($agent, $args),
-            '/diff' => $this->handleDiff(),
-            '/memory' => $this->handleMemory($args),
-            '/rewind' => $this->handleRewind(),
-            '/context' => $this->handleContext($agent),
-            '/doctor' => $this->handleDoctor(),
-            '/theme' => $this->handleTheme($args),
-            '/skills' => $this->handleSkills(),
-            '/permissions', '/perm' => $this->handlePermissions($args),
-            '/fast' => $this->handleFast(),
-            '/snapshot' => $this->handleSnapshot($agent, $args),
-            '/init' => $this->handleInit($args),
-            '/version' => $this->handleVersion(),
-            '/output-style' => $this->handleOutputStyle($args),
+        match ($resolved['name'] ?? null) {
+            'exit' => $this->handleExit(),
+            'help' => $this->handleHelp(),
+            'clear' => $this->handleClear($agent),
+            'history' => $this->handleHistory($agent),
+            'compact' => $this->handleCompact($agent),
+            'config' => $this->handleConfig($args),
+            'model' => $this->handleModel($args),
+            'cost' => $this->printUsageStats($agent),
+            'hooks' => $this->handleHooks(),
+            'files' => $this->handleFiles($agent),
+            'mcp' => $this->handleMcp($args),
+            'plan' => $this->handlePlan($agent, $args),
+            'review' => $this->handleReview($agent, $args),
+            'status' => $this->handleStatus($agent),
+            'statusline' => $this->handleStatusline($args, $agent),
+            'stats' => $this->handleStats($agent),
+            'transcript', 'search' => $this->handleTranscript($agent, $args),
+            'tasks' => $this->handleTasks(),
+            'resume' => $this->handleResume($agent, $args),
+            'branch' => $this->handleBranch($agent, $args),
+            'commit' => $this->handleCommit($agent, $args),
+            'diff' => $this->handleDiff(),
+            'memory' => $this->handleMemory($args),
+            'rewind' => $this->handleRewind(),
+            'context' => $this->handleContext($agent),
+            'doctor' => $this->handleDoctor(),
+            'theme' => $this->handleTheme($args),
+            'skills' => $this->handleSkills(),
+            'permissions' => $this->handlePermissions($args),
+            'fast' => $this->handleFast(),
+            'snapshot' => $this->handleSnapshot($agent, $args),
+            'init' => $this->handleInit($args),
+            'export' => $this->handleExport($args),
+            'loop' => $this->handleLoop($args),
+            'version' => $this->handleVersion(),
+            'output-style' => $this->handleOutputStyle($args),
+            'dream' => $this->handleDream($args),
+            'buddy' => $this->handleBuddy($args),
             default => $this->line("<fg=yellow>Unknown command: {$command}</>. Type <fg=cyan>/help</> for available commands."),
         };
     }
@@ -470,33 +746,16 @@ class HaoCodeCommand extends Command
 
     private function handleHelp(): void
     {
-        $this->renderPanel('Available commands', [
-            '<fg=green>/help</> show help',
-            '<fg=green>/exit</> exit the REPL',
-            '<fg=green>/clear</> clear conversation history',
-            '<fg=green>/compact</> compact conversation context',
-            '<fg=green>/cost</> show token usage and cost',
-            '<fg=green>/history</> show message count',
-            '<fg=green>/model</> show or set current model',
-            '<fg=green>/status</> show session status',
-            '<fg=green>/transcript</> browse transcript mode',
-            '<fg=green>/search</> open transcript search',
-            '<fg=green>/tasks</> list background tasks',
-            '<fg=green>/resume</> resume a previous session',
-            '<fg=green>/diff</> show uncommitted changes',
-            '<fg=green>/memory</> view or edit session memory',
-            '<fg=green>/context</> show context usage',
-            '<fg=green>/rewind</> undo last change',
-            '<fg=green>/doctor</> run diagnostics',
-            '<fg=green>/skills</> list available skills',
-            '<fg=green>/theme</> toggle color theme',
-            '<fg=green>/permissions</> manage permission rules',
-            '<fg=green>/fast</> toggle fast model mode',
-            '<fg=green>/snapshot</> export session markdown',
-            '<fg=green>/init</> initialize .haocode/settings.json',
-            '<fg=green>/version</> show version information',
-            '<fg=green>/output-style</> list or set output style',
-        ]);
+        $lines = array_map(
+            static fn (array $command): string => sprintf(
+                '<fg=green>/%s</> %s',
+                $command['name'],
+                $command['help'] ?? $command['description'],
+            ),
+            app(SlashCommandCatalog::class)->all(),
+        );
+
+        $this->renderPanel('Available commands', $lines);
     }
 
     private function handleClear(AgentLoop $agent): void
@@ -518,11 +777,439 @@ class HaoCodeCommand extends Command
         $this->line("<fg=gray>{$result}</>");
     }
 
+    private function handleConfig(string $args): void
+    {
+        $settings = app(SettingsManager::class);
+        $configTool = app(ConfigTool::class);
+        $context = new ToolUseContext(
+            workingDirectory: getcwd(),
+            sessionId: 'repl',
+        );
+        $args = trim($args);
+
+        if ($args === '' || in_array(strtolower($args), ['list', 'ls'], true)) {
+            $all = $settings->all();
+            $lines = [
+                $this->formatter()->keyValue('Model', $this->formatSettingValue($all['model'] ?? null)),
+                $this->formatter()->keyValue('Permission mode', $this->formatSettingValue($all['permission_mode'] ?? null)),
+                $this->formatter()->keyValue('Theme', $this->formatSettingValue($all['theme'] ?? null)),
+                $this->formatter()->keyValue('Output style', $this->formatSettingValue($all['output_style'] ?? null)),
+                $this->formatter()->keyValue('API base URL', $this->formatSettingValue($all['api_base_url'] ?? null), 'gray', 'gray'),
+                $this->formatter()->keyValue('Max tokens', $this->formatSettingValue($all['max_tokens'] ?? null), 'gray', 'gray'),
+                $this->formatter()->keyValue('API key', ! empty($all['api_key_set']) ? 'configured' : 'missing', 'gray', 'gray'),
+                '',
+                '<fg=gray>Use /config &lt;key&gt; to inspect or /config &lt;key&gt; &lt;value&gt; to change.</>',
+                '<fg=gray>Keys: model, permission_mode, theme, output_style, api_base_url, max_tokens</>',
+            ];
+
+            $this->renderPanel('Runtime config', $lines);
+
+            return;
+        }
+
+        $parts = preg_split('/\s+/', $args, 3) ?: [];
+        $verb = strtolower($parts[0] ?? '');
+
+        if (in_array($verb, ['get', 'show'], true)) {
+            $key = $this->normalizeConfigKey($parts[1] ?? '');
+            if ($key === null) {
+                $this->line('<fg=red>Unknown config key.</> Supported keys: model, permission_mode, theme, output_style, api_base_url, max_tokens');
+
+                return;
+            }
+
+            $result = $configTool->call(['key' => $key], $context);
+            $this->line($result->isError ? "<fg=red>{$result->output}</>" : "<fg=gray>{$result->output}</>");
+
+            return;
+        }
+
+        if ($verb === 'set') {
+            $key = $this->normalizeConfigKey($parts[1] ?? '');
+            $value = $parts[2] ?? null;
+        } else {
+            $key = $this->normalizeConfigKey($parts[0] ?? '');
+            $value = $parts[1] ?? null;
+        }
+
+        if ($key === null) {
+            $this->line('<fg=red>Unknown config key.</> Supported keys: model, permission_mode, theme, output_style, api_base_url, max_tokens');
+
+            return;
+        }
+
+        if ($value === null || trim($value) === '') {
+            $result = $configTool->call(['key' => $key], $context);
+            $this->line($result->isError ? "<fg=red>{$result->output}</>" : "<fg=gray>{$result->output}</>");
+
+            return;
+        }
+
+        $normalizedValue = in_array($key, ['output_style'], true) && in_array(strtolower(trim($value)), ['off', 'none'], true)
+            ? null
+            : trim($value);
+
+        if ($key === 'permission_mode' && $normalizedValue === PermissionMode::Plan->value) {
+            $this->previousPermissionMode ??= $settings->getPermissionMode()->value;
+        }
+
+        if ($key === 'permission_mode' && $normalizedValue !== PermissionMode::Plan->value) {
+            $this->previousPermissionMode = null;
+        }
+
+        $result = $configTool->call([
+            'key' => $key,
+            'value' => $normalizedValue,
+        ], $context);
+
+        $this->line($result->isError ? "<fg=red>{$result->output}</>" : "<fg=green>{$result->output}</>");
+    }
+
+    private function handleHooks(): void
+    {
+        $hooks = $this->loadConfiguredHooks();
+
+        if ($hooks === []) {
+            $paths = array_map(
+                fn (array $entry): string => '<fg=gray>'.$entry['path'].'</>',
+                $this->configuredSettingsPaths(),
+            );
+
+            $this->renderPanel('Hook configuration', [
+                '<fg=gray>No hooks configured.</>',
+                '<fg=gray>Add hooks under the "hooks" key in:</>',
+                ...$paths,
+            ]);
+
+            return;
+        }
+
+        $lines = [];
+        foreach ($hooks as $index => $hook) {
+            $scopeColor = $hook['scope'] === 'project' ? 'green' : 'yellow';
+            $summary = "<fg=cyan>{$hook['event']}</> <fg={$scopeColor}>{$hook['scope']}</>";
+            if ($hook['matcher'] !== null && $hook['matcher'] !== '') {
+                $summary .= " <fg=magenta>{$hook['matcher']}</>";
+            }
+
+            $lines[] = $summary;
+            $lines[] = '<fg=white>'.$this->truncate($hook['command'], 96).'</>';
+            $lines[] = '<fg=gray>'.$hook['path'].'</>';
+
+            if ($index !== array_key_last($hooks)) {
+                $lines[] = '';
+            }
+        }
+
+        $this->renderPanel('Hook configuration', $lines);
+    }
+
+    private function handleFiles(AgentLoop $agent): void
+    {
+        $files = $this->extractContextFiles($agent->getMessageHistory()->getMessages());
+
+        if ($files === []) {
+            $this->line('<fg=gray>No files in context.</>');
+
+            return;
+        }
+
+        $lines = array_map(
+            fn (string $file): string => '<fg=white>'.$file.'</>',
+            $files,
+        );
+
+        $this->renderPanel('Files in context', $lines);
+    }
+
+    private function handleMcp(string $args): void
+    {
+        $manager = app(McpServerConfigManager::class);
+        $tokens = $this->tokenizeArguments($args);
+        $subcommand = strtolower($tokens[0] ?? 'list');
+
+        if ($subcommand === 'paths') {
+            $paths = $manager->paths();
+            $this->renderPanel('MCP config paths', [
+                $this->formatter()->keyValue('Global', $paths['global'], 'gray', 'white'),
+                $this->formatter()->keyValue('Project', $paths['project'], 'gray', 'white'),
+            ], addSpacing: false);
+
+            return;
+        }
+
+        if ($subcommand === 'show') {
+            $name = $tokens[1] ?? null;
+            if ($name === null) {
+                $this->line('<fg=red>Usage:</> /mcp show <name>');
+
+                return;
+            }
+
+            $server = $manager->getServer($name);
+            if ($server === null) {
+                $this->line("<fg=red>MCP server not found:</> <fg=white>{$name}</>");
+
+                return;
+            }
+
+            $lines = [
+                $this->formatter()->keyValue('Name', $server['name']),
+                $this->formatter()->keyValue('Scope', $server['scope'], 'gray', 'gray'),
+                $this->formatter()->keyValue('Transport', $server['transport'], 'gray', 'gray'),
+                $this->formatter()->keyValue('Enabled', $server['enabled'] ? 'yes' : 'no', 'gray', $server['enabled'] ? 'green' : 'yellow'),
+                $this->formatter()->keyValue('Source', $server['path'], 'gray', 'gray'),
+            ];
+
+            if ($server['url'] !== null) {
+                $lines[] = $this->formatter()->keyValue('URL', $server['url'], 'gray', 'white');
+            }
+
+            if ($server['command'] !== null) {
+                $command = $server['command'];
+                if ($server['args'] !== []) {
+                    $command .= ' '.implode(' ', $server['args']);
+                }
+                $lines[] = $this->formatter()->keyValue('Command', $command, 'gray', 'white');
+            }
+
+            if ($server['env'] !== []) {
+                $lines[] = $this->formatter()->keyValue('Env', json_encode($server['env'], JSON_UNESCAPED_SLASHES) ?: '{}', 'gray', 'gray');
+            }
+
+            if ($server['headers'] !== []) {
+                $lines[] = $this->formatter()->keyValue('Headers', json_encode($server['headers'], JSON_UNESCAPED_SLASHES) ?: '{}', 'gray', 'gray');
+            }
+
+            $this->renderPanel('MCP server', $lines, addSpacing: false);
+
+            return;
+        }
+
+        if ($subcommand === 'add') {
+            [$options, $positionals] = $this->parseLongOptions(array_slice($tokens, 1));
+            $name = $positionals[0] ?? null;
+            $target = $positionals[1] ?? null;
+
+            if ($name === null || $target === null) {
+                $this->line('<fg=red>Usage:</> /mcp add <name> <command-or-url> [args...] [--scope project|global] [--transport stdio|http|sse]');
+
+                return;
+            }
+
+            $transport = strtolower((string) ($options['transport'][0] ?? ''));
+            $scope = strtolower((string) ($options['scope'][0] ?? 'project'));
+            if (! in_array($scope, ['project', 'global'], true)) {
+                $this->line('<fg=red>Invalid scope.</> Use project or global.');
+
+                return;
+            }
+
+            if ($transport === '') {
+                $transport = preg_match('#^https?://#i', $target) === 1 ? 'http' : 'stdio';
+            }
+
+            if (! in_array($transport, ['stdio', 'http', 'sse'], true)) {
+                $this->line('<fg=red>Invalid transport.</> Use stdio, http, or sse.');
+
+                return;
+            }
+
+            $definition = [
+                'transport' => $transport,
+                'enabled' => true,
+            ];
+
+            if ($transport === 'stdio') {
+                $definition['command'] = $target;
+                $definition['args'] = array_slice($positionals, 2);
+            } else {
+                $definition['url'] = $target;
+            }
+
+            $env = $this->parseKeyValueOptions($options['env'] ?? []);
+            $headers = $this->parseHeaderOptions($options['header'] ?? []);
+            if ($env !== []) {
+                $definition['env'] = $env;
+            }
+            if ($headers !== []) {
+                $definition['headers'] = $headers;
+            }
+
+            $existing = $manager->getServer($name);
+            $manager->addServer($name, $definition, $scope);
+
+            $verb = $existing === null ? 'Added' : 'Updated';
+            $summary = $transport === 'stdio'
+                ? $target.($definition['args'] !== [] ? ' '.implode(' ', $definition['args']) : '')
+                : $target;
+
+            $this->line("<fg=green>{$verb} MCP server:</> <fg=white>{$name}</> <fg=gray>({$scope} · {$transport})</>");
+            $this->line("<fg=gray>{$summary}</>");
+
+            return;
+        }
+
+        if ($subcommand === 'remove') {
+            [$options, $positionals] = $this->parseLongOptions(array_slice($tokens, 1));
+            $name = $positionals[0] ?? null;
+            $scope = strtolower((string) ($options['scope'][0] ?? 'all'));
+
+            if ($name === null) {
+                $this->line('<fg=red>Usage:</> /mcp remove <name> [--scope project|global|all]');
+
+                return;
+            }
+
+            $removed = $manager->removeServer($name, $scope);
+            if ($removed === 0) {
+                $this->line("<fg=yellow>No MCP server removed:</> <fg=white>{$name}</>");
+
+                return;
+            }
+
+            $this->line("<fg=green>Removed MCP server:</> <fg=white>{$name}</> <fg=gray>({$removed} scope".($removed === 1 ? '' : 's').')</>');
+
+            return;
+        }
+
+        if (in_array($subcommand, ['enable', 'disable'], true)) {
+            [$options, $positionals] = $this->parseLongOptions(array_slice($tokens, 1));
+            $name = $positionals[0] ?? 'all';
+            $scope = strtolower((string) ($options['scope'][0] ?? 'all'));
+            $enabled = $subcommand === 'enable';
+            $updated = $manager->setEnabled($name, $enabled, $scope);
+
+            if ($updated === 0) {
+                $this->line("<fg=yellow>No MCP servers updated.</> <fg=gray>Target: {$name}</>");
+
+                return;
+            }
+
+            $action = $enabled ? 'Enabled' : 'Disabled';
+            $this->line("<fg=green>{$action}</> <fg=white>{$updated}</> <fg=gray>MCP server".($updated === 1 ? '' : 's')."</> <fg=gray>({$scope})</>");
+
+            return;
+        }
+
+        $servers = $manager->listServers();
+        if ($servers === []) {
+            $paths = $manager->paths();
+            $this->renderPanel('MCP servers', [
+                '<fg=gray>No MCP servers configured.</>',
+                $this->formatter()->keyValue('Global config', $paths['global'], 'gray', 'gray'),
+                $this->formatter()->keyValue('Project config', $paths['project'], 'gray', 'gray'),
+                '<fg=gray>Use /mcp add <name> <command-or-url> to register one.</>',
+            ]);
+
+            return;
+        }
+
+        $lines = [];
+        foreach ($servers as $index => $server) {
+            $statusColor = $server['enabled'] ? 'green' : 'yellow';
+            $status = $server['enabled'] ? 'enabled' : 'disabled';
+            $target = $server['url'] ?? $server['command'] ?? 'unknown';
+            if ($server['url'] === null && $server['args'] !== []) {
+                $target .= ' '.implode(' ', $server['args']);
+            }
+
+            $lines[] = "<fg=yellow>{$server['name']}</> <fg=gray>{$server['scope']} · {$server['transport']} · </><fg={$statusColor}>{$status}</>";
+            $lines[] = '<fg=white>'.$this->truncate($target, 90).'</>';
+            $lines[] = '<fg=gray>'.$server['path'].'</>';
+
+            if ($index < count($servers) - 1) {
+                $lines[] = '';
+            }
+        }
+
+        $this->renderPanel('MCP servers', $lines);
+    }
+
+    private function handlePlan(AgentLoop $agent, string $args): void
+    {
+        $settings = app(SettingsManager::class);
+        $args = trim($args);
+        $mode = $settings->getPermissionMode();
+
+        if (in_array(strtolower($args), ['off', 'exit', 'disable'], true)) {
+            if ($mode !== PermissionMode::Plan) {
+                $this->line('<fg=gray>Plan mode is already off.</>');
+
+                return;
+            }
+
+            $restoreMode = $this->previousPermissionMode ?? config('haocode.permission_mode', PermissionMode::Default->value);
+            $settings->set('permission_mode', $restoreMode);
+            $this->previousPermissionMode = null;
+            $this->line("<fg=green>Plan mode disabled.</> <fg=gray>Restored {$restoreMode}.</>");
+
+            return;
+        }
+
+        if ($mode !== PermissionMode::Plan) {
+            $this->previousPermissionMode = $mode->value;
+            $settings->set('permission_mode', PermissionMode::Plan->value);
+
+            if ($args === '') {
+                $this->renderPanel('Plan mode', [
+                    $this->formatter()->keyValue('Mode', 'plan'),
+                    $this->formatter()->keyValue('Previous mode', $mode->value, 'gray', 'gray'),
+                    '<fg=gray>Ask a task with /plan &lt;request&gt; to generate an implementation plan without writing files.</>',
+                    '<fg=gray>Use /plan off to leave plan mode.</>',
+                ], addSpacing: false);
+
+                return;
+            }
+
+            $this->line('<fg=green>Plan mode enabled.</>');
+        }
+
+        if ($args === '') {
+            $this->renderPanel('Plan mode', [
+                $this->formatter()->keyValue('Mode', 'plan'),
+                '<fg=gray>Planning prompts stay read-only. Use /plan &lt;request&gt; to explore and design changes.</>',
+                '<fg=gray>Use /plan off to leave plan mode.</>',
+            ], addSpacing: false);
+
+            return;
+        }
+
+        $planningPrompt = "Plan mode is active. Explore the codebase and produce a concrete implementation plan without making file changes.\n\nTask:\n{$args}";
+        $this->runAgentTurn($agent, $planningPrompt);
+    }
+
+    private function handleReview(AgentLoop $agent, string $args): void
+    {
+        if (! app(GitContext::class)->isGitRepo()) {
+            $this->line('<fg=red>/review requires a git repository.</>');
+
+            return;
+        }
+
+        $prompt = $this->buildReviewPrompt($args);
+        $gitReadRules = [
+            'Bash(git status:*)',
+            'Bash(git diff:*)',
+            'Bash(git log:*)',
+            'Bash(git branch:*)',
+            'Bash(git show:*)',
+            'Bash(git rev-parse:*)',
+        ];
+
+        $this->runAgentTurnWithSessionRules($agent, $prompt, $gitReadRules);
+    }
+
     private function handleTasks(): void
     {
         $tasks = BashTool::listTasks();
+        $agentTasks = array_filter(
+            app(TaskManager::class)->list(),
+            fn ($task) => str_starts_with($task->id, 'agent_') && $task->status !== 'completed'
+        );
+        $backgroundAgents = app(BackgroundAgentManager::class);
 
-        if (empty($tasks)) {
+        if (empty($tasks) && empty($agentTasks)) {
             $this->line('<fg=gray>No background tasks running.</>');
 
             return;
@@ -539,6 +1226,30 @@ class HaoCodeCommand extends Command
                 $this->truncate($task['command'], 50),
             );
         }
+
+        foreach ($agentTasks as $task) {
+            $elapsed = max(0, time() - $task->createdAt);
+            $agent = $backgroundAgents->get($task->id);
+            $agentStatus = $agent['status'] ?? 'unknown';
+            $pending = (int) ($agent['pending_messages'] ?? 0);
+            $pid = $agent['pid'] ?? '?';
+
+            $detailParts = ["PID {$pid}", "{$elapsed}s", $agentStatus];
+            if ($pending > 0) {
+                $detailParts[] = "{$pending} msg queued";
+            }
+            if (! empty($agent['stop_requested'])) {
+                $detailParts[] = 'stop requested';
+            }
+
+            $lines[] = sprintf(
+                '<fg=cyan>%s</> <fg=gray>%s · %s</>',
+                $task->id,
+                implode(' · ', $detailParts),
+                $this->truncate($task->subject, 50),
+            );
+        }
+
         $this->renderPanel('Background tasks', $lines);
     }
 
@@ -552,72 +1263,7 @@ class HaoCodeCommand extends Command
             return;
         }
 
-        $sessionPath = config('haocode.session_path', storage_path('app/haocode/sessions'));
-
-        // Sanitize args for glob safety
-        $safeArg = str_replace(['*', '?', '[', ']'], '', $args);
-
-        // Find session file matching the partial ID
-        $pattern = $sessionPath.'/'.$safeArg.'*.jsonl';
-        $files = glob($pattern);
-
-        if (empty($files)) {
-            // Try partial match
-            $pattern = $sessionPath.'/*'.$safeArg.'*.jsonl';
-            $files = glob($pattern);
-        }
-
-        if (empty($files)) {
-            $this->line("<fg=red>No session found matching: {$args}</>");
-
-            return;
-        }
-
-        $file = $files[0];
-        $entries = [];
-        foreach (file($file) as $line) {
-            if (trim($line)) {
-                $entries[] = json_decode($line, true);
-            }
-        }
-
-        if (empty($entries)) {
-            $this->line('<fg=red>Session is empty.</>');
-
-            return;
-        }
-
-        // Restore messages into history
-        $history = $agent->getMessageHistory();
-        $history->clear();
-
-        $restored = 0;
-        foreach ($entries as $entry) {
-            $type = $entry['type'] ?? '';
-            if ($type === 'user_message') {
-                $history->addUserMessage($entry['content'] ?? '');
-                $restored++;
-            } elseif ($type === 'assistant_turn') {
-                if (isset($entry['message'])) {
-                    $history->addAssistantMessage($entry['message']);
-                    $restored++;
-                }
-                if (! empty($entry['tool_results'])) {
-                    $history->addToolResultMessage($entry['tool_results']);
-                }
-            }
-        }
-
-        $sessionId = basename($file, '.jsonl');
-        $this->line("<fg=green>Resumed session:</> <fg=white>{$sessionId}</> ({$restored} messages restored)");
-
-        // Show away summary
-        $awaySummary = app(AwaySummaryService::class)->generateSummary($entries);
-        if ($awaySummary) {
-            $this->renderPanel('While you were away', [
-                $this->formatter()->keyValue('Summary', $awaySummary, 'gray', 'gray'),
-            ]);
-        }
+        $this->restoreSession($agent, $args, announce: true);
     }
 
     private function listSessions(): void
@@ -662,6 +1308,162 @@ class HaoCodeCommand extends Command
         }
         $lines[] = '<fg=gray>Use /resume &lt;session_id&gt; to restore a session</>';
         $this->renderPanel('Recent sessions', $lines);
+    }
+
+    private function initializeSessionFromStartupOptions(AgentLoop $agent, bool $quiet = false): bool
+    {
+        $resume = $this->option('resume');
+        $continue = (bool) $this->option('continue');
+
+        if ($resume !== null && $continue) {
+            $this->error('Cannot use --resume and --continue together.');
+
+            return false;
+        }
+
+        $restored = false;
+        if (is_string($resume) && trim($resume) !== '') {
+            $restored = $this->restoreSession($agent, trim($resume), announce: ! $quiet);
+            if (! $restored) {
+                $this->error("No session found matching: {$resume}");
+
+                return false;
+            }
+        } elseif ($continue) {
+            $sessionId = app(SessionManager::class)->findMostRecentSessionId(getcwd() ?: null);
+            if ($sessionId !== null) {
+                $restored = $this->restoreSession($agent, $sessionId, announce: ! $quiet);
+            } elseif (! $quiet) {
+                $this->line('<fg=gray>No previous session found. Starting a new conversation.</>');
+            }
+        }
+
+        if ($restored && $this->option('fork-session')) {
+            $branch = $agent->getSessionManager()->branchSession();
+            $agent->resetSessionMetrics();
+
+            if (! $quiet) {
+                $this->line("<fg=green>Forked resumed session:</> <fg=white>{$branch['session_id']}</>");
+            }
+        }
+
+        return true;
+    }
+
+    private function restoreSession(AgentLoop $agent, string $reference, bool $announce = true): bool
+    {
+        $entries = $this->loadSessionEntriesByReference($reference);
+        if ($entries === [] || ($entries['entries'] ?? []) === []) {
+            return false;
+        }
+
+        $sessionEntries = $entries['entries'];
+        $history = $agent->getMessageHistory();
+        $history->clear();
+
+        foreach ($sessionEntries as $entry) {
+            $type = $entry['type'] ?? '';
+            if ($type === 'user_message') {
+                $history->addUserMessage($entry['content'] ?? '');
+            } elseif ($type === 'assistant_turn') {
+                if (isset($entry['message'])) {
+                    $history->addAssistantMessage($entry['message']);
+                }
+                if (! empty($entry['tool_results'])) {
+                    $history->addToolResultMessage($entry['tool_results']);
+                }
+            }
+        }
+        $restored = $history->count();
+
+        $sessionId = $entries['session_id'];
+        $title = SessionManager::extractTitleFromEntries($sessionEntries);
+        $agent->getSessionManager()->switchToSession($sessionId, $title);
+        $agent->resetSessionMetrics();
+        app(PromptHudState::class)->hydrateFromSessionEntries($sessionEntries);
+
+        if ($announce) {
+            $this->line("<fg=green>Resumed session:</> <fg=white>{$sessionId}</> ({$restored} messages restored)");
+
+            $awaySummary = app(AwaySummaryService::class)->generateSummary($sessionEntries);
+            if ($awaySummary) {
+                $this->renderPanel('While you were away', [
+                    $this->formatter()->keyValue('Summary', $awaySummary, 'gray', 'gray'),
+                ]);
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @return array{session_id: string, entries: array<int, array<string, mixed>>}|array{}
+     */
+    private function loadSessionEntriesByReference(string $reference): array
+    {
+        $sessionPath = config('haocode.session_path', storage_path('app/haocode/sessions'));
+        $safeArg = str_replace(['*', '?', '[', ']'], '', trim($reference));
+        if ($safeArg === '') {
+            return [];
+        }
+
+        $patterns = [
+            $sessionPath.'/'.$safeArg.'*.jsonl',
+            $sessionPath.'/*'.$safeArg.'*.jsonl',
+        ];
+
+        $file = null;
+        foreach ($patterns as $pattern) {
+            $files = glob($pattern);
+            if (! empty($files)) {
+                $file = $files[0];
+                break;
+            }
+        }
+
+        if ($file === null) {
+            return [];
+        }
+
+        $entries = [];
+        foreach (file($file) ?: [] as $line) {
+            if (! trim($line)) {
+                continue;
+            }
+
+            $decoded = json_decode($line, true);
+            if (is_array($decoded)) {
+                $entries[] = $decoded;
+            }
+        }
+
+        if ($entries === []) {
+            return [];
+        }
+
+        return [
+            'session_id' => basename($file, '.jsonl'),
+            'entries' => $entries,
+        ];
+    }
+
+    private function handleBranch(AgentLoop $agent, string $args): void
+    {
+        try {
+            $branch = $agent->getSessionManager()->branchSession(trim($args) !== '' ? trim($args) : null);
+            $agent->resetSessionMetrics();
+            $this->refreshPromptHudState($agent);
+
+            $this->renderPanel('Conversation branched', [
+                $this->formatter()->keyValue('New session', $branch['session_id']),
+                $this->formatter()->keyValue('From session', $branch['source_session_id'], 'gray', 'gray'),
+                $this->formatter()->keyValue('Title', $branch['title'], 'gray', 'white'),
+                '<fg=gray>You are now continuing in the new branch.</>',
+                "<fg=gray>Use /resume {$branch['source_session_id']} to return to the original transcript.</>",
+            ], 'green', addSpacing: false);
+        } catch (\RuntimeException $e) {
+            $this->line('<fg=red>'.$e->getMessage().'</>');
+        }
     }
 
     private function handleModel(string $args = ''): void
@@ -738,6 +1540,35 @@ class HaoCodeCommand extends Command
                 $this->line("<fg=gray>{$line}</>");
             }
         }
+    }
+
+    private function handleCommit(AgentLoop $agent, string $args): void
+    {
+        $git = app(GitContext::class);
+        if (! $git->isGitRepo()) {
+            $this->line('<fg=red>/commit requires a git repository.</>');
+
+            return;
+        }
+
+        $status = trim((string) shell_exec('git status --porcelain 2>/dev/null'));
+        if ($status === '') {
+            $this->line('<fg=gray>No changes to commit.</>');
+
+            return;
+        }
+
+        $prompt = $this->buildCommitPrompt($args);
+        $rules = [
+            'Bash(git status:*)',
+            'Bash(git diff:*)',
+            'Bash(git log:*)',
+            'Bash(git branch:*)',
+            'Bash(git add:*)',
+            'Bash(git commit:*)',
+        ];
+
+        $this->runAgentTurnWithSessionRules($agent, $prompt, $rules);
     }
 
     private function handleMemory(string $args): void
@@ -912,6 +1743,169 @@ class HaoCodeCommand extends Command
         $this->printUsageStats($agent);
     }
 
+    private function handleStatusline(string $args, AgentLoop $agent): void
+    {
+        $settings = app(SettingsManager::class);
+        $tokens = array_values(array_filter(preg_split('/\s+/', trim($args)) ?: [], static fn (string $token): bool => $token !== ''));
+        $mode = strtolower($tokens[0] ?? '');
+
+        if (in_array($mode, ['on', 'enable'], true)) {
+            $settings->setStatuslineEnabled(true);
+            $settings->set('statusline_enabled', true);
+            $this->line('<fg=green>Status line enabled.</>');
+
+            return;
+        }
+
+        if (in_array($mode, ['off', 'disable'], true)) {
+            $settings->setStatuslineEnabled(false);
+            $settings->set('statusline_enabled', false);
+            $this->line('<fg=green>Status line disabled.</>');
+
+            return;
+        }
+
+        if (in_array($mode, ['compact', 'expanded'], true)) {
+            $settings->setStatuslineLayout($mode);
+            $this->line('<fg=green>Status line layout set to</> <fg=white>'.$mode.'</>.');
+
+            return;
+        }
+
+        if ($mode === 'layout') {
+            $layout = strtolower($tokens[1] ?? '');
+            if (! in_array($layout, ['compact', 'expanded'], true)) {
+                $this->line('<fg=red>Usage: /statusline layout compact|expanded</>');
+
+                return;
+            }
+
+            $settings->setStatuslineLayout($layout);
+            $this->line('<fg=green>Status line layout set to</> <fg=white>'.$layout.'</>.');
+
+            return;
+        }
+
+        if (in_array($mode, ['paths', 'path', 'levels'], true)) {
+            $rawLevels = $tokens[1] ?? null;
+            if ($rawLevels === null || ! ctype_digit($rawLevels)) {
+                $this->line('<fg=red>Usage: /statusline paths 1|2|3</>');
+
+                return;
+            }
+
+            $levels = max(1, min(3, (int) $rawLevels));
+            $settings->setStatuslinePathLevels($levels);
+            $this->line('<fg=green>Status line path depth set to</> <fg=white>'.$levels.'</>.');
+
+            return;
+        }
+
+        if (in_array($mode, ['tools', 'agents', 'todos'], true)) {
+            $enabled = $this->parseStatuslineToggle($tokens[1] ?? null);
+            if ($enabled === null) {
+                $this->line('<fg=red>Usage: /statusline '.$mode.' on|off</>');
+
+                return;
+            }
+
+            $settings->setStatuslineSectionVisibility($mode, $enabled);
+            $this->line('<fg=green>Status line '.$mode.' '.($enabled ? 'enabled' : 'disabled').'.</>');
+
+            return;
+        }
+
+        if ($mode === 'reset') {
+            $settings->resetStatuslineConfig();
+            $this->line('<fg=green>Status line settings reset to defaults.</>');
+
+            return;
+        }
+
+        $statusline = $settings->getStatuslineConfig();
+        $preview = $this->formatter()->promptFooterLines($this->buildPromptHudSnapshot($agent));
+
+        $this->renderPanel('Status line', [
+            $this->formatter()->keyValue('Enabled', $statusline['enabled'] ? 'yes' : 'no', 'gray', $statusline['enabled'] ? 'green' : 'yellow'),
+            $this->formatter()->keyValue('Layout', $statusline['layout'], 'gray', 'gray'),
+            $this->formatter()->keyValue('Path levels', (string) $statusline['path_levels'], 'gray', 'gray'),
+            $this->formatter()->keyValue('Tools', $statusline['show_tools'] ? 'on' : 'off', 'gray', $statusline['show_tools'] ? 'green' : 'yellow'),
+            $this->formatter()->keyValue('Agents', $statusline['show_agents'] ? 'on' : 'off', 'gray', $statusline['show_agents'] ? 'green' : 'yellow'),
+            $this->formatter()->keyValue('Todos', $statusline['show_todos'] ? 'on' : 'off', 'gray', $statusline['show_todos'] ? 'green' : 'yellow'),
+            '<fg=gray>The status line is the footer shown above the prompt in raw-terminal mode.</>',
+            '<fg=gray>Commands: /statusline on|off · /statusline layout compact|expanded · /statusline paths 1|2|3</>',
+            '<fg=gray>Commands: /statusline tools on|off · /statusline agents on|off · /statusline todos on|off · /statusline reset</>',
+            '',
+            '<fg=white>Preview:</>',
+            ...$preview,
+        ]);
+    }
+
+    private function handleStats(AgentLoop $agent): void
+    {
+        $stats = app(SessionStatsService::class);
+        $currentSessionId = $agent->getSessionManager()->getSessionId();
+        $overview = $stats->getOverview($currentSessionId);
+        $current = $stats->getSession($currentSessionId);
+
+        $currentLines = [
+            $this->formatter()->keyValue('Session', $currentSessionId),
+            $this->formatter()->keyValue('Title', $current['title'] ?? 'untitled', 'gray', 'white'),
+            $this->formatter()->keyValue('Messages in memory', (string) $agent->getMessageHistory()->count(), 'gray', 'gray'),
+            $this->formatter()->keyValue('User turns', (string) $current['user_messages'], 'gray', 'gray'),
+            $this->formatter()->keyValue('Assistant turns', (string) $current['assistant_turns'], 'gray', 'gray'),
+            $this->formatter()->keyValue('Tool results', (string) $current['tool_results'], 'gray', 'gray'),
+            $this->formatter()->keyValue('Input tokens', number_format($agent->getTotalInputTokens()), 'gray', 'gray'),
+            $this->formatter()->keyValue('Output tokens', number_format($agent->getTotalOutputTokens()), 'gray', 'gray'),
+            $this->formatter()->keyValue('Est. cost', '$'.number_format($agent->getEstimatedCost(), 4), 'gray', 'gray'),
+        ];
+
+        if ($current['branch_source'] !== null) {
+            $currentLines[] = $this->formatter()->keyValue('Branched from', $current['branch_source'], 'gray', 'gray');
+        }
+        if ($current['first_activity'] !== null) {
+            $currentLines[] = $this->formatter()->keyValue('First activity', $this->formatIsoTimestamp($current['first_activity']), 'gray', 'gray');
+        }
+        if ($current['last_activity'] !== null) {
+            $currentLines[] = $this->formatter()->keyValue('Last activity', $this->formatIsoTimestamp($current['last_activity']), 'gray', 'gray');
+            $currentLines[] = $this->formatter()->keyValue('Duration', $this->formatDuration((int) $current['duration_seconds']), 'gray', 'gray');
+        }
+
+        $this->renderPanel('Current session stats', $currentLines, addSpacing: false);
+
+        $overviewLines = [
+            $this->formatter()->keyValue('Sessions tracked', (string) $overview['sessions_count']),
+            $this->formatter()->keyValue('Sessions today', (string) $overview['sessions_today'], 'gray', 'gray'),
+            $this->formatter()->keyValue('Active days', (string) $overview['active_days'], 'gray', 'gray'),
+            $this->formatter()->keyValue('User turns', (string) $overview['total_user_messages'], 'gray', 'gray'),
+            $this->formatter()->keyValue('Assistant turns', (string) $overview['total_assistant_turns'], 'gray', 'gray'),
+            $this->formatter()->keyValue('Tool results', (string) $overview['total_tool_results'], 'gray', 'gray'),
+        ];
+
+        if ($overview['latest_activity'] !== null) {
+            $overviewLines[] = $this->formatter()->keyValue('Latest activity', $this->formatIsoTimestamp($overview['latest_activity']), 'gray', 'gray');
+        }
+
+        $this->renderPanel('Overall stats', $overviewLines, addSpacing: false);
+
+        if ($overview['sessions'] !== []) {
+            $recentLines = [];
+            $recentSessions = array_slice($overview['sessions'], 0, 5);
+            foreach ($recentSessions as $index => $session) {
+                $label = $session['title'] ?: $session['session_id'];
+                $meta = "{$session['user_messages']}u · {$session['assistant_turns']}a · {$session['tool_results']} tools";
+                $activity = $session['last_activity'] !== null ? $this->formatIsoTimestamp($session['last_activity']) : 'no activity';
+                $recentLines[] = "<fg=yellow>{$label}</> <fg=gray>· {$activity}</>";
+                $recentLines[] = "<fg=gray>{$session['session_id']} · {$meta}</>";
+                if ($index < count($recentSessions) - 1) {
+                    $recentLines[] = '';
+                }
+            }
+
+            $this->renderPanel('Recent sessions', $recentLines);
+        }
+    }
+
     private function handleTranscript(AgentLoop $agent, string $args = ''): void
     {
         $query = trim($args);
@@ -980,7 +1974,7 @@ class HaoCodeCommand extends Command
         $args = trim($args);
 
         $settings = app(SettingsManager::class);
-        $current = $settings->all()['theme'] ?? 'dark';
+        $current = $settings->getTheme();
 
         if ($args === '' || $args === 'list') {
             $themes = ['dark' => 'Default dark theme', 'light' => 'Light terminal theme', 'ansi' => 'Basic ANSI (no truecolor)'];
@@ -1178,22 +2172,150 @@ class HaoCodeCommand extends Command
         $this->line("<fg=green>Snapshot saved:</> <fg=white>{$filepath}</>");
     }
 
-    private function handleInit(string $args): void
+    private function handleLoop(string $args): void
     {
-        $projectPath = getcwd().'/.haocode/settings.json';
-
-        if (file_exists($projectPath) && trim($args) !== '--force') {
-            $this->line("<fg=yellow>Settings already exist at:</> <fg=white>{$projectPath}</>");
-            $this->line('<fg=gray>Use /init --force to overwrite.</>');
-
+        $args = trim($args);
+        if ($args === '') {
+            $this->line('<fg=yellow>Usage:</> /loop <interval> <prompt>');
+            $this->line('<fg=gray>Examples: /loop 10m check deploy, /loop 1h run tests</>');
             return;
         }
 
-        $dir = dirname($projectPath);
-        if (! is_dir($dir)) {
-            mkdir($dir, 0755, true);
+        // Parse interval and prompt
+        $interval = '10m';
+        $prompt = $args;
+
+        // Try leading interval token
+        $parts = explode(' ', $args, 2);
+        if (preg_match('/^\d+[smhd]$/', $parts[0] ?? '')) {
+            $interval = $parts[0];
+            $prompt = $parts[1] ?? '';
+        } elseif (preg_match('/every\s+(\d+[smhd])\s*$/i', $args, $m)) {
+            $interval = $m[1];
+            $prompt = trim(substr($args, 0, -strlen($m[0])));
         }
 
+        if ($prompt === '') {
+            $this->line('<fg=red>Error:</> No prompt provided.');
+            $this->line('<fg=gray>Usage: /loop <interval> <prompt></>');
+            return;
+        }
+
+        // Convert interval to cron
+        $cron = match (true) {
+            preg_match('/^(\d+)s$/', $interval, $m) => '*/' . max(1, (int) ceil((int)$m[1] / 60)) . ' * * * *',
+            preg_match('/^(\d+)m$/', $interval, $m) && (int)$m[1] <= 59 => '*/' . $m[1] . ' * * * *',
+            preg_match('/^(\d+)m$/', $interval, $m) => '0 */' . ((int)$m[1] / 60) . ' * * *',
+            preg_match('/^(\d+)h$/', $interval, $m) && (int)$m[1] <= 23 => '0 */' . $m[1] . ' * * *',
+            preg_match('/^(\d+)d$/', $interval, $m) => '0 0 */' . $m[1] . ' * *',
+            default => '*/10 * * * *',
+        };
+
+        $scheduler = app(\App\Tools\Cron\CronScheduler::class);
+        $job = [
+            'id' => uniqid('loop_'),
+            'cron' => $cron,
+            'prompt' => $prompt,
+            'recurring' => true,
+            'status' => 'active',
+            'created_at' => date('c'),
+            'last_fired' => null,
+            'fire_count' => 0,
+            'durable' => false,
+        ];
+        $scheduler::addJob($job);
+
+        $this->line("<fg=green>Scheduled loop:</> <fg=white>{$prompt}</>");
+        $this->line("<fg=gray>Interval:</> <fg=cyan>{$interval}</> <fg=gray>({$cron})</>");
+        $this->line("<fg=gray>Job ID:</> <fg=yellow>{$job['id']}</>");
+        $this->line("<fg=gray>Use /tasks to view scheduled jobs</>");
+    }
+
+    private function handleExport(string $args): void
+    {
+        $agent = app(AgentLoop::class);
+        $messages = $agent->getMessageHistory()->getMessages();
+
+        if (empty($messages)) {
+            $this->line('<fg=gray>Nothing to export — conversation is empty.</>');
+            return;
+        }
+
+        $args = trim($args);
+        $timestamp = date('Y-m-d_H-i-s');
+        $filename = $args ?: "export_{$timestamp}.md";
+        if (! str_ends_with($filename, '.md')) {
+            $filename .= '.md';
+        }
+
+        $exportDir = storage_path('app/haocode/exports');
+        if (! is_dir($exportDir)) {
+            mkdir($exportDir, 0755, true);
+        }
+
+        $filepath = $exportDir . '/' . $filename;
+
+        $md = "# Hao Code Export\n\n";
+        $md .= '**Date:** ' . date('Y-m-d H:i:s') . "\n";
+        $md .= '**Session:** ' . $agent->getSessionManager()->getSessionId() . "\n";
+        $md .= '**Model:** ' . app(SettingsManager::class)->getModel() . "\n\n---\n\n";
+
+        foreach ($messages as $msg) {
+            $role = $msg['role'] ?? 'unknown';
+            $content = $msg['content'] ?? '';
+
+            if ($role === 'user' && is_string($content)) {
+                $md .= "## User\n\n{$content}\n\n";
+            } elseif ($role === 'assistant') {
+                $text = '';
+                if (is_string($content)) {
+                    $text = $content;
+                } elseif (is_array($content)) {
+                    foreach ($content as $block) {
+                        if (($block['type'] ?? '') === 'text') {
+                            $text .= $block['text'] ?? '';
+                        }
+                    }
+                }
+                if ($text) {
+                    $md .= "## Assistant\n\n{$text}\n\n";
+                }
+            } elseif ($role === 'user' && is_array($content)) {
+                // Tool results
+                foreach ($content as $block) {
+                    if (($block['type'] ?? '') === 'tool_result') {
+                        $contentText = is_string($block['content'] ?? '') ? $block['content'] : json_encode($block['content'] ?? '');
+                        $toolUseId = $block['tool_use_id'] ?? 'unknown';
+                        $md .= "## Tool Result ({$toolUseId})\n\n{$contentText}\n\n";
+                    }
+                }
+            }
+        }
+
+        file_put_contents($filepath, $md);
+        $this->line("<fg=green>Exported to:</> <fg=white>{$filepath}</>");
+    }
+
+    private function handleInit(string $args): void
+    {
+        $projectPath = getcwd() . '/.haocode';
+        $force = trim($args) === '--force';
+
+        if (is_dir($projectPath) && ! $force) {
+            $this->line("<fg=yellow>.haocode already exists at:</> <fg=white>{$projectPath}</>");
+            $this->line('<fg=gray>Use /init --force to overwrite.</>');
+            return;
+        }
+
+        if (! is_dir($projectPath)) {
+            mkdir($projectPath, 0755, true);
+        }
+
+        // Detect project info
+        $projectInfo = $this->detectProjectInfo();
+
+        // Write settings.json
+        $settingsPath = $projectPath . '/settings.json';
         $defaults = [
             'model' => config('haocode.model', 'claude-sonnet-4-20250514'),
             'permissions' => [
@@ -1201,10 +2323,142 @@ class HaoCodeCommand extends Command
                 'deny' => [],
             ],
         ];
+        file_put_contents($settingsPath, json_encode($defaults, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
 
-        file_put_contents($projectPath, json_encode($defaults, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-        $this->line("<fg=green>Initialized:</> <fg=white>{$projectPath}</>");
-        $this->line('<fg=gray>Edit this file to customise model, permissions, and system prompt.</>');
+        // Write HAOCODE.md if not exists or forced
+        $haocodePath = $projectPath . '/HAOCODE.md';
+        if (! file_exists($haocodePath) || $force) {
+            $haocodeContent = $this->generateHAOCODEContent($projectInfo);
+            file_put_contents($haocodePath, $haocodeContent);
+        }
+
+        // Create skills directory
+        $skillsDir = $projectPath . '/skills';
+        if (! is_dir($skillsDir)) {
+            mkdir($skillsDir, 0755, true);
+        }
+
+        // Create output-styles directory
+        $stylesDir = $projectPath . '/output-styles';
+        if (! is_dir($stylesDir)) {
+            mkdir($stylesDir, 0755, true);
+        }
+
+        $this->line("<fg=green>Initialized project at:</> <fg=white>{$projectPath}</>");
+        if (isset($projectInfo['framework'])) {
+            $this->line("<fg=gray>Detected framework:</> <fg=cyan>{$projectInfo['framework']}</>");
+        }
+        if (isset($projectInfo['test_command'])) {
+            $this->line("<fg=gray>Detected test command:</> <fg=cyan>{$projectInfo['test_command']}</>");
+        }
+        $this->line('<fg=gray>Created: settings.json, HAOCODE.md, skills/, output-styles/</>');
+    }
+
+    /**
+     * Detect project characteristics by scanning common files.
+     */
+    private function detectProjectInfo(): array
+    {
+        $info = [];
+        $cwd = getcwd();
+
+        // Framework detection
+        if (file_exists($cwd . '/artisan')) {
+            $info['framework'] = 'Laravel';
+            $info['test_command'] = 'php artisan test';
+        } elseif (file_exists($cwd . '/composer.json')) {
+            $composer = json_decode(file_get_contents($cwd . '/composer.json'), true);
+            $require = array_keys($composer['require'] ?? []);
+            if (in_array('laravel/framework', $require)) {
+                $info['framework'] = 'Laravel';
+            } else {
+                $info['framework'] = 'PHP';
+            }
+            $info['test_command'] = file_exists($cwd . '/phpunit.xml') ? './vendor/bin/phpunit' : 'php test';
+        } elseif (file_exists($cwd . '/package.json')) {
+            $package = json_decode(file_get_contents($cwd . '/package.json'), true);
+            $deps = array_keys($package['dependencies'] ?? []);
+            if (in_array('react', $deps) || in_array('next', $deps)) {
+                $info['framework'] = 'React/Next.js';
+            } elseif (in_array('vue', $deps)) {
+                $info['framework'] = 'Vue';
+            } else {
+                $info['framework'] = 'Node.js';
+            }
+            $info['test_command'] = 'npm test';
+        } elseif (file_exists($cwd . '/Cargo.toml')) {
+            $info['framework'] = 'Rust';
+            $info['test_command'] = 'cargo test';
+        } elseif (file_exists($cwd . '/go.mod')) {
+            $info['framework'] = 'Go';
+            $info['test_command'] = 'go test ./...';
+        } elseif (file_exists($cwd . '/pyproject.toml') || file_exists($cwd . '/requirements.txt')) {
+            $info['framework'] = 'Python';
+            $info['test_command'] = 'pytest';
+        } else {
+            $info['framework'] = 'Unknown';
+            $info['test_command'] = '';
+        }
+
+        // Lint/format detection
+        if (file_exists($cwd . '/.php-cs-fixer.php') || file_exists($cwd . '/.php-cs-fixer.dist.php')) {
+            $info['linter'] = 'PHP-CS-Fixer';
+        } elseif (file_exists($cwd . '/pint.json')) {
+            $info['linter'] = 'Laravel Pint';
+        } elseif (file_exists($cwd . '/.eslintrc') || file_exists($cwd . '/.eslintrc.js') || file_exists($cwd . '/eslint.config.js')) {
+            $info['linter'] = 'ESLint';
+        } elseif (file_exists($cwd . '/.prettierrc')) {
+            $info['formatter'] = 'Prettier';
+        }
+
+        // CI detection
+        if (is_dir($cwd . '/.github/workflows')) {
+            $info['ci'] = 'GitHub Actions';
+        } elseif (file_exists($cwd . '/.gitlab-ci.yml')) {
+            $info['ci'] = 'GitLab CI';
+        }
+
+        return $info;
+    }
+
+    /**
+     * Generate HAOCODE.md content based on detected project info.
+     */
+    private function generateHAOCODEContent(array $info): string
+    {
+        $framework = $info['framework'] ?? 'Project';
+        $testCmd = $info['test_command'] ?? '';
+        $linter = $info['linter'] ?? '';
+        $formatter = $info['formatter'] ?? '';
+        $ci = $info['ci'] ?? '';
+
+        $lines = [];
+        $lines[] = "# {$framework} Project Instructions";
+        $lines[] = '';
+        $lines[] = '## Conventions';
+        $lines[] = '';
+        $lines[] = "- This is a {$framework} project.";
+        if ($testCmd) {
+            $lines[] = "- Run tests with: `{$testCmd}`";
+        }
+        if ($linter) {
+            $lines[] = "- Use {$linter} for linting.";
+        }
+        if ($formatter) {
+            $lines[] = "- Use {$formatter} for formatting.";
+        }
+        if ($ci) {
+            $lines[] = "- CI/CD runs on {$ci}.";
+        }
+        $lines[] = '';
+        $lines[] = '## Guidelines';
+        $lines[] = '';
+        $lines[] = '- Do not create files unless absolutely necessary.';
+        $lines[] = '- Be careful not to introduce security vulnerabilities.';
+        $lines[] = '- Keep responses short and concise.';
+        $lines[] = '- Only use emojis if explicitly requested.';
+
+        return implode("\n", $lines) . "\n";
     }
 
     private function handleVersion(): void
@@ -1269,6 +2523,225 @@ class HaoCodeCommand extends Command
         }
 
         $this->line("<fg=red>Unknown style: {$args}</>. Available: ".implode(', ', array_keys($styles)));
+    }
+
+    private function handleBuddy(string $args): void
+    {
+        $buddy = app(BuddyManager::class);
+        $args = trim($args);
+
+        // Default: show card or hatch prompt
+        if ($args === '' || $args === 'card' || $args === 'status') {
+            if (! $buddy->isHatched()) {
+                $this->line('');
+                $this->line('  <fg=cyan;bold>Buddy System</>');
+                $this->line('  <fg=gray>No companion hatched yet.</>');
+                $this->line('  <fg=white>Use: /buddy hatch <name></>');
+                $this->line('');
+                return;
+            }
+
+            $cardLines = $buddy->getCard();
+            $this->line('');
+            $this->line('  <fg=cyan;bold>Companion Card</>');
+            foreach ($cardLines as $line) {
+                $this->line("  {$line}");
+            }
+            $this->line('');
+            return;
+        }
+
+        if (str_starts_with($args, 'hatch ')) {
+            $name = trim(substr($args, 6));
+            if ($name === '') {
+                $this->line('<fg=red>Please provide a name: /buddy hatch <name></>');
+                return;
+            }
+
+            if ($buddy->isHatched()) {
+                $companion = $buddy->getCompanion();
+                $this->line("<fg=yellow>You already have a companion: {$companion['name']} the {$companion['species']}.</>");
+                $this->line('<fg=gray>Use /buddy release first, or /buddy rename <name> to rename.</>');
+                return;
+            }
+
+            $personality = "A loyal {$name} who loves to observe your code and offer unsolicited opinions.";
+            $companion = $buddy->hatch($name, $personality);
+            $rarity = $companion['rarity'];
+            $stars = \App\Services\Buddy\CompanionTypes::RARITY_STARS[$rarity];
+            $color = \App\Services\Buddy\CompanionTypes::RARITY_COLORS[$rarity];
+            $shiny = $companion['shiny'] ? ' <fg=yellow>✨ SHINY!</>' : '';
+
+            $this->line('');
+            $this->line("  <fg=green;bold>🥚 Companion hatched!</>");
+            $this->line("  <fg=white>{$name}</> the <fg=white>{$companion['species']}</>");
+            $this->line("  <fg={$color}>{$stars}</>{$shiny}");
+            $this->line('');
+
+            // Show the sprite
+            foreach ($buddy->getFrame(0) as $spriteLine) {
+                $this->line("  <fg=white>{$spriteLine}</>");
+            }
+            $this->line('');
+            return;
+        }
+
+        if ($args === 'pet') {
+            if (! $buddy->isHatched()) {
+                $this->line('<fg=gray>Hatch a companion first: /buddy hatch <name></>');
+                return;
+            }
+            $buddy->pet();
+            $companion = $buddy->getCompanion();
+            $this->line('');
+            $this->line("  <fg=magenta>You pet {$companion['name']}!</> <fg=gray>They look very happy.</>");
+            // Show hearts animation
+            foreach (BuddyManager::PET_HEARTS as $heartLine) {
+                $this->line("  <fg=magenta>{$heartLine}</>");
+            }
+            $this->line('');
+            return;
+        }
+
+        if ($args === 'feed') {
+            if (! $buddy->isHatched()) {
+                $this->line('<fg=gray>Hatch a companion first: /buddy hatch <name></>');
+                return;
+            }
+            $companion = $buddy->getCompanion();
+            $treats = ['a tiny pizza', 'a pixel cookie', 'some byte-sized snacks', 'a bowl of ramen', 'a debugging donut'];
+            $treat = $treats[array_rand($treats)];
+            $buddy->quip('excited');
+            $this->line('');
+            $this->line("  <fg=green>You feed {$companion['name']} {$treat}!</> <fg=gray>They munch happily.</>");
+            $this->line('');
+            return;
+        }
+
+        if ($args === 'mute') {
+            if (! $buddy->isHatched()) {
+                $this->line('<fg=gray>Hatch a companion first: /buddy hatch <name></>');
+                return;
+            }
+            $buddy->mute();
+            $companion = $buddy->getCompanion();
+            $this->line("<fg=gray>{$companion['name']} has been muted. Use /buddy unmute to bring them back.</>");
+            return;
+        }
+
+        if ($args === 'unmute') {
+            if (! $buddy->isHatched()) {
+                $this->line('<fg=gray>Hatch a companion first: /buddy hatch <name></>');
+                return;
+            }
+            $buddy->unmute();
+            $companion = $buddy->getCompanion();
+            $this->line("<fg=green>{$companion['name']} is back!</>");
+            return;
+        }
+
+        if ($args === 'release') {
+            if (! $buddy->isHatched()) {
+                $this->line('<fg=gray>No companion to release.</>');
+                return;
+            }
+            $companion = $buddy->getCompanion();
+            $name = $companion['name'];
+            $buddy->release();
+            $this->line('');
+            $this->line("  <fg=yellow>🕊️ {$name} has been released back into the wild.</>");
+            $this->line('  <fg=gray>They wave goodbye with a tiny wing/hand/appendage.</>');
+            $this->line('');
+            return;
+        }
+
+        if (str_starts_with($args, 'rename ')) {
+            if (! $buddy->isHatched()) {
+                $this->line('<fg=gray>Hatch a companion first: /buddy hatch <name></>');
+                return;
+            }
+            $newName = trim(substr($args, 7));
+            if ($newName === '') {
+                $this->line('<fg=red>Usage: /buddy rename <new_name></>');
+                return;
+            }
+            $companion = $buddy->getCompanion();
+            $oldName = $companion['name'];
+            $buddy->rename($newName);
+            $this->line("<fg=green>{$oldName} is now called {$newName}!</>");
+            return;
+        }
+
+        if ($args === 'face') {
+            if (! $buddy->isHatched()) {
+                $this->line('<fg=gray>Hatch a companion first: /buddy hatch <name></>');
+                return;
+            }
+            $face = $buddy->getFace();
+            $companion = $buddy->getCompanion();
+            $this->line("  <fg=white>{$face}</> <fg=cyan>{$companion['name']}</>");
+            return;
+        }
+
+        if ($args === 'quip') {
+            if (! $buddy->isHatched()) {
+                $this->line('<fg=gray>Hatch a companion first: /buddy hatch <name></>');
+                return;
+            }
+            $buddy->quip($buddy->getCurrentMood());
+            $quip = $buddy->getQuip();
+            $this->line("  <fg=gray>{$quip}</>");
+            return;
+        }
+
+        if ($args === 'mood') {
+            if (! $buddy->isHatched()) {
+                $this->line('<fg=gray>Hatch a companion first: /buddy hatch <name></>');
+                return;
+            }
+            $companion = $buddy->getCompanion();
+            $mood = $buddy->getCurrentMood();
+            $emoji = $buddy->getMoodEmoji();
+            $this->line("  {$emoji} <fg=white>{$companion['name']}</> is feeling <fg=cyan>{$mood}</>.");
+            return;
+        }
+
+        $this->line('<fg=yellow>Usage:</> /buddy [card|status|hatch <name>|pet|feed|mute|unmute|release|rename <name>|face|quip|mood]');
+    }
+
+    private function handleDream(string $args): void
+    {
+        $consolidator = app(\App\Services\Memory\DreamConsolidator::class);
+        $stats = $consolidator->getMemoryStats();
+
+        $lines = [
+            $this->formatter()->keyValue('Memories', (string)$stats['count']),
+            $this->formatter()->keyValue('Total chars', (string)$stats['total_chars']),
+        ];
+
+        if ($stats['last_consolidated'] > 0) {
+            $lastDate = date('Y-m-d H:i', (int)($stats['last_consolidated'] / 1000));
+            $lines[] = $this->formatter()->keyValue('Last consolidated', $lastDate);
+        } else {
+            $lines[] = $this->formatter()->keyValue('Last consolidated', 'never');
+        }
+
+        $lines[] = '';
+        $lines[] = '<fg=gray>Running memory consolidation...</>';
+
+        $this->renderPanel('Dream: Memory Consolidation', $lines);
+
+        // Record the consolidation timestamp
+        $consolidator->recordConsolidation();
+
+        // Send consolidation prompt to the agent
+        $prompt = $consolidator->buildConsolidationPrompt(
+            $consolidator->getMemoryRoot(),
+            $consolidator->getTranscriptDir(),
+        );
+
+        $this->line('  <fg=cyan>Starting dream consolidation...</>');
+        $this->runAgentTurn(app(\App\Services\Agent\AgentLoop::class), $prompt);
     }
 
     private function runAgentTurn(AgentLoop $agent, string $input): void
@@ -1354,6 +2827,13 @@ class HaoCodeCommand extends Command
                 $this->line("  <fg=yellow>⚠  {$warn['message']}</>");
             }
 
+            // Auto-dream: background memory consolidation check
+            $autoDream = app(\App\Services\Memory\AutoDreamService::class);
+            $dreamResult = $autoDream->maybeExecute();
+            if ($dreamResult !== null && ($dreamResult['triggered'] ?? false)) {
+                $this->line("  <fg=gray>✨ Auto-dream triggered ({$dreamResult['hours_since']}h since last, {$dreamResult['sessions_reviewed']} sessions)</>");
+            }
+
         } catch (ApiErrorException $e) {
             $turnStatus->pause();
             $markdownOutput->finalize();
@@ -1367,6 +2847,7 @@ class HaoCodeCommand extends Command
             }
         } finally {
             $this->stopTurnStatusTicker($turnStatus, $previousAlarmHandler);
+            $this->refreshPromptHudState($agent);
         }
     }
 
@@ -1468,6 +2949,419 @@ class HaoCodeCommand extends Command
         }
 
         return $matchField === $pattern;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function extractContextFiles(array $messages): array
+    {
+        $files = [];
+        $cwd = rtrim(str_replace('\\', '/', (string) getcwd()), '/');
+
+        foreach ($messages as $message) {
+            if (($message['role'] ?? null) !== 'assistant') {
+                continue;
+            }
+
+            $content = $message['content'] ?? null;
+            if (! is_array($content)) {
+                continue;
+            }
+
+            foreach ($content as $block) {
+                if (($block['type'] ?? '') !== 'tool_use') {
+                    continue;
+                }
+
+                if (! in_array($block['name'] ?? '', ['Read', 'Edit', 'Write'], true)) {
+                    continue;
+                }
+
+                $filePath = $block['input']['file_path'] ?? null;
+                if (! is_string($filePath) || trim($filePath) === '') {
+                    continue;
+                }
+
+                $normalized = $this->normalizeContextFilePath($filePath, $cwd);
+                $files[$normalized] = $normalized;
+            }
+        }
+
+        return array_values($files);
+    }
+
+    private function normalizeContextFilePath(string $filePath, string $cwd): string
+    {
+        $normalized = str_replace('\\', '/', trim($filePath));
+
+        if ($normalized === '') {
+            return $normalized;
+        }
+
+        if ($cwd !== '' && str_starts_with($normalized, $cwd.'/')) {
+            return ltrim(substr($normalized, strlen($cwd)), '/');
+        }
+
+        return ltrim($normalized, './');
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function tokenizeArguments(string $args): array
+    {
+        $args = trim($args);
+        if ($args === '') {
+            return [];
+        }
+
+        preg_match_all('/"((?:\\\\.|[^"])*)"|\'((?:\\\\.|[^\'])*)\'|(\\S+)/', $args, $matches, PREG_SET_ORDER);
+
+        return array_values(array_map(function (array $match): string {
+            $value = $match[1] !== ''
+                ? stripcslashes($match[1])
+                : ($match[2] !== '' ? stripcslashes($match[2]) : ($match[3] ?? ''));
+
+            return trim($value);
+        }, $matches));
+    }
+
+    private function chooseStartupPrompt(mixed $printPrompt, mixed $deprecatedPrompt, mixed $argumentPrompt): ?string
+    {
+        foreach ([$printPrompt, $deprecatedPrompt, $argumentPrompt] as $candidate) {
+            if (is_string($candidate) && trim($candidate) !== '') {
+                return $candidate;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<int, string> $tokens
+     * @return array{0: array<string, array<int, string>>, 1: array<int, string>}
+     */
+    private function parseLongOptions(array $tokens): array
+    {
+        $options = [];
+        $positionals = [];
+
+        for ($index = 0; $index < count($tokens); $index++) {
+            $token = $tokens[$index];
+            if (! str_starts_with($token, '--')) {
+                $positionals[] = $token;
+
+                continue;
+            }
+
+            $withoutPrefix = substr($token, 2);
+            if (str_contains($withoutPrefix, '=')) {
+                [$name, $value] = explode('=', $withoutPrefix, 2);
+                $options[$name][] = $value;
+
+                continue;
+            }
+
+            $name = $withoutPrefix;
+            $next = $tokens[$index + 1] ?? null;
+            if ($next !== null && ! str_starts_with($next, '--')) {
+                $options[$name][] = $next;
+                $index++;
+
+                continue;
+            }
+
+            $options[$name][] = 'true';
+        }
+
+        return [$options, $positionals];
+    }
+
+    /**
+     * @param array<int, string> $values
+     * @return array<string, string>
+     */
+    private function parseKeyValueOptions(array $values): array
+    {
+        $parsed = [];
+
+        foreach ($values as $value) {
+            if (! str_contains($value, '=')) {
+                continue;
+            }
+
+            [$key, $entryValue] = explode('=', $value, 2);
+            $key = trim($key);
+            if ($key === '') {
+                continue;
+            }
+
+            $parsed[$key] = $entryValue;
+        }
+
+        ksort($parsed);
+
+        return $parsed;
+    }
+
+    /**
+     * @param array<int, string> $values
+     * @return array<string, string>
+     */
+    private function parseHeaderOptions(array $values): array
+    {
+        $parsed = [];
+
+        foreach ($values as $value) {
+            if (! str_contains($value, ':')) {
+                continue;
+            }
+
+            [$key, $entryValue] = explode(':', $value, 2);
+            $key = trim($key);
+            if ($key === '') {
+                continue;
+            }
+
+            $parsed[$key] = trim($entryValue);
+        }
+
+        ksort($parsed);
+
+        return $parsed;
+    }
+
+    private function buildCommitPrompt(string $args): string
+    {
+        $branch = trim((string) shell_exec('git branch --show-current 2>/dev/null')) ?: 'unknown';
+        $status = $this->collectCommandOutput('git status --short --branch 2>/dev/null', 4000);
+        $diffStat = $this->collectCommandOutput('git diff --stat HEAD 2>/dev/null', 4000);
+        $diff = $this->collectCommandOutput('git diff HEAD --no-color 2>/dev/null | head -250', 12000);
+        $recentCommits = $this->collectCommandOutput('git log --oneline -10 2>/dev/null', 4000);
+        $extraInstruction = trim($args);
+
+        return <<<PROMPT
+Create a git commit for the current repository changes.
+
+Repository context:
+- Current branch: {$branch}
+
+Git status:
+{$status}
+
+Diff stat:
+{$diffStat}
+
+Recent commits:
+{$recentCommits}
+
+Working tree diff preview:
+{$diff}
+
+Git safety protocol:
+- Never run `git commit --amend`.
+- Never use `--no-verify`, `--no-gpg-sign`, or interactive git flags unless the user explicitly asked.
+- Do not commit secrets such as `.env` files, credentials, or private keys.
+- If there is nothing meaningful to commit, stop and explain why.
+- Stage only the relevant files for the current change.
+- Create exactly one new commit.
+
+Task:
+1. Analyze the changes and infer the repository's commit style from recent history.
+2. Stage the relevant files.
+3. Create a single commit with a concise message focused on the intent of the change.
+4. After the commit succeeds, report the final commit hash and subject line.
+PROMPT
+        . ($extraInstruction !== '' ? "\n\nExtra user instruction:\n{$extraInstruction}\n" : '');
+    }
+
+    private function buildReviewPrompt(string $args): string
+    {
+        $git = app(GitContext::class);
+        $target = trim($args);
+        $branch = $git->getCurrentBranch();
+        $defaultBranch = $git->getDefaultBranch() ?: 'main';
+        $status = $this->collectCommandOutput('git status --short --branch 2>/dev/null', 4000);
+        $recentCommits = $this->collectCommandOutput('git log --oneline -10 2>/dev/null', 4000);
+        $diffCommand = "git diff --no-color {$defaultBranch}...HEAD 2>/dev/null | head -300";
+        $reviewLabel = "current branch against {$defaultBranch}";
+        $prContext = '';
+
+        if ($target !== '') {
+            $reviewLabel = "PR {$target}";
+            $prView = $this->collectCommandOutput('gh pr view '.escapeshellarg($target).' 2>/dev/null', 6000);
+            $prDiff = $this->collectCommandOutput('gh pr diff '.escapeshellarg($target).' 2>/dev/null | head -300', 16000);
+
+            if ($prView !== '(no output)' || $prDiff !== '(no output)') {
+                $prContext = "PR details:\n{$prView}\n\nPR diff preview:\n{$prDiff}";
+            }
+        }
+
+        $diff = $prContext !== ''
+            ? $prContext
+            : "Branch diff preview:\n".$this->collectCommandOutput($diffCommand, 16000);
+
+        return <<<PROMPT
+Review {$reviewLabel} like a rigorous code reviewer.
+
+Repository context:
+- Current branch: {$branch}
+- Default branch: {$defaultBranch}
+
+Git status:
+{$status}
+
+Recent commits:
+{$recentCommits}
+
+{$diff}
+
+Review instructions:
+- Findings come first.
+- Order findings by severity.
+- Focus on bugs, behavioral regressions, missing tests, security problems, performance risks, and API compatibility issues.
+- Cite concrete files, functions, or code paths when possible.
+- If you find no issues, say that explicitly and mention any residual risks or testing gaps.
+- Keep the summary brief after the findings.
+PROMPT;
+    }
+
+    private function collectCommandOutput(string $command, int $maxLength = 8000): string
+    {
+        $output = trim((string) shell_exec($command));
+        if ($output === '') {
+            return '(no output)';
+        }
+
+        return $this->truncate($output, $maxLength);
+    }
+
+    /**
+     * @param array<int, string> $rules
+     */
+    private function runAgentTurnWithSessionRules(AgentLoop $agent, string $input, array $rules): void
+    {
+        $previousRules = $this->sessionAllowRules;
+        foreach ($rules as $rule) {
+            if (! in_array($rule, $this->sessionAllowRules, true)) {
+                $this->sessionAllowRules[] = $rule;
+            }
+        }
+
+        try {
+            $this->runAgentTurn($agent, $input);
+        } finally {
+            $this->sessionAllowRules = $previousRules;
+        }
+    }
+
+    private function formatIsoTimestamp(string $timestamp): string
+    {
+        $unix = strtotime($timestamp);
+
+        return $unix === false ? $timestamp : date('Y-m-d H:i', $unix);
+    }
+
+    private function formatDuration(int $seconds): string
+    {
+        if ($seconds < 60) {
+            return "{$seconds}s";
+        }
+
+        if ($seconds < 3600) {
+            return floor($seconds / 60).'m '.($seconds % 60).'s';
+        }
+
+        $hours = floor($seconds / 3600);
+        $minutes = floor(($seconds % 3600) / 60);
+
+        return "{$hours}h {$minutes}m";
+    }
+
+    private function normalizeConfigKey(string $key): ?string
+    {
+        return match (strtolower(trim($key))) {
+            'model' => 'model',
+            'api_base_url', 'api-base-url', 'api', 'base-url' => 'api_base_url',
+            'max_tokens', 'max-tokens', 'tokens' => 'max_tokens',
+            'permission_mode', 'permission-mode', 'permission', 'permissions' => 'permission_mode',
+            'theme' => 'theme',
+            'output_style', 'output-style', 'style' => 'output_style',
+            default => null,
+        };
+    }
+
+    /**
+     * @return array<int, array{scope: string, path: string}>
+     */
+    private function configuredSettingsPaths(): array
+    {
+        $home = $_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir();
+        $globalPath = config('haocode.global_settings_path') ?: $home.'/.haocode/settings.json';
+
+        return [
+            ['scope' => 'global', 'path' => $globalPath],
+            ['scope' => 'project', 'path' => getcwd().'/.haocode/settings.json'],
+        ];
+    }
+
+    /**
+     * @return array<int, array{event: string, command: string, matcher: ?string, scope: string, path: string}>
+     */
+    private function loadConfiguredHooks(): array
+    {
+        $hooks = [];
+
+        foreach ($this->configuredSettingsPaths() as $entry) {
+            if (! file_exists($entry['path'])) {
+                continue;
+            }
+
+            $settings = json_decode((string) file_get_contents($entry['path']), true);
+            if (! is_array($settings) || ! isset($settings['hooks']) || ! is_array($settings['hooks'])) {
+                continue;
+            }
+
+            foreach ($settings['hooks'] as $event => $eventHooks) {
+                if (! is_array($eventHooks)) {
+                    continue;
+                }
+
+                foreach ($eventHooks as $hookConfig) {
+                    if (! is_array($hookConfig) || ! isset($hookConfig['command']) || ! is_string($hookConfig['command'])) {
+                        continue;
+                    }
+
+                    $hooks[] = [
+                        'event' => (string) $event,
+                        'command' => $hookConfig['command'],
+                        'matcher' => isset($hookConfig['matcher']) && is_string($hookConfig['matcher']) ? $hookConfig['matcher'] : null,
+                        'scope' => $entry['scope'],
+                        'path' => $entry['path'],
+                    ];
+                }
+            }
+        }
+
+        return $hooks;
+    }
+
+    private function formatSettingValue(mixed $value): string
+    {
+        if ($value === null || $value === '') {
+            return 'off';
+        }
+
+        if (is_bool($value)) {
+            return $value ? 'true' : 'false';
+        }
+
+        if (is_scalar($value)) {
+            return (string) $value;
+        }
+
+        return json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: 'unknown';
     }
 
     private function summarizeToolInput(string $toolName, array $input): string
@@ -1808,28 +3702,220 @@ class HaoCodeCommand extends Command
     private function redrawRawPrompt(string $cwd, string $currentLine): void
     {
         $this->writeRaw("\033[H\033[2J");
-        $this->output->write($this->formatter()->prompt($cwd));
-        $this->writeRaw($currentLine);
+        $this->redrawRawEditorLine($cwd, $currentLine);
     }
 
-    private function redrawRawInputScreen(AgentLoop $agent, string $cwd, string $currentLine): void
+    private function redrawRawInputScreen(
+        AgentLoop $agent,
+        string $cwd,
+        string $currentLine,
+        bool $continuationPrompt = false,
+        array $suggestions = [],
+        int $selectedSuggestionIndex = 0,
+    ): void
     {
         $this->writeRaw("\033[H\033[2J");
         $this->renderPromptFooter($agent);
-        $this->output->write($this->formatter()->prompt($cwd));
-        $this->writeRaw($currentLine);
+        $this->redrawRawEditorLine(
+            cwd: $cwd,
+            currentLine: $currentLine,
+            continuationPrompt: $continuationPrompt,
+            suggestions: $suggestions,
+            selectedSuggestionIndex: $selectedSuggestionIndex,
+        );
     }
 
     private function renderPromptFooter(AgentLoop $agent): void
     {
         $settings = app(SettingsManager::class);
-        $this->line($this->formatter()->promptFooter(
-            model: $settings->getModel(),
-            messageCount: $agent->getMessageHistory()->count(),
-            permissionMode: $settings->getPermissionMode()->value,
-            fastMode: $this->fastMode,
-            title: $agent->getSessionManager()->getTitle(),
+        if (! $settings->isStatuslineEnabled()) {
+            return;
+        }
+
+        foreach ($this->formatter()->promptFooterLines($this->buildPromptHudSnapshot($agent)) as $line) {
+            $this->line($line);
+        }
+    }
+
+    /**
+     * @return array{
+     *   model: string,
+     *   message_count: int,
+     *   permission_mode: string,
+     *   fast_mode: bool,
+     *   layout: string,
+     *   title: string|null,
+     *   project: string,
+     *   branch: string|null,
+     *   git_dirty: bool,
+     *   context_percent: float,
+     *   context_tokens: int,
+     *   context_limit: int,
+     *   context_state: string,
+     *   cost: float,
+     *   cost_warn: float,
+     *   show_tools: bool,
+     *   show_agents: bool,
+     *   show_todos: bool,
+     *   tools: array{
+     *     running: array<int, array{name: string, target: string|null}>,
+     *     completed: array<int, array{name: string, count: int}>
+     *   },
+     *   agents: array{
+     *     bash_tasks: int,
+     *     entries: array<int, array{
+     *       status: string,
+     *       agent_type: string,
+     *       description?: string|null,
+     *       elapsed_seconds: int,
+     *       pending_messages: int
+     *     }>
+     *   },
+     *   todo: array{
+     *     current: string|null,
+     *     completed: int,
+     *     total: int,
+     *     all_completed: bool
+     *   }|null
+     * }
+     */
+    private function buildPromptHudSnapshot(AgentLoop $agent): array
+    {
+        $settings = app(SettingsManager::class);
+        $git = app(GitContext::class);
+        $compactor = app(ContextCompactor::class);
+        $hud = app(PromptHudState::class);
+        $statusline = $settings->getStatuslineConfig();
+
+        $lastTurnTokens = $agent->getLastTurnInputTokens();
+        $contextState = $compactor->getWarningState($lastTurnTokens);
+
+        return [
+            'model' => $settings->getModel(),
+            'message_count' => $agent->getMessageHistory()->count(),
+            'permission_mode' => $settings->getPermissionMode()->value,
+            'fast_mode' => $this->fastMode,
+            'layout' => $statusline['layout'],
+            'title' => $agent->getSessionManager()->getTitle(),
+            'project' => $this->hudProjectLabel($git, $statusline['path_levels']),
+            'branch' => $git->isGitRepo() ? $git->getCurrentBranch() : null,
+            'git_dirty' => $git->isGitRepo() ? $git->hasUncommittedChanges() : false,
+            'context_percent' => (float) ($contextState['percentUsed'] ?? 0.0),
+            'context_tokens' => $lastTurnTokens,
+            'context_limit' => 180000,
+            'context_state' => ($contextState['isError'] ?? false) || ($contextState['isBlocking'] ?? false)
+                ? 'critical'
+                : (($contextState['isWarning'] ?? false) ? 'warning' : 'normal'),
+            'cost' => $agent->getEstimatedCost(),
+            'cost_warn' => $agent->getCostTracker()->getWarnThreshold(),
+            'show_tools' => $statusline['show_tools'],
+            'show_agents' => $statusline['show_agents'],
+            'show_todos' => $statusline['show_todos'],
+            'tools' => $hud->summarizeTools(),
+            'agents' => $this->summarizeBackgroundHud(),
+            'todo' => $hud->summarizeTodos(),
+        ];
+    }
+
+    private function refreshPromptHudState(AgentLoop $agent): void
+    {
+        $entries = $agent->getSessionManager()->loadSession($agent->getSessionManager()->getSessionId());
+        app(PromptHudState::class)->hydrateFromSessionEntries($entries);
+    }
+
+    private function hudProjectLabel(GitContext $git, int $pathLevels): string
+    {
+        $cwd = getcwd() ?: '.';
+
+        if (! $git->isGitRepo()) {
+            return basename($cwd);
+        }
+
+        $root = $git->getGitRoot();
+        $relative = ltrim(str_replace($root, '', $cwd), DIRECTORY_SEPARATOR);
+        if ($relative === '') {
+            return basename($root);
+        }
+
+        $segments = array_values(array_filter(explode(DIRECTORY_SEPARATOR, $relative)));
+        $tail = array_slice($segments, -max(1, min(3, $pathLevels)));
+
+        return basename($root).'/'.implode('/', $tail);
+    }
+
+    private function parseStatuslineToggle(?string $value): ?bool
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        return match (strtolower(trim($value))) {
+            'on', 'enable', 'enabled', 'true', 'yes' => true,
+            'off', 'disable', 'disabled', 'false', 'no' => false,
+            default => null,
+        };
+    }
+
+    /**
+     * @return array{
+     *   bash_tasks: int,
+     *   entries: array<int, array{
+     *     status: string,
+     *     agent_type: string,
+     *     description?: string|null,
+     *     elapsed_seconds: int,
+     *     pending_messages: int
+     *   }>
+     * }
+     */
+    private function summarizeBackgroundHud(): array
+    {
+        $manager = app(BackgroundAgentManager::class);
+        $states = $manager->list();
+
+        $running = array_values(array_filter(
+            $states,
+            static fn (array $state): bool => in_array($state['status'] ?? 'pending', ['pending', 'running'], true),
         ));
+        $recentFinished = array_values(array_filter(
+            $states,
+            static fn (array $state): bool => in_array($state['status'] ?? '', ['completed', 'error'], true),
+        ));
+
+        usort($recentFinished, static fn (array $left, array $right): int => ($right['updated_at'] ?? 0) <=> ($left['updated_at'] ?? 0));
+
+        $entries = [];
+        $seen = [];
+        foreach (array_merge($running, array_slice($recentFinished, 0, 2)) as $state) {
+            $id = (string) ($state['id'] ?? '');
+            if ($id === '' || isset($seen[$id])) {
+                continue;
+            }
+            $seen[$id] = true;
+
+            $createdAt = (int) ($state['created_at'] ?? time());
+            $updatedAt = (int) ($state['updated_at'] ?? $createdAt);
+            $elapsed = in_array($state['status'] ?? '', ['completed', 'error'], true)
+                ? max(0, $updatedAt - $createdAt)
+                : max(0, time() - $createdAt);
+
+            $entries[] = [
+                'status' => (string) ($state['status'] ?? 'running'),
+                'agent_type' => (string) ($state['agent_type'] ?? 'agent'),
+                'description' => isset($state['description']) && is_string($state['description']) ? $state['description'] : null,
+                'elapsed_seconds' => $elapsed,
+                'pending_messages' => (int) ($state['pending_messages'] ?? 0),
+            ];
+
+            if (count($entries) >= 3) {
+                break;
+            }
+        }
+
+        return [
+            'bash_tasks' => count(BashTool::listTasks()),
+            'entries' => $entries,
+        ];
     }
 
     private function readReverseHistorySearch($handle, array $history, string $currentLine, string $cwd): ?string
@@ -1850,7 +3936,7 @@ class HaoCodeCommand extends Command
                 total: count($matches),
             ), false);
 
-            $char = fread($handle, 1);
+            $char = $this->readRawCharacter($handle);
             if ($char === false || $char === '') {
                 $this->writeRaw("\r\033[2K");
                 $this->output->write($this->formatter()->prompt($cwd));
@@ -1884,7 +3970,7 @@ class HaoCodeCommand extends Command
             }
 
             if ($char === "\x7f" || $char === "\x08") {
-                $query = mb_substr($query, 0, max(0, mb_strlen($query) - 1));
+                $query = $this->trimLastCharacter($query);
                 $selectedIndex = 0;
                 continue;
             }
@@ -1922,5 +4008,138 @@ class HaoCodeCommand extends Command
     private function writeRaw(string $text): void
     {
         $this->output->write($text, false, \Symfony\Component\Console\Output\OutputInterface::OUTPUT_RAW);
+    }
+
+    private function redrawRawEditorLine(
+        string $cwd,
+        string $currentLine,
+        ?AutocompleteEngine $autocomplete = null,
+        bool $continuationPrompt = false,
+        array $suggestions = [],
+        int $selectedSuggestionIndex = 0,
+    ): void
+    {
+        $autocomplete ??= app(AutocompleteEngine::class);
+        $ghostText = $autocomplete->getGhostText($currentLine);
+
+        $this->writeRaw("\r\033[J");
+        $this->output->write($continuationPrompt ? $this->formatter()->continuationPrompt() : $this->formatter()->prompt($cwd));
+        $this->writeRaw($currentLine);
+
+        if ($ghostText !== null && $ghostText !== '') {
+            $this->output->write($autocomplete->renderGhostText($ghostText), false);
+        }
+
+        if ($suggestions !== []) {
+            $maxLabelWidth = max(array_map(fn ($s) => mb_strlen($s['label']), $suggestions));
+            $labelWidth = max(16, $maxLabelWidth + 2);
+            $this->writeRaw("\r\n");
+            foreach ($suggestions as $index => $suggestion) {
+                $this->writeRaw("\r");
+                $this->line($autocomplete->renderSuggestion($suggestion, $index === $selectedSuggestionIndex, $labelWidth));
+            }
+            $this->writeRaw(sprintf("\033[%dA", count($suggestions) + 1));
+        }
+
+        $cursorWidth = $this->rawPromptWidth($cwd, $continuationPrompt) + $this->displayWidth($currentLine);
+        $this->writeRaw("\r");
+        if ($cursorWidth > 0) {
+            $this->writeRaw(sprintf("\033[%dC", $cursorWidth));
+        }
+    }
+
+    private function refreshLiveSuggestions(AutocompleteEngine $autocomplete, string $currentLine, int $selectedSuggestionIndex = 0): array
+    {
+        $suggestions = $autocomplete->getLiveSuggestions($currentLine);
+        if ($suggestions === []) {
+            return [[], 0];
+        }
+
+        return [$suggestions, min(max(0, $selectedSuggestionIndex), count($suggestions) - 1)];
+    }
+
+    private function wrapSuggestionIndex(int $index, int $count): int
+    {
+        if ($count <= 0) {
+            return 0;
+        }
+
+        $wrapped = $index % $count;
+
+        return $wrapped < 0 ? $wrapped + $count : $wrapped;
+    }
+
+    private function applySelectedSuggestion(AutocompleteEngine $autocomplete, string $currentLine, string $label): ?string
+    {
+        if (str_starts_with($currentLine, '/')
+            || preg_match('/@(\S*)$/', $currentLine) === 1) {
+            $completed = $autocomplete->acceptSuggestion($currentLine, $label);
+
+            return $completed === $currentLine ? null : $completed;
+        }
+
+        return null;
+    }
+
+    private function readRawCharacter($handle): string|false
+    {
+        $char = fread($handle, 1);
+        if ($char === false || $char === '') {
+            return $char;
+        }
+
+        $byte = ord($char);
+        if ($byte < 0x80 || $byte === 0x1b) {
+            return $char;
+        }
+
+        $expectedBytes = $this->expectedUtf8Bytes($byte);
+        if ($expectedBytes === 1) {
+            return $char;
+        }
+
+        $remaining = '';
+        while (strlen($remaining) < $expectedBytes - 1) {
+            $chunk = fread($handle, $expectedBytes - 1 - strlen($remaining));
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+            $remaining .= $chunk;
+        }
+
+        return InputSanitizer::sanitize($char . $remaining);
+    }
+
+    private function expectedUtf8Bytes(int $leadByte): int
+    {
+        return match (true) {
+            ($leadByte & 0xE0) === 0xC0 => 2,
+            ($leadByte & 0xF0) === 0xE0 => 3,
+            ($leadByte & 0xF8) === 0xF0 => 4,
+            default => 1,
+        };
+    }
+
+    private function trimLastCharacter(string $text): string
+    {
+        if ($text === '') {
+            return '';
+        }
+
+        if (function_exists('mb_substr') && function_exists('mb_strlen')) {
+            return mb_substr($text, 0, max(0, mb_strlen($text, 'UTF-8') - 1), 'UTF-8');
+        }
+
+        return substr($text, 0, -1);
+    }
+
+    private function rawPromptWidth(string $cwd, bool $continuationPrompt): int
+    {
+        return $this->displayWidth($continuationPrompt ? '… ' : "{$cwd} ❯ ");
+    }
+
+    private function displayWidth(string $text): int
+    {
+        return function_exists('mb_strwidth') ? mb_strwidth($text, 'UTF-8') : strlen($text);
     }
 }

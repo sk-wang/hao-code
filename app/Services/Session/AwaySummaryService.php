@@ -42,6 +42,10 @@ PROMPT;
      */
     public function generateSummary(array $entries): ?string
     {
+        if ($this->shouldPreferLocalGeneration()) {
+            return $this->buildLocalSummary($entries);
+        }
+
         $messages = $this->entriesToMessages($entries);
 
         if (count($messages) < 2) {
@@ -113,7 +117,7 @@ PROMPT;
                 'content-type' => 'application/json',
             ],
             'json' => [
-                'model' => self::HAIKU_MODEL,
+                'model' => $this->resolveModel(),
                 'max_tokens' => 150,
                 'system' => self::PROMPT,
                 'messages' => [
@@ -126,5 +130,128 @@ PROMPT;
         $summary = trim($body['content'][0]['text'] ?? '');
 
         return $summary !== '' ? $summary : null;
+    }
+
+    private function shouldPreferLocalGeneration(): bool
+    {
+        return $this->isKimiCodingEndpoint();
+    }
+
+    private function isKimiCodingEndpoint(): bool
+    {
+        return str_contains(strtolower($this->baseUrl), 'api.kimi.com/coding');
+    }
+
+    private function resolveModel(): string
+    {
+        return $this->isKimiCodingEndpoint()
+            ? 'kimi-for-coding'
+            : self::HAIKU_MODEL;
+    }
+
+    private function buildLocalSummary(array $entries): ?string
+    {
+        $latestRequest = $this->latestUserRequest($entries);
+        $toolNames = $this->toolNames($entries);
+        $assistantTurns = count(array_filter(
+            $entries,
+            static fn (array $entry): bool => ($entry['type'] ?? null) === 'assistant_turn',
+        ));
+
+        $parts = [];
+
+        if ($latestRequest !== null) {
+            $parts[] = 'The last request was "' . $this->truncate($latestRequest, 120) . '".';
+        }
+
+        if ($toolNames !== []) {
+            $parts[] = 'The assistant used ' . $this->joinList($toolNames) . ' while working.';
+        } elseif ($assistantTurns > 0) {
+            $parts[] = "The assistant completed {$assistantTurns} response" . ($assistantTurns === 1 ? '' : 's') . ' before you returned.';
+        }
+
+        if ($parts === []) {
+            return null;
+        }
+
+        $parts[] = 'Continue from the latest restored transcript.';
+
+        return implode(' ', array_slice($parts, 0, 3));
+    }
+
+    private function latestUserRequest(array $entries): ?string
+    {
+        for ($index = count($entries) - 1; $index >= 0; $index--) {
+            $entry = $entries[$index];
+            if (($entry['type'] ?? null) !== 'user_message') {
+                continue;
+            }
+
+            $content = trim((string) ($entry['content'] ?? ''));
+            if ($content === '' || str_starts_with($content, '/')) {
+                continue;
+            }
+
+            return preg_replace('/\s+/u', ' ', $content) ?? $content;
+        }
+
+        return null;
+    }
+
+    private function toolNames(array $entries): array
+    {
+        $names = [];
+
+        foreach ($entries as $entry) {
+            if (($entry['type'] ?? null) !== 'assistant_turn') {
+                continue;
+            }
+
+            $blocks = $entry['message']['content'] ?? null;
+            if (! is_array($blocks)) {
+                continue;
+            }
+
+            foreach ($blocks as $block) {
+                $name = $block['name'] ?? null;
+                if (($block['type'] ?? null) !== 'tool_use' || ! is_string($name) || $name === '') {
+                    continue;
+                }
+
+                if (! in_array($name, $names, true)) {
+                    $names[] = $name;
+                }
+            }
+        }
+
+        return $names;
+    }
+
+    private function joinList(array $items): string
+    {
+        $count = count($items);
+
+        if ($count === 1) {
+            return $items[0];
+        }
+
+        if ($count === 2) {
+            return $items[0] . ' and ' . $items[1];
+        }
+
+        $last = array_pop($items);
+
+        return implode(', ', $items) . ', and ' . $last;
+    }
+
+    private function truncate(string $text, int $max): string
+    {
+        if (function_exists('mb_strimwidth')) {
+            return mb_strimwidth($text, 0, $max, '…', 'UTF-8');
+        }
+
+        return strlen($text) > $max
+            ? substr($text, 0, $max - 3) . '...'
+            : $text;
     }
 }
