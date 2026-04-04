@@ -314,4 +314,67 @@ class SettingsManagerTest extends TestCase
             @rmdir($tmpDir);
         }
     }
+
+    public function test_global_and_project_settings_are_used_for_runtime_configuration(): void
+    {
+        $tmpDir = sys_get_temp_dir() . '/smtest_runtime_' . getmypid() . '_' . uniqid();
+        $globalDir = $tmpDir . '/global/.haocode';
+        $projectDir = $tmpDir . '/project';
+        $projectSettingsDir = $projectDir . '/.haocode';
+        mkdir($globalDir, 0755, true);
+        mkdir($projectSettingsDir, 0755, true);
+
+        file_put_contents($globalDir . '/settings.json', json_encode([
+            'api_key' => 'global-api-key',
+            'api_base_url' => 'https://global.api.example',
+            'max_tokens' => 4096,
+            'permission_mode' => 'plan',
+        ]));
+
+        file_put_contents($projectSettingsDir . '/settings.json', json_encode([
+            'model' => 'claude-opus-4-20250514',
+            'max_tokens' => 8192,
+        ]));
+
+        config([
+            'haocode.api_key' => '',
+            'haocode.api_base_url' => 'https://config.api.example',
+            'haocode.max_tokens' => 1024,
+            'haocode.model' => 'claude-sonnet-4-20250514',
+            'haocode.permission_mode' => 'default',
+            'haocode.global_settings_path' => $globalDir . '/settings.json',
+        ]);
+
+        $originalApiKey = getenv('ANTHROPIC_API_KEY');
+        putenv('ANTHROPIC_API_KEY=env-api-key');
+
+        $origDir = getcwd();
+        chdir($projectDir);
+
+        try {
+            $settings = new SettingsManager;
+
+            $this->assertSame('global-api-key', $settings->getApiKey());
+            $this->assertSame('https://global.api.example', $settings->getBaseUrl());
+            $this->assertSame(8192, $settings->getMaxTokens());
+            $this->assertSame('claude-opus-4-20250514', $settings->getModel());
+            $this->assertSame(\App\Services\Permissions\PermissionMode::Plan, $settings->getPermissionMode());
+        } finally {
+            chdir($origDir);
+
+            if ($originalApiKey === false) {
+                putenv('ANTHROPIC_API_KEY');
+            } else {
+                putenv("ANTHROPIC_API_KEY={$originalApiKey}");
+            }
+
+            @unlink($globalDir . '/settings.json');
+            @unlink($projectSettingsDir . '/settings.json');
+            @rmdir($globalDir);
+            @rmdir($projectSettingsDir);
+            @rmdir(dirname($globalDir));
+            @rmdir($projectDir);
+            @rmdir($tmpDir);
+        }
+    }
 }

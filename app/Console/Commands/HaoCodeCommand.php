@@ -78,7 +78,7 @@ class HaoCodeCommand extends Command
         $this->applyStartupOverrides($settings);
 
         if (empty($settings->getApiKey())) {
-            $this->error('ANTHROPIC_API_KEY is not set. Please set it in your environment or .haocode/settings.json');
+            $this->error('ANTHROPIC_API_KEY is not set. Please set it in your environment, ~/.haocode/settings.json, or .haocode/settings.json');
 
             return 1;
         }

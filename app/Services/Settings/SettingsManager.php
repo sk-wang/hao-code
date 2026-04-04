@@ -20,13 +20,25 @@ class SettingsManager
 
     public function getApiKey(): string
     {
-        return config('haocode.api_key') ?: getenv('ANTHROPIC_API_KEY') ?: '';
+        $settings = $this->loadProjectSettings();
+        $apiKey = $settings['api_key']
+            ?? config('haocode.api_key')
+            ?: getenv('ANTHROPIC_API_KEY')
+            ?: '';
+
+        return is_string($apiKey) ? $apiKey : '';
     }
 
     public function getModel(): string
     {
+        $settings = $this->loadProjectSettings();
         $model = $this->runtimeOverrides['model']
+            ?? $settings['model']
             ?? config('haocode.model', 'claude-sonnet-4-20250514');
+
+        if (! is_string($model) || trim($model) === '') {
+            $model = 'claude-sonnet-4-20250514';
+        }
 
         // Kimi's Anthropic-compatible coding endpoint expects its own model name.
         if ($this->isKimiCodingEndpoint() && str_starts_with($model, 'claude-')) {
@@ -38,20 +50,37 @@ class SettingsManager
 
     public function getBaseUrl(): string
     {
-        return $this->runtimeOverrides['api_base_url']
+        $settings = $this->loadProjectSettings();
+        $baseUrl = $this->runtimeOverrides['api_base_url']
+            ?? $settings['api_base_url']
             ?? config('haocode.api_base_url', 'https://api.anthropic.com');
+
+        return is_string($baseUrl) && trim($baseUrl) !== ''
+            ? $baseUrl
+            : 'https://api.anthropic.com';
     }
 
     public function getMaxTokens(): int
     {
-        return $this->runtimeOverrides['max_tokens']
+        $settings = $this->loadProjectSettings();
+        $maxTokens = $this->runtimeOverrides['max_tokens']
+            ?? $settings['max_tokens']
             ?? config('haocode.max_tokens', 16384);
+
+        return is_numeric($maxTokens) ? (int) $maxTokens : 16384;
     }
 
     public function getPermissionMode(): PermissionMode
     {
+        $settings = $this->loadProjectSettings();
         $mode = $this->runtimeOverrides['permission_mode']
+            ?? $settings['permission_mode']
             ?? config('haocode.permission_mode', 'default');
+
+        if (! is_string($mode)) {
+            return PermissionMode::Default;
+        }
+
         return PermissionMode::tryFrom($mode) ?? PermissionMode::Default;
     }
 

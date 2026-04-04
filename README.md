@@ -11,7 +11,7 @@ An interactive CLI coding agent built with Laravel for Claude-, Kimi-, and Anthr
 
 ![Hao Code terminal screenshot](docs/images/hao-code-terminal.png)
 
-_Real terminal session running `php artisan hao-code`._
+_Real terminal session running Hao Code in the terminal._
 
 ## Highlights
 
@@ -24,7 +24,7 @@ _Real terminal session running `php artisan hao-code`._
 
 ## Jump To
 
-[Quick Start](#quick-start) · [Launch Modes](#launch-modes) · [Built-in HUD](#built-in-hud) · [Slash Commands](#slash-commands) · [Built-in Tools](#built-in-tools) · [Configuration](#configuration) · [Architecture](#architecture) · [Skills System](#skills-system) · [Permissions and Hooks](#permissions-and-hooks) · [Testing](#testing)
+[Quick Start](#quick-start) · [Global Install](#global-install) · [Launch Modes](#launch-modes) · [Built-in HUD](#built-in-hud) · [Slash Commands](#slash-commands) · [Built-in Tools](#built-in-tools) · [Configuration](#configuration) · [Architecture](#architecture) · [Skills System](#skills-system) · [Permissions and Hooks](#permissions-and-hooks) · [Testing](#testing)
 
 ---
 
@@ -59,8 +59,48 @@ _Real terminal session running `php artisan hao-code`._
 
 ## Quick Start
 
+### Global install
+
+Install from Packagist after publishing:
+
 ```bash
-git clone https://github.com/your-username/hao-code.git
+composer global require sk-wang/hao-code
+```
+
+Install directly from GitHub before publishing:
+
+```bash
+composer global config repositories.hao-code vcs https://github.com/sk-wang/hao-code.git
+composer global require sk-wang/hao-code:dev-main
+```
+
+Make sure Composer's global bin directory is on your `PATH`:
+
+```bash
+export PATH="$(composer global config bin-dir --absolute):$PATH"
+```
+
+Configure your API key in `~/.haocode/settings.json`:
+
+```bash
+mkdir -p ~/.haocode
+cat > ~/.haocode/settings.json <<'JSON'
+{
+  "api_key": "sk-ant-your-key-here"
+}
+JSON
+```
+
+Launch Hao Code from any directory:
+
+```bash
+hao-code
+```
+
+### Local development
+
+```bash
+git clone https://github.com/sk-wang/hao-code.git
 cd hao-code
 composer install
 cp .env.example .env
@@ -86,10 +126,22 @@ php artisan hao-code
 ### Interactive
 
 ```bash
+hao-code
+```
+
+Or from a source checkout:
+
+```bash
 php artisan hao-code
 ```
 
 ### Single-shot
+
+```bash
+hao-code --print="Explain what AgentLoop.php does"
+```
+
+Or:
 
 ```bash
 php artisan hao-code --print="Explain what AgentLoop.php does"
@@ -98,16 +150,34 @@ php artisan hao-code --print="Explain what AgentLoop.php does"
 ### Resume the latest session
 
 ```bash
+hao-code --continue
+```
+
+Or:
+
+```bash
 php artisan hao-code --continue
 ```
 
 ### Resume a specific session
 
 ```bash
+hao-code --resume=20260404_abcdef12
+```
+
+Or:
+
+```bash
 php artisan hao-code --resume=20260404_abcdef12
 ```
 
 ### Resume and fork into a new branch
+
+```bash
+hao-code --resume=20260404_abcdef12 --fork-session --name="alt-approach"
+```
+
+Or:
 
 ```bash
 php artisan hao-code --resume=20260404_abcdef12 --fork-session --name="alt-approach"
@@ -289,7 +359,17 @@ Hao Code reads:
 
 - global settings from `~/.haocode/settings.json`
 - project settings from `.haocode/settings.json`
-- environment variables from `.env`
+- environment variables from `.env` in a source checkout
+
+Example global settings:
+
+```json
+{
+  "api_key": "sk-ant-...",
+  "model": "claude-sonnet-4-20250514",
+  "permission_mode": "default"
+}
+```
 
 ### Common environment variables
 

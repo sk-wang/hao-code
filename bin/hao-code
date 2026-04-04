@@ -1,0 +1,50 @@
+#!/usr/bin/env php
+<?php
+
+use Illuminate\Foundation\Application;
+use Symfony\Component\Console\Input\ArgvInput;
+
+define('LARAVEL_START', microtime(true));
+
+$packageRoot = dirname(__DIR__);
+$composerBinDir = $GLOBALS['_composer_bin_dir'] ?? null;
+
+$autoloadCandidates = array_filter([
+    $GLOBALS['_composer_autoload_path'] ?? null,
+    is_string($composerBinDir) ? dirname($composerBinDir).'/autoload.php' : null,
+    $packageRoot.'/vendor/autoload.php',
+    dirname(__DIR__, 3).'/autoload.php',
+], static fn ($path) => is_string($path) && $path !== '');
+
+$autoloadPath = null;
+
+foreach ($autoloadCandidates as $candidate) {
+    if (is_file($candidate)) {
+        $autoloadPath = $candidate;
+        break;
+    }
+}
+
+if ($autoloadPath === null) {
+    fwrite(STDERR, "Unable to locate Composer autoload.php.\n");
+    exit(1);
+}
+
+$composerVendorDir = dirname($autoloadPath);
+putenv("COMPOSER_VENDOR_DIR={$composerVendorDir}");
+$_ENV['COMPOSER_VENDOR_DIR'] = $composerVendorDir;
+$_SERVER['COMPOSER_VENDOR_DIR'] = $composerVendorDir;
+
+require $autoloadPath;
+
+/** @var Application $app */
+$app = require $packageRoot.'/bootstrap/app.php';
+
+$argv = $_SERVER['argv'] ?? ['hao-code'];
+array_splice($argv, 1, 0, ['hao-code']);
+$_SERVER['argv'] = $argv;
+$_SERVER['argc'] = count($argv);
+
+$status = $app->handleCommand(new ArgvInput($argv));
+
+exit($status);
