@@ -54,6 +54,14 @@ DESC;
         $filePath = $input['file_path'];
         $content = $input['content'];
 
+        // Enforce read-before-write for existing files (prevents blind overwrites)
+        if (file_exists($filePath) && !$context->wasFileRead($filePath)) {
+            return ToolResult::error(
+                "This is an existing file. You MUST use the Read tool first to read the file's contents before overwriting. " .
+                "This tool will fail if you did not read the file first."
+            );
+        }
+
         // Record file history before overwriting
         if (file_exists($filePath)) {
             try {

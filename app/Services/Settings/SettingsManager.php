@@ -654,6 +654,10 @@ class SettingsManager
             'statusline_show_tools' => $statusline['show_tools'],
             'statusline_show_agents' => $statusline['show_agents'],
             'statusline_show_todos' => $statusline['show_todos'],
+            'thinking_enabled' => $this->isThinkingEnabled(),
+            'thinking_budget' => $this->getThinkingBudget(),
+            'effort_level' => $this->getEffortLevel(),
+            'vim_mode' => $this->isVimMode(),
             'api_key_set' => !empty($this->getApiKey()),
         ];
     }

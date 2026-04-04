@@ -3514,9 +3514,16 @@ Recent commits:
 {$diff}
 
 Review instructions:
-- Findings come first.
-- Order findings by severity.
-- Focus on bugs, behavioral regressions, missing tests, security problems, performance risks, and API compatibility issues.
+- Findings come first, ordered by severity.
+- Tag each finding with a severity level: [CRITICAL], [HIGH], [MEDIUM], or [LOW].
+- Check each of these categories:
+  1. Code correctness — logic bugs, off-by-one, null handling, type errors
+  2. Security — injection, auth bypass, secrets exposure, OWASP top 10
+  3. Performance — N+1 queries, missing indexes, unnecessary allocations
+  4. Behavioral regressions — does this change break existing behavior?
+  5. Test coverage — are new paths tested? Are edge cases covered?
+  6. API compatibility — breaking changes, missing migration, backwards compat
+  7. Following project conventions — naming, patterns, style consistency
 - Cite concrete files, functions, or code paths when possible.
 - If you find no issues, say that explicitly and mention any residual risks or testing gaps.
 - Keep the summary brief after the findings.

@@ -83,4 +83,34 @@ return [
     |--------------------------------------------------------------------------
     */
     'stream_render_interval_ms' => (int) env('HAOCODE_STREAM_RENDER_INTERVAL_MS', 120),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Extended Thinking
+    |--------------------------------------------------------------------------
+    */
+    'thinking_enabled' => filter_var(env('HAOCODE_THINKING', false), FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE) ?? false,
+    'thinking_budget' => (int) env('HAOCODE_THINKING_BUDGET', 10000),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Effort Level (low, medium, high, max, auto)
+    |--------------------------------------------------------------------------
+    */
+    'effort_level' => env('HAOCODE_EFFORT_LEVEL', 'auto'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Editor Mode (normal, vim)
+    |--------------------------------------------------------------------------
+    */
+    'editor_mode' => env('HAOCODE_EDITOR_MODE', 'normal'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Cost Thresholds
+    |--------------------------------------------------------------------------
+    */
+    'cost_warn_threshold' => (float) env('HAOCODE_COST_WARN', 5.00),
+    'cost_stop_threshold' => (float) env('HAOCODE_COST_STOP', 50.00),
 ];

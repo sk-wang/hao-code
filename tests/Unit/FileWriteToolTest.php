@@ -67,6 +67,7 @@ class FileWriteToolTest extends TestCase
     {
         $path = $this->tmpPath('.txt');
         file_put_contents($path, 'old content');
+        $this->context->recordFileRead($path);
 
         $result = $this->tool->call([
             'file_path' => $path,
@@ -80,6 +81,7 @@ class FileWriteToolTest extends TestCase
     {
         $path = $this->tmpPath('.txt');
         file_put_contents($path, 'old content');
+        $this->context->recordFileRead($path);
 
         $this->tool->call([
             'file_path' => $path,
@@ -87,6 +89,21 @@ class FileWriteToolTest extends TestCase
         ], $this->context);
 
         $this->assertSame('new content', file_get_contents($path));
+    }
+
+    public function test_it_rejects_overwrite_without_prior_read(): void
+    {
+        $path = $this->tmpPath('.txt');
+        file_put_contents($path, 'old content');
+
+        $result = $this->tool->call([
+            'file_path' => $path,
+            'content' => 'new content',
+        ], $this->context);
+
+        $this->assertTrue($result->isError);
+        $this->assertStringContainsString('Read tool first', $result->output);
+        $this->assertSame('old content', file_get_contents($path));
     }
 
     // ─── directory creation ───────────────────────────────────────────────

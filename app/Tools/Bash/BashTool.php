@@ -430,6 +430,13 @@ DESC;
             ];
         }
 
+        if ($baseCommand === 'curl' && $exitCode === 22) {
+            return [
+                'isExpected' => false,
+                'note' => '[Note: Server returned an HTTP error (4xx/5xx). Check the URL and authentication.]',
+            ];
+        }
+
         return ['isExpected' => false, 'note' => null];
     }
 
