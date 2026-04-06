@@ -311,6 +311,18 @@ DESC;
 
     public function maxResultSizeChars(): int
     {
-        return 20000;
+        return 100000;
+    }
+
+    public function getActivityDescription(array $input): ?string
+    {
+        $pattern = $input['pattern'] ?? 'pattern';
+
+        return 'Searching for ' . (mb_strlen($pattern) > 30 ? mb_substr($pattern, 0, 30) . '…' : $pattern);
+    }
+
+    public function isSearchOrReadCommand(array $input): array
+    {
+        return ['isSearch' => true, 'isRead' => false, 'isList' => false];
     }
 }

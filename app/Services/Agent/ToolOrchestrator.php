@@ -4,6 +4,7 @@ namespace App\Services\Agent;
 
 use App\Services\Hooks\HookExecutor;
 use App\Services\Permissions\PermissionChecker;
+use App\Services\ToolResult\ToolResultStorage;
 use App\Tools\ToolRegistry;
 use App\Tools\ToolUseContext;
 use App\Tools\ToolResult;
@@ -11,12 +12,23 @@ use App\Tools\ToolResult;
 class ToolOrchestrator
 {
     private $permissionPromptHandler = null;
+    private ?ToolResultStorage $toolResultStorage = null;
 
     public function __construct(
         private readonly ToolRegistry $toolRegistry,
         private readonly PermissionChecker $permissionChecker,
         private readonly HookExecutor $hookExecutor,
     ) {}
+
+    public function setToolResultStorage(ToolResultStorage $storage): void
+    {
+        $this->toolResultStorage = $storage;
+    }
+
+    public function getToolResultStorage(): ?ToolResultStorage
+    {
+        return $this->toolResultStorage;
+    }
 
     public function setPermissionPromptHandler(callable $handler): void
     {
@@ -118,6 +130,10 @@ class ToolOrchestrator
         $pids = [];
         $results = [];
 
+        // Capture the parent's readFileState snapshot before forking so we can
+        // detect which entries the child added.
+        $parentStateBefore = ToolUseContext::getReadFileStateSnapshot();
+
         foreach ($blocks as $idx => $block) {
             $tempFile = sys_get_temp_dir() . '/haocode_tool_' . $idx . '_' . getmypid();
             $tempFiles[$idx] = $tempFile;
@@ -133,7 +149,12 @@ class ToolOrchestrator
             if ($pid === 0) {
                 // Child process
                 $result = $this->executeSingleTool($block, $context, null, null);
-                file_put_contents($tempFile, serialize($result));
+                // Serialize both the tool result and any readFileState changes so the
+                // parent can merge them back (fixes read-before-write across fork).
+                $childState = ToolUseContext::getReadFileStateSnapshot();
+                $newEntries = array_diff_key($childState, $parentStateBefore);
+                $payload = ['result' => $result, 'readState' => $newEntries];
+                file_put_contents($tempFile, serialize($payload));
                 exit(0);
             }
 
@@ -149,11 +170,22 @@ class ToolOrchestrator
             pcntl_waitpid($pid, $status);
             if (isset($tempFiles[$idx]) && file_exists($tempFiles[$idx])) {
                 $data = @unserialize(file_get_contents($tempFiles[$idx]));
-                $results[$idx] = $data ?: [
-                    'tool_use_id' => $blocks[$idx]['id'],
-                    'content' => 'Failed to read parallel result',
-                    'is_error' => true,
-                ];
+                if (is_array($data) && isset($data['result'])) {
+                    // New format: result + readState
+                    $results[$idx] = $data['result'];
+                    if (!empty($data['readState'])) {
+                        ToolUseContext::mergeReadFileStateSnapshot($data['readState']);
+                    }
+                } elseif (is_array($data)) {
+                    // Legacy format: bare result (backward compat)
+                    $results[$idx] = $data;
+                } else {
+                    $results[$idx] = [
+                        'tool_use_id' => $blocks[$idx]['id'],
+                        'content' => 'Failed to read parallel result',
+                        'is_error' => true,
+                    ];
+                }
                 @unlink($tempFiles[$idx]);
             }
             if ($onComplete) {
@@ -300,17 +332,30 @@ class ToolOrchestrator
             }
         }
 
-        // Truncate large results
+        // Persist large results to disk (or truncate as fallback)
         $maxChars = $tool->maxResultSizeChars();
         if ($maxChars < PHP_INT_MAX && mb_strlen($result->output) > $maxChars) {
-            $previewSize = 2000;
-            $totalKb = round(mb_strlen($result->output) / 1024);
-            $preview = mb_substr($result->output, 0, $previewSize);
-            $result = new ToolResult(
-                output: "<persisted-output>\nOutput too large ({$totalKb} KB). Showing first 2KB preview:\n\n{$preview}\n...(truncated)\n</persisted-output>",
-                isError: $result->isError,
-                metadata: $result->metadata,
-            );
+            if ($this->toolResultStorage !== null) {
+                $persisted = $this->toolResultStorage->persist($toolUseId, $result->output);
+                if ($persisted !== null) {
+                    $result = new ToolResult(
+                        output: $persisted['message'],
+                        isError: $result->isError,
+                        metadata: $result->metadata,
+                    );
+                }
+            }
+            // Fallback: inline truncation if persistence failed or unavailable
+            if (mb_strlen($result->output) > $maxChars) {
+                $storage = $this->toolResultStorage ?? new ToolResultStorage();
+                $preview = $storage->generatePreview($result->output, ToolResultStorage::PREVIEW_SIZE_BYTES);
+                $sizeLabel = round(mb_strlen($result->output) / 1024, 1) . 'K chars';
+                $result = new ToolResult(
+                    output: "<persisted-output>\nOutput too large ({$sizeLabel}). Showing first 2KB preview:\n\n{$preview}\n...(truncated)\n</persisted-output>",
+                    isError: $result->isError,
+                    metadata: $result->metadata,
+                );
+            }
         }
 
         if ($onComplete) {

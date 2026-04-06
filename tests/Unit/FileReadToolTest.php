@@ -163,4 +163,23 @@ class FileReadToolTest extends TestCase
 
         unlink($file);
     }
+
+    public function test_validate_input_rejects_bare_line_reference_without_path(): void
+    {
+        $error = $this->tool->validateInput(['file_path' => ':0'], $this->context);
+
+        $this->assertNotNull($error);
+        $this->assertStringContainsString('actual path', $error);
+    }
+
+    public function test_backfill_observable_input_strips_line_suffix_from_file_reference(): void
+    {
+        $file = $this->makeTmpFile("alpha\nbeta\n");
+
+        $input = $this->tool->backfillObservableInput(['file_path' => $file . ':12'], $this->context);
+
+        $this->assertSame($file, $input['file_path']);
+
+        unlink($file);
+    }
 }

@@ -12,6 +12,8 @@ class StreamingClient
     private HttpClientInterface $httpClient;
     private int $maxRetries = 3;
     private array $lastRateLimitHeaders = [];
+    /** @var callable(): float */
+    private $timeProvider;
 
     public function __construct(
         private readonly string $apiKey,
@@ -23,11 +25,15 @@ class StreamingClient
         private readonly int $thinkingBudget = 10000,
         ?HttpClientInterface $httpClient = null,
         private ?\App\Services\Settings\SettingsManager $settingsManager = null,
+        private readonly int $idleTimeoutSeconds = 60,
+        private readonly float $streamPollTimeoutSeconds = 1.0,
+        ?callable $timeProvider = null,
     ) {
         $this->httpClient = $httpClient ?? HttpClient::create([
             'timeout' => 300,
             'max_duration' => 600,
         ]);
+        $this->timeProvider = $timeProvider ?? static fn (): float => microtime(true);
     }
 
     /**
@@ -181,6 +187,8 @@ class StreamingClient
             $payload['max_tokens'] = max($this->resolveMaxTokens(), $thinkingBudget + 4096);
         }
 
+        $tools = $this->normalizeToolsForProvider($tools, $baseUrl);
+
         if (count($tools) > 0) {
             // Add cache_control breakpoint on the last tool for prompt caching
             $toolsWithCache = $tools;
@@ -216,39 +224,64 @@ class StreamingClient
         $currentEvent = null;
         $currentDataLines = [];
         $lineBuffer = '';
+        $lastActivityAt = ($this->timeProvider)();
 
-        foreach ($this->httpClient->stream($response) as $chunk) {
+        try {
+            foreach ($this->httpClient->stream($response, $this->streamPollTimeoutSeconds) as $chunk) {
+                if ($shouldAbort && $shouldAbort()) {
+                    $this->cancelResponse($response);
+
+                    return;
+                }
+
+                if ($chunk->isTimeout()) {
+                    if (($this->timeProvider)() - $lastActivityAt >= $this->idleTimeoutSeconds) {
+                        $this->cancelResponse($response);
+
+                        throw new ApiErrorException(
+                            $this->formatIdleTimeoutMessage(),
+                            'stream_timeout',
+                        );
+                    }
+
+                    continue;
+                }
+
+                $content = $chunk->getContent();
+                $lastActivityAt = ($this->timeProvider)();
+
+                $lineBuffer .= $content;
+
+                while (($newlinePos = strpos($lineBuffer, "\n")) !== false) {
+                    $line = substr($lineBuffer, 0, $newlinePos);
+                    $lineBuffer = substr($lineBuffer, $newlinePos + 1);
+
+                    $events = $this->processSseLine(
+                        rtrim($line, "\r"),
+                        $currentEvent,
+                        $currentDataLines,
+                        $onRawEvent,
+                    );
+
+                    foreach ($events as $event) {
+                        if ($shouldAbort && $shouldAbort()) {
+                            $this->cancelResponse($response);
+
+                            return;
+                        }
+
+                        yield $event;
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
             if ($shouldAbort && $shouldAbort()) {
                 $this->cancelResponse($response);
 
                 return;
             }
 
-            $content = $chunk->getContent();
-
-            $lineBuffer .= $content;
-
-            while (($newlinePos = strpos($lineBuffer, "\n")) !== false) {
-                $line = substr($lineBuffer, 0, $newlinePos);
-                $lineBuffer = substr($lineBuffer, $newlinePos + 1);
-
-                $events = $this->processSseLine(
-                    rtrim($line, "\r"),
-                    $currentEvent,
-                    $currentDataLines,
-                    $onRawEvent,
-                );
-
-                foreach ($events as $event) {
-                    if ($shouldAbort && $shouldAbort()) {
-                        $this->cancelResponse($response);
-
-                        return;
-                    }
-
-                    yield $event;
-                }
-            }
+            throw $e;
         }
 
         if ($shouldAbort && $shouldAbort()) {
@@ -375,6 +408,7 @@ class StreamingClient
                 'overloaded_error',
                 'rate_limit_error',
                 'api_error',
+                'stream_timeout',
             ]);
         }
 
@@ -400,6 +434,27 @@ class StreamingClient
             return min(2 ** $attempt, 30);
         }
         return min(2 ** $attempt, 10);
+    }
+
+    private function normalizeToolsForProvider(array $tools, string $baseUrl): array
+    {
+        if (! $this->isZaiAnthropicEndpoint($baseUrl)) {
+            return $tools;
+        }
+
+        // Z.ai's Anthropic-compatible endpoint currently returns an empty stream
+        // when WebFetch is advertised in the tool list, even if the model never
+        // selects it. Exclude that single tool so the rest of the coding stack
+        // stays usable on glm-* models.
+        return array_values(array_filter(
+            $tools,
+            fn (array $tool): bool => ($tool['name'] ?? null) !== 'WebFetch',
+        ));
+    }
+
+    private function isZaiAnthropicEndpoint(string $baseUrl): bool
+    {
+        return str_contains(strtolower(trim($baseUrl)), 'api.z.ai/api/anthropic');
     }
 
     private function encodePayload(array $payload): string
@@ -513,5 +568,12 @@ class StreamingClient
     private function cancelResponse(ResponseInterface $response): void
     {
         $response->cancel();
+    }
+
+    private function formatIdleTimeoutMessage(): string
+    {
+        $seconds = max(1, $this->idleTimeoutSeconds);
+
+        return "Streaming response stalled for more than {$seconds}s without new data. Retry the turn.";
     }
 }

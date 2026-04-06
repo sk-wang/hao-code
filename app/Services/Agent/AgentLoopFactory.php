@@ -6,6 +6,7 @@ use App\Services\Compact\ContextCompactor;
 use App\Services\Cost\CostTracker;
 use App\Services\Hooks\HookExecutor;
 use App\Services\Session\SessionManager;
+use App\Tools\ToolRegistry;
 use Illuminate\Contracts\Container\Container;
 
 class AgentLoopFactory
@@ -14,16 +15,30 @@ class AgentLoopFactory
         private readonly Container $container,
     ) {}
 
-    public function createIsolated(): AgentLoop
+    /**
+     * Create an isolated AgentLoop for sub-agents.
+     *
+     * @param callable|null $toolFilter If provided, only tools where $toolFilter(toolName) returns true are included
+     * @param string|null $workingDirectory Override working directory (e.g., for worktree isolation)
+     */
+    public function createIsolated(?callable $toolFilter = null, ?string $workingDirectory = null): AgentLoop
     {
         $queryEngine = $this->container->make(QueryEngine::class);
-        $toolOrchestrator = $this->container->make(ToolOrchestrator::class);
         $contextBuilder = $this->container->make(ContextBuilder::class);
         $permissionChecker = $this->container->make(\App\Services\Permissions\PermissionChecker::class);
-        $toolRegistry = $this->container->make(\App\Tools\ToolRegistry::class);
         $hookExecutor = $this->container->make(HookExecutor::class);
 
-        return new AgentLoop(
+        // Build tool registry with optional filtering
+        $parentRegistry = $this->container->make(ToolRegistry::class);
+        $toolRegistry = $this->buildToolRegistry($parentRegistry, $toolFilter);
+
+        $toolOrchestrator = new ToolOrchestrator(
+            toolRegistry: $toolRegistry,
+            permissionChecker: $permissionChecker,
+            hookExecutor: $hookExecutor,
+        );
+
+        $loop = new AgentLoop(
             queryEngine: $queryEngine,
             toolOrchestrator: $toolOrchestrator,
             contextBuilder: $contextBuilder,
@@ -35,5 +50,31 @@ class AgentLoopFactory
             toolRegistry: $toolRegistry,
             hookExecutor: $hookExecutor,
         );
+
+        if ($workingDirectory !== null) {
+            $loop->setWorkingDirectory($workingDirectory);
+        }
+
+        return $loop;
+    }
+
+    /**
+     * Build a filtered ToolRegistry from the parent registry.
+     */
+    private function buildToolRegistry(ToolRegistry $parent, ?callable $filter): ToolRegistry
+    {
+        if ($filter === null) {
+            return $parent;
+        }
+
+        $filtered = new ToolRegistry();
+
+        foreach ($parent->getAllTools() as $tool) {
+            if ($filter($tool->name())) {
+                $filtered->register($tool);
+            }
+        }
+
+        return $filtered;
     }
 }

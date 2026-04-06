@@ -8,9 +8,83 @@ use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpClient\MockHttpClient;
 use Symfony\Component\HttpClient\Exception\TransportException;
 use Symfony\Component\HttpClient\Response\MockResponse;
+use Symfony\Contracts\HttpClient\ChunkInterface;
+use Symfony\Contracts\HttpClient\HttpClientInterface;
+use Symfony\Contracts\HttpClient\ResponseInterface;
+use Symfony\Contracts\HttpClient\ResponseStreamInterface;
 
 class StreamingClientTest extends TestCase
 {
+    private function makeChunk(bool $isTimeout, ?string $content = null): ChunkInterface
+    {
+        $chunk = $this->createMock(ChunkInterface::class);
+        $chunk->method('isTimeout')->willReturn($isTimeout);
+
+        if ($isTimeout) {
+            $chunk->expects($this->never())->method('getContent');
+        } else {
+            $chunk->method('getContent')->willReturn($content ?? '');
+        }
+
+        return $chunk;
+    }
+
+    /**
+     * @param array<int, ChunkInterface> $chunks
+     */
+    private function makeStreamingHttpClient(array $chunks, ?int &$requests = null): HttpClientInterface
+    {
+        $response = $this->createMock(ResponseInterface::class);
+        $response->method('getStatusCode')->willReturn(200);
+        $response->method('getHeaders')->with(false)->willReturn([]);
+
+        $stream = new class($response, $chunks) implements ResponseStreamInterface {
+            /** @param array<int, ChunkInterface> $chunks */
+            public function __construct(
+                private ResponseInterface $response,
+                private array $chunks,
+                private int $position = 0,
+            ) {}
+
+            public function current(): ChunkInterface
+            {
+                return $this->chunks[$this->position];
+            }
+
+            public function next(): void
+            {
+                $this->position++;
+            }
+
+            public function key(): ResponseInterface
+            {
+                return $this->response;
+            }
+
+            public function valid(): bool
+            {
+                return isset($this->chunks[$this->position]);
+            }
+
+            public function rewind(): void
+            {
+                $this->position = 0;
+            }
+        };
+
+        $httpClient = $this->createMock(HttpClientInterface::class);
+        $httpClient->method('request')->willReturnCallback(function () use ($response, &$requests) {
+            if ($requests !== null) {
+                $requests++;
+            }
+
+            return $response;
+        });
+        $httpClient->method('stream')->willReturn($stream);
+
+        return $httpClient;
+    }
+
     public function test_it_throws_a_readable_error_when_request_payload_cannot_be_encoded(): void
     {
         $client = new StreamingClient(
@@ -176,6 +250,65 @@ class StreamingClientTest extends TestCase
         }
     }
 
+    public function test_it_throws_stream_timeout_when_no_new_data_arrives(): void
+    {
+        $attempts = 0;
+        $httpClient = $this->makeStreamingHttpClient([
+            $this->makeChunk(isTimeout: true),
+        ], $attempts);
+
+        $client = new StreamingClient(
+            apiKey: 'test-key',
+            model: 'kimi-for-coding',
+            httpClient: $httpClient,
+            idleTimeoutSeconds: 0,
+            streamPollTimeoutSeconds: 0.01,
+        );
+
+        try {
+            iterator_to_array($client->streamMessages(
+                systemPrompt: [],
+                messages: [['role' => 'user', 'content' => 'hello']],
+                tools: [],
+            ));
+            $this->fail('Expected ApiErrorException to be thrown.');
+        } catch (ApiErrorException $e) {
+            $this->assertSame('stream_timeout', $e->getErrorType());
+            $this->assertStringContainsString('stalled', $e->getMessage());
+            $this->assertSame(3, $attempts, 'Should retry stalled streams before any event is emitted');
+        }
+    }
+
+    public function test_it_does_not_retry_stream_timeout_after_partial_stream_has_started(): void
+    {
+        $attempts = 0;
+        $httpClient = $this->makeStreamingHttpClient([
+            $this->makeChunk(isTimeout: false, content: "event: message_start\n"),
+            $this->makeChunk(isTimeout: false, content: "data: {\"message\":{\"id\":\"msg_1\",\"usage\":[]}}\n\n"),
+            $this->makeChunk(isTimeout: true),
+        ], $attempts);
+
+        $client = new StreamingClient(
+            apiKey: 'test-key',
+            model: 'kimi-for-coding',
+            httpClient: $httpClient,
+            idleTimeoutSeconds: 0,
+            streamPollTimeoutSeconds: 0.01,
+        );
+
+        try {
+            iterator_to_array($client->streamMessages(
+                systemPrompt: [],
+                messages: [['role' => 'user', 'content' => 'hello']],
+                tools: [],
+            ));
+            $this->fail('Expected ApiErrorException to be thrown.');
+        } catch (ApiErrorException $e) {
+            $this->assertSame('stream_timeout', $e->getErrorType());
+            $this->assertSame(1, $attempts, 'Should not retry once the stream has already yielded events');
+        }
+    }
+
     public function test_it_returns_early_without_request_when_already_aborted(): void
     {
         $requests = 0;
@@ -273,6 +406,90 @@ class StreamingClientTest extends TestCase
         $client = new StreamingClient(
             apiKey: 'test-key',
             model: 'kimi-for-coding',
+            httpClient: $httpClient,
+        );
+
+        $events = iterator_to_array($client->streamMessages(
+            systemPrompt: [],
+            messages: [['role' => 'user', 'content' => 'hello']],
+            tools: [],
+            shouldAbort: fn(): bool => $state->abort,
+        ));
+
+        $this->assertCount(1, $events);
+        $this->assertSame('message_start', $events[0]->type);
+    }
+
+    public function test_it_swallows_transport_exception_after_abort_is_requested_mid_stream(): void
+    {
+        $state = (object) ['abort' => false];
+
+        $response = $this->createMock(ResponseInterface::class);
+        $response->method('getStatusCode')->willReturn(200);
+        $response->expects($this->atLeastOnce())->method('cancel');
+
+        $firstChunk = $this->createMock(ChunkInterface::class);
+        $firstChunk->method('isTimeout')->willReturn(false);
+        $firstChunk->method('getContent')->willReturn(
+            "event: message_start\n" .
+            "data: {\"message\":{\"id\":\"msg_1\",\"usage\":[]}}\n\n"
+        );
+
+        $secondChunk = $this->createMock(ChunkInterface::class);
+        $secondChunk->method('isTimeout')->willReturn(false);
+        $secondChunk->method('getContent')->willThrowException(new TransportException('Operation failed'));
+
+        $stream = new class($response, $firstChunk, $secondChunk, $state) implements ResponseStreamInterface {
+            /** @var array<int, ChunkInterface> */
+            private array $chunks;
+            private int $position = 0;
+
+            public function __construct(
+                private ResponseInterface $response,
+                ChunkInterface $firstChunk,
+                ChunkInterface $secondChunk,
+                private object $state,
+            ) {
+                $this->chunks = [$firstChunk, $secondChunk];
+            }
+
+            public function current(): ChunkInterface
+            {
+                if ($this->position === 1) {
+                    $this->state->abort = true;
+                }
+
+                return $this->chunks[$this->position];
+            }
+
+            public function next(): void
+            {
+                $this->position++;
+            }
+
+            public function key(): ResponseInterface
+            {
+                return $this->response;
+            }
+
+            public function valid(): bool
+            {
+                return isset($this->chunks[$this->position]);
+            }
+
+            public function rewind(): void
+            {
+                $this->position = 0;
+            }
+        };
+
+        $httpClient = $this->createMock(HttpClientInterface::class);
+        $httpClient->method('request')->willReturn($response);
+        $httpClient->method('stream')->willReturn($stream);
+
+        $client = new StreamingClient(
+            apiKey: 'test-key',
+            model: 'glm-5.1',
             httpClient: $httpClient,
         );
 
@@ -708,6 +925,43 @@ class StreamingClientTest extends TestCase
         // Only the last tool should have cache_control
         $this->assertArrayNotHasKey('cache_control', $decoded['tools'][0]);
         $this->assertArrayHasKey('cache_control', $decoded['tools'][1]);
+        $this->assertSame('ephemeral', $decoded['tools'][1]['cache_control']['type']);
+    }
+
+    public function test_zai_endpoint_excludes_webfetch_tool_before_sending_tools(): void
+    {
+        $capturedBody = null;
+        $httpClient = new MockHttpClient(function (string $method, string $url, array $options) use (&$capturedBody) {
+            $capturedBody = $options['body'] ?? '';
+            return new MockResponse([
+                "event: message_stop\n",
+                "data: {}\n\n",
+            ], ['http_code' => 200]);
+        });
+
+        $client = new StreamingClient(
+            apiKey: 'test-key',
+            model: 'glm-5.1',
+            baseUrl: 'https://api.z.ai/api/anthropic',
+            httpClient: $httpClient,
+        );
+
+        $tools = [
+            ['name' => 'Read', 'description' => 'read files'],
+            ['name' => 'WebFetch', 'description' => 'fetch webpages'],
+            ['name' => 'Bash', 'description' => 'run commands'],
+        ];
+
+        iterator_to_array($client->streamMessages(
+            systemPrompt: [],
+            messages: [['role' => 'user', 'content' => 'hello']],
+            tools: $tools,
+        ));
+
+        $decoded = json_decode($capturedBody, true);
+        $this->assertArrayHasKey('tools', $decoded);
+        $this->assertSame(['Read', 'Bash'], array_column($decoded['tools'], 'name'));
+        $this->assertArrayNotHasKey('cache_control', $decoded['tools'][0]);
         $this->assertSame('ephemeral', $decoded['tools'][1]['cache_control']['type']);
     }
 

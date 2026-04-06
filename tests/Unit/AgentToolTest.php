@@ -120,7 +120,7 @@ class AgentToolTest extends TestCase
         $subLoop->expects($this->once())
             ->method('run')
             ->with($this->callback(function (string $prompt): bool {
-                return str_contains($prompt, 'You are a fast codebase exploration agent.')
+                return str_contains($prompt, 'file search specialist')
                     && str_contains($prompt, 'Explore this repository');
             }))
             ->willReturn('sub-agent result');

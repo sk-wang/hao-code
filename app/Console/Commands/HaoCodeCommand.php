@@ -11,6 +11,7 @@ use App\Services\Compact\ContextCompactor;
 use App\Services\Cost\CostTracker;
 use App\Services\Git\GitContext;
 use App\Services\Hooks\HookExecutor;
+use App\Services\Mcp\McpConnectionManager;
 use App\Services\Mcp\McpServerConfigManager;
 use App\Services\Memory\SessionMemory;
 use App\Services\OutputStyle\OutputStyleLoader;
@@ -30,9 +31,12 @@ use App\Support\Terminal\ReplFormatter;
 use App\Support\Terminal\StreamingMarkdownOutput;
 use App\Support\Terminal\TranscriptBuffer;
 use App\Support\Terminal\TranscriptRenderer;
+use App\Support\Terminal\ImagePaste;
+use App\Support\Terminal\ToolResultRenderer;
 use App\Support\Terminal\TurnStatusRenderer;
 use App\Tools\Bash\BashTool;
 use App\Tools\Config\ConfigTool;
+use App\Tools\Mcp\McpDynamicTool;
 use App\Tools\Skill\SkillLoader;
 use App\Tools\ToolRegistry;
 use App\Tools\ToolUseContext;
@@ -118,6 +122,7 @@ class HaoCodeCommand extends Command
         }
 
         $this->refreshPromptHudState($agent);
+        $this->connectMcpServers();
 
         if ($prompt !== null) {
             return $this->runSinglePrompt($agent, $prompt);
@@ -223,10 +228,91 @@ class HaoCodeCommand extends Command
                 continue;
             }
 
-            $this->runAgentTurn($agent, $input);
+            // Process input: detect and attach pasted images
+            $processedInput = $this->processUserInputForImages($input);
+            $this->runAgentTurn($agent, $processedInput);
         }
 
+        // Clean up MCP connections
+        app(McpConnectionManager::class)->disconnectAll();
+
         return 0;
+    }
+
+    /**
+     * Process user input text to detect and attach images.
+     *
+     * Handles:
+     * 1. Pasted image file paths (e.g., /path/to/screenshot.png)
+     * 2. Clipboard images (when input is empty-ish but clipboard has an image)
+     *
+     * @return string|array String for text-only, array of content blocks for text+images
+     */
+    private function processUserInputForImages(string $input): string|array
+    {
+        $images = [];
+        $textParts = [];
+
+        // 1. Check for image file paths in the input
+        $imagePaths = ImagePaste::extractImagePaths($input);
+
+        if (!empty($imagePaths)) {
+            // Remove image paths from the text
+            $remainingText = $input;
+            foreach ($imagePaths as $path) {
+                $remainingText = str_replace($path, '', $remainingText);
+            }
+            $remainingText = trim(preg_replace('/\s+/', ' ', $remainingText));
+
+            // Read each image file
+            foreach ($imagePaths as $path) {
+                $imageData = ImagePaste::readImageFile($path);
+                if ($imageData !== null) {
+                    $images[] = $imageData;
+                    $this->line("  <fg=cyan>📎 Attached image:</> <fg=gray>" . basename($path) . " (" . $imageData['media_type'] . ")</>");
+                } else {
+                    $this->line("  <fg=yellow>⚠ Could not read image:</> <fg=gray>{$path}</>");
+                }
+            }
+
+            if ($remainingText !== '') {
+                $textParts[] = $remainingText;
+            }
+        } else {
+            $textParts[] = $input;
+        }
+
+        // 2. If no text and no images, check clipboard for an image
+        // This handles Cmd+V / Ctrl+V paste of a screenshot
+        if (empty($images) && trim($input) === '' ) {
+            // Don't check clipboard on empty input - that's just an Enter press
+            return $input;
+        }
+
+        // 3. Build the result
+        if (empty($images)) {
+            return $input; // No images found, return as plain text
+        }
+
+        // Build multi-content-block message
+        $contentBlocks = [];
+
+        // Add text block first (if any)
+        $text = implode(' ', $textParts);
+        if ($text !== '') {
+            $contentBlocks[] = ['type' => 'text', 'text' => $text];
+        } else {
+            // API requires at least one text block
+            $imageNames = array_map(fn($img) => $img['source'], $images);
+            $contentBlocks[] = ['type' => 'text', 'text' => 'Here ' . (count($images) === 1 ? 'is an image' : 'are ' . count($images) . ' images') . ': ' . implode(', ', $imageNames)];
+        }
+
+        // Add image blocks
+        foreach ($images as $img) {
+            $contentBlocks[] = ImagePaste::buildImageBlock($img['base64'], $img['media_type']);
+        }
+
+        return $contentBlocks;
     }
 
     private function runSinglePrompt(AgentLoop $agent, string $prompt): int
@@ -237,6 +323,8 @@ class HaoCodeCommand extends Command
         $markdownOutput = $this->createStreamingMarkdownOutput($markdownRenderer);
         $turnStatus = $this->createTurnStatusRenderer($prompt);
         $previousAlarmHandler = $this->startTurnStatusTicker($turnStatus);
+        $toolResultRenderer = new ToolResultRenderer();
+        $lastToolInput = [];
 
         try {
             $this->recordTurnHudEvent('turn.started', $this->summarizeTurnDetail($prompt));
@@ -255,25 +343,31 @@ class HaoCodeCommand extends Command
                     $renderedLiveText = true;
                     $markdownOutput->append($text);
                 },
-                onToolStart: function (string $toolName, array $toolInput) use ($turnStatus, $markdownOutput, $streamTextOutput) {
+                onToolStart: function (string $toolName, array $toolInput) use ($turnStatus, $markdownOutput, $streamTextOutput, &$lastToolInput) {
+                    $lastToolInput = ['name' => $toolName, 'input' => $toolInput];
                     $turnStatus->pause();
                     if ($streamTextOutput) {
                         $markdownOutput->finalize();
                     }
                     $args = $this->summarizeToolInput($toolName, $toolInput);
                     $this->recordTurnHudEvent('tool.started', $this->summarizeTurnDetail(trim($toolName.($args !== '' ? ': '.$args : ''))));
+                    $activityDesc = $this->getActivityDescription($toolName, $toolInput);
                     $this->line("\n".$this->formatter()->toolCall($toolName, $args));
-                    $turnStatus->setPhaseLabel($toolName);
+                    $turnStatus->setPhaseLabel($activityDesc ?? $toolName);
                     $turnStatus->resume();
                 },
-                onToolComplete: function (string $toolName, $result) use ($turnStatus) {
+                onToolComplete: function (string $toolName, $result) use ($turnStatus, $toolResultRenderer, &$lastToolInput) {
                     $turnStatus->pause();
                     $turnStatus->setPhaseLabel(null);
                     $event = in_array($toolName, ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskStop'], true)
                         ? 'plan.updated'
                         : 'tool.completed';
                     $detail = $toolName;
-                    if ($result->isError) {
+                    $input = ($lastToolInput['name'] ?? '') === $toolName ? ($lastToolInput['input'] ?? []) : [];
+                    $rendered = $toolResultRenderer->render($toolName, $input, (string) $result->output, $result->isError);
+                    if ($rendered !== null) {
+                        $this->line($rendered);
+                    } elseif ($result->isError) {
                         $message = trim((string) $result->output);
                         $detail = trim($toolName.' · '.($message === '' ? 'Unknown error' : $message));
                         $this->line($this->formatter()->toolFailure($toolName, $message === '' ? 'Unknown error' : $message));
@@ -307,6 +401,14 @@ class HaoCodeCommand extends Command
             if ($streamTextOutput) {
                 $markdownOutput->finalize();
             }
+            if ($agent->isAborted()) {
+                $this->recordTurnHudEvent('turn.failed', 'aborted');
+                if ($renderedLiveText) {
+                    $this->line('');
+                }
+                $this->line($this->formatter()->interruptedStatus());
+                return 130;
+            }
             $this->recordTurnHudEvent('turn.failed', $this->summarizeTurnDetail($e->getMessage()));
             if ($renderedLiveText) {
                 $this->line('');
@@ -317,6 +419,14 @@ class HaoCodeCommand extends Command
             $turnStatus->pause();
             if ($streamTextOutput) {
                 $markdownOutput->finalize();
+            }
+            if ($agent->isAborted()) {
+                $this->recordTurnHudEvent('turn.failed', 'aborted');
+                if ($renderedLiveText) {
+                    $this->line('');
+                }
+                $this->line($this->formatter()->interruptedStatus());
+                return 130;
             }
             $this->recordTurnHudEvent('turn.failed', $this->summarizeTurnDetail($e->getMessage()));
             if ($renderedLiveText) {
@@ -762,6 +872,7 @@ class HaoCodeCommand extends Command
             'login' => $this->handleLogin(),
             'logout' => $this->handleLogout(),
             'keybindings' => $this->handleKeybindings(),
+            'paste-image' => $this->handlePasteImage($agent, $args),
             default => $this->line("<fg=yellow>Unknown command: {$command}</>. Type <fg=cyan>/help</> for available commands."),
         };
     }
@@ -989,6 +1100,66 @@ class HaoCodeCommand extends Command
         $tokens = $this->tokenizeArguments($args);
         $subcommand = strtolower($tokens[0] ?? 'list');
 
+        if ($subcommand === 'status') {
+            $cm = app(McpConnectionManager::class);
+            $connected = $cm->getConnectedClients();
+            $failures = $cm->getFailures();
+
+            if (empty($connected) && empty($failures)) {
+                $this->line('<fg=yellow>No MCP servers have been connected yet.</>');
+                return;
+            }
+
+            $lines = [];
+            foreach ($connected as $name => $client) {
+                $toolCount = count($client->listTools(useCache: true));
+                $resourceCount = $client->supportsResources() ? count($client->listResources(useCache: true)) : 0;
+                $info = $client->getServerInfo();
+                $version = $info ? " v{$info['version']}" : '';
+                $lines[] = "<fg=green>●</> <fg=white>{$name}</>{$version} — {$toolCount} tools, {$resourceCount} resources";
+            }
+            foreach ($failures as $name => $error) {
+                $lines[] = "<fg=red>✗</> <fg=white>{$name}</> — {$error->getMessage()}";
+            }
+            $this->renderPanel('MCP server status', $lines);
+            return;
+        }
+
+        if ($subcommand === 'reconnect') {
+            $targetName = $tokens[1] ?? null;
+            $cm = app(McpConnectionManager::class);
+            $registry = app(ToolRegistry::class);
+
+            if ($targetName !== null) {
+                // Reconnect a specific server
+                $cm->disconnect($targetName);
+                try {
+                    $client = $cm->connectByName($targetName);
+                    $tools = $client->listTools();
+                    foreach ($tools as $tool) {
+                        $qn = McpConnectionManager::buildToolName($targetName, $tool['name']);
+                        $registry->register(new McpDynamicTool(
+                            qualifiedName: $qn,
+                            serverName: $targetName,
+                            toolName: $tool['name'],
+                            toolDescription: $tool['description'],
+                            inputJsonSchema: $tool['inputSchema'],
+                            annotations: $tool['annotations'] ?? [],
+                            connectionManager: $cm,
+                        ));
+                    }
+                    $this->line("<fg=green>Reconnected to {$targetName}, " . count($tools) . " tools registered</>");
+                } catch (\Throwable $e) {
+                    $this->line("<fg=red>Failed to reconnect {$targetName}:</> {$e->getMessage()}");
+                }
+            } else {
+                // Reconnect all
+                $cm->disconnectAll();
+                $this->connectMcpServers();
+            }
+            return;
+        }
+
         if ($subcommand === 'paths') {
             $paths = $manager->paths();
             $this->renderPanel('MCP config paths', [
@@ -1166,10 +1337,23 @@ class HaoCodeCommand extends Command
             return;
         }
 
+        $cm = app(McpConnectionManager::class);
         $lines = [];
         foreach ($servers as $index => $server) {
             $statusColor = $server['enabled'] ? 'green' : 'yellow';
             $status = $server['enabled'] ? 'enabled' : 'disabled';
+
+            // Show connection status if connected
+            $client = $cm->getClient($server['name']);
+            if ($client !== null && $client->isConnected()) {
+                $toolCount = count($client->listTools(useCache: true));
+                $status = "connected · {$toolCount} tools";
+                $statusColor = 'green';
+            } elseif (isset($cm->getFailures()[$server['name']])) {
+                $status = 'failed';
+                $statusColor = 'red';
+            }
+
             $target = $server['url'] ?? $server['command'] ?? 'unknown';
             if ($server['url'] === null && $server['args'] !== []) {
                 $target .= ' '.implode(' ', $server['args']);
@@ -1369,6 +1553,44 @@ class HaoCodeCommand extends Command
         }
         $lines[] = '<fg=gray>Use /resume &lt;session_id&gt; to restore a session</>';
         $this->renderPanel('Recent sessions', $lines);
+    }
+
+    /**
+     * Connect to all enabled MCP servers and register their tools dynamically.
+     */
+    private function connectMcpServers(): void
+    {
+        $connectionManager = app(McpConnectionManager::class);
+        $registry = app(ToolRegistry::class);
+
+        $connectionManager->connectAll(function (string $name, string $status, ?string $error) {
+            match ($status) {
+                'connecting' => $this->line("<fg=gray>  MCP: connecting to {$name}...</>"),
+                'connected' => $this->line("<fg=green>  MCP: {$name} connected</>"),
+                'failed' => $this->line("<fg=red>  MCP: {$name} failed — {$error}</>"),
+                'disabled' => null,
+                default => null,
+            };
+        });
+
+        // Register dynamically discovered MCP tools
+        $tools = $connectionManager->discoverAllTools();
+        foreach ($tools as $tool) {
+            $dynamicTool = new McpDynamicTool(
+                qualifiedName: $tool['qualifiedName'],
+                serverName: $tool['serverName'],
+                toolName: $tool['toolName'],
+                toolDescription: $tool['description'],
+                inputJsonSchema: $tool['inputSchema'],
+                annotations: $tool['annotations'],
+                connectionManager: $connectionManager,
+            );
+            $registry->register($dynamicTool);
+        }
+
+        if (!empty($tools)) {
+            $this->line('<fg=gray>  MCP: registered ' . count($tools) . ' tools</>');
+        }
     }
 
     private function initializeSessionFromStartupOptions(AgentLoop $agent, bool $quiet = false): bool
@@ -2557,8 +2779,40 @@ class HaoCodeCommand extends Command
      */
     private function detectProjectInfo(): array
     {
-        $info = [];
         $cwd = getcwd();
+
+        $backend = $this->detectProjectInfoCandidate(
+            $cwd,
+            ['.', 'backend', 'api', 'server'],
+            fn (array $info): bool => $this->isBackendFramework($info['framework'] ?? 'Unknown'),
+        );
+        $frontend = $this->detectProjectInfoCandidate(
+            $cwd,
+            ['frontend', 'web', 'ui', 'client'],
+            fn (array $info): bool => $this->isFrontendFramework($info['framework'] ?? 'Unknown'),
+        );
+
+        if ($backend !== null && $frontend !== null) {
+            return $this->combineFullStackProjectInfo($cwd, $backend, $frontend);
+        }
+
+        if ($backend !== null) {
+            return $backend['info'];
+        }
+
+        if ($frontend !== null) {
+            return $frontend['info'];
+        }
+
+        return $this->detectProjectInfoForPath($cwd);
+    }
+
+    /**
+     * Detect project characteristics for a specific directory.
+     */
+    private function detectProjectInfoForPath(string $cwd): array
+    {
+        $info = [];
 
         // Framework detection
         if (file_exists($cwd . '/artisan')) {
@@ -2575,15 +2829,24 @@ class HaoCodeCommand extends Command
             $info['test_command'] = file_exists($cwd . '/phpunit.xml') ? './vendor/bin/phpunit' : 'php test';
         } elseif (file_exists($cwd . '/package.json')) {
             $package = json_decode(file_get_contents($cwd . '/package.json'), true);
-            $deps = array_keys($package['dependencies'] ?? []);
+            $deps = array_keys(($package['dependencies'] ?? []) + ($package['devDependencies'] ?? []));
             if (in_array('react', $deps) || in_array('next', $deps)) {
                 $info['framework'] = 'React/Next.js';
             } elseif (in_array('vue', $deps)) {
                 $info['framework'] = 'Vue';
+            } elseif (in_array('@angular/core', $deps)) {
+                $info['framework'] = 'Angular';
+            } elseif (in_array('svelte', $deps) || in_array('@sveltejs/kit', $deps)) {
+                $info['framework'] = 'Svelte';
             } else {
                 $info['framework'] = 'Node.js';
             }
-            $info['test_command'] = 'npm test';
+            $packageManager = $this->detectNodePackageManager($cwd);
+            $info['test_command'] = match ($packageManager) {
+                'pnpm' => 'pnpm test',
+                'Yarn' => 'yarn test',
+                default => 'npm test',
+            };
         } elseif (file_exists($cwd . '/Cargo.toml')) {
             $info['framework'] = 'Rust';
             $info['test_command'] = 'cargo test';
@@ -2602,12 +2865,8 @@ class HaoCodeCommand extends Command
         if (file_exists($cwd . '/composer.json')) {
             $info['package_manager'] = 'Composer';
         }
-        if (file_exists($cwd . '/pnpm-lock.yaml')) {
-            $info['package_manager'] = 'pnpm';
-        } elseif (file_exists($cwd . '/yarn.lock')) {
-            $info['package_manager'] = 'Yarn';
-        } elseif (file_exists($cwd . '/package-lock.json')) {
-            $info['package_manager'] = 'npm';
+        if (file_exists($cwd . '/package.json')) {
+            $info['package_manager'] = $this->detectNodePackageManager($cwd);
         }
         if (file_exists($cwd . '/Pipfile')) {
             $info['package_manager'] = 'Pipenv';
@@ -2686,6 +2945,129 @@ class HaoCodeCommand extends Command
     }
 
     /**
+     * @param array<int, string> $relativePaths
+     * @param callable(array): bool $accept
+     * @return array{path: string, relative_path: string, info: array}|null
+     */
+    private function detectProjectInfoCandidate(string $root, array $relativePaths, callable $accept): ?array
+    {
+        foreach ($relativePaths as $relativePath) {
+            $path = $relativePath === '.' ? $root : $root . '/' . $relativePath;
+
+            if (!is_dir($path)) {
+                continue;
+            }
+
+            $info = $this->detectProjectInfoForPath($path);
+            if (($info['framework'] ?? 'Unknown') === 'Unknown') {
+                continue;
+            }
+
+            if ($accept($info)) {
+                return [
+                    'path' => $path,
+                    'relative_path' => $relativePath === '.' ? '' : $relativePath,
+                    'info' => $info,
+                ];
+            }
+        }
+
+        return null;
+    }
+
+    private function isBackendFramework(string $framework): bool
+    {
+        return in_array($framework, ['Laravel', 'PHP', 'Rust', 'Go', 'Python'], true);
+    }
+
+    private function isFrontendFramework(string $framework): bool
+    {
+        return in_array($framework, ['React/Next.js', 'Vue', 'Angular', 'Svelte'], true);
+    }
+
+    /**
+     * @param array{path: string, relative_path: string, info: array} $backend
+     * @param array{path: string, relative_path: string, info: array} $frontend
+     */
+    private function combineFullStackProjectInfo(string $root, array $backend, array $frontend): array
+    {
+        $info = [];
+        $info['framework'] = sprintf(
+            'Full-stack (%s + %s)',
+            $backend['info']['framework'] ?? 'Backend',
+            $frontend['info']['framework'] ?? 'Frontend',
+        );
+
+        $testCommands = array_filter([
+            $this->scopeProjectCommand($backend['relative_path'], $backend['info']['test_command'] ?? ''),
+            $this->scopeProjectCommand($frontend['relative_path'], $frontend['info']['test_command'] ?? ''),
+        ]);
+        if ($testCommands !== []) {
+            $info['test_command'] = implode(' && ', array_values(array_unique($testCommands)));
+        }
+
+        $packageManagers = array_filter([
+            $backend['info']['package_manager'] ?? null,
+            $frontend['info']['package_manager'] ?? null,
+        ]);
+        if ($packageManagers !== []) {
+            $info['package_manager'] = implode(' + ', array_values(array_unique($packageManagers)));
+        }
+
+        $linters = [];
+        foreach ([$backend['info']['linter'] ?? '', $frontend['info']['linter'] ?? ''] as $value) {
+            foreach (array_map('trim', explode(',', $value)) as $item) {
+                if ($item !== '') {
+                    $linters[] = $item;
+                }
+            }
+        }
+        if ($linters !== []) {
+            $info['linter'] = implode(', ', array_values(array_unique($linters)));
+        }
+
+        $ci = $this->detectProjectInfoForPath($root)['ci'] ?? ($backend['info']['ci'] ?? $frontend['info']['ci'] ?? null);
+        if (is_string($ci) && $ci !== '') {
+            $info['ci'] = $ci;
+        }
+
+        $rootInfo = $this->detectProjectInfoForPath($root);
+        $info['structure'] = ($rootInfo['structure'] ?? null) === 'monorepo'
+            ? 'full-stack monorepo'
+            : 'full-stack';
+
+        return $info;
+    }
+
+    private function scopeProjectCommand(string $relativePath, string $command): string
+    {
+        if ($command === '') {
+            return '';
+        }
+
+        if ($relativePath === '') {
+            return $command;
+        }
+
+        return "(cd {$relativePath} && {$command})";
+    }
+
+    private function detectNodePackageManager(string $cwd): string
+    {
+        if (file_exists($cwd . '/pnpm-lock.yaml')) {
+            return 'pnpm';
+        }
+        if (file_exists($cwd . '/yarn.lock')) {
+            return 'Yarn';
+        }
+        if (file_exists($cwd . '/package-lock.json')) {
+            return 'npm';
+        }
+
+        return 'npm';
+    }
+
+    /**
      * Generate HAOCODE.md content based on detected project info.
      */
     private function generateHAOCODEContent(array $info): string
@@ -2695,6 +3077,8 @@ class HaoCodeCommand extends Command
         $linter = $info['linter'] ?? '';
         $formatter = $info['formatter'] ?? '';
         $ci = $info['ci'] ?? '';
+        $structure = $info['structure'] ?? '';
+        $packageManager = $info['package_manager'] ?? '';
 
         $lines = [];
         $lines[] = "# {$framework} Project Instructions";
@@ -2702,6 +3086,12 @@ class HaoCodeCommand extends Command
         $lines[] = '## Conventions';
         $lines[] = '';
         $lines[] = "- This is a {$framework} project.";
+        if ($structure) {
+            $lines[] = "- Repository structure: {$structure}.";
+        }
+        if ($packageManager) {
+            $lines[] = "- Package manager(s): {$packageManager}.";
+        }
         if ($testCmd) {
             $lines[] = "- Run tests with: `{$testCmd}`";
         }
@@ -3004,18 +3394,22 @@ class HaoCodeCommand extends Command
         $this->runAgentTurn(app(\App\Services\Agent\AgentLoop::class), $prompt);
     }
 
-    private function runAgentTurn(AgentLoop $agent, string $input): void
+    private function runAgentTurn(AgentLoop $agent, string|array $input): void
     {
         $this->line('');
+        // Extract text for display purposes (spinner, HUD)
+        $inputText = is_string($input) ? $input : $this->extractTextFromContentBlocks($input);
         $streamTextOutput = $this->shouldStreamAssistantText();
         $renderedLiveText = false;
         $markdownRenderer = app(MarkdownRenderer::class);
         $markdownOutput = $this->createStreamingMarkdownOutput($markdownRenderer);
-        $turnStatus = $this->createTurnStatusRenderer($input);
+        $turnStatus = $this->createTurnStatusRenderer($inputText);
         $previousAlarmHandler = $this->startTurnStatusTicker($turnStatus);
+        $toolResultRenderer = new ToolResultRenderer();
+        $lastToolInput = [];
 
         try {
-            $this->recordTurnHudEvent('turn.started', $this->summarizeTurnDetail($input));
+            $this->recordTurnHudEvent('turn.started', $this->summarizeTurnDetail($inputText));
             $turnStatus->start();
 
             $response = $agent->run(
@@ -3031,25 +3425,31 @@ class HaoCodeCommand extends Command
                     $renderedLiveText = true;
                     $markdownOutput->append($text);
                 },
-                onToolStart: function (string $toolName, array $toolInput) use ($turnStatus, $markdownOutput, $streamTextOutput) {
+                onToolStart: function (string $toolName, array $toolInput) use ($turnStatus, $markdownOutput, $streamTextOutput, &$lastToolInput) {
+                    $lastToolInput = ['name' => $toolName, 'input' => $toolInput];
                     $turnStatus->pause();
                     if ($streamTextOutput) {
                         $markdownOutput->finalize();
                     }
                     $args = $this->summarizeToolInput($toolName, $toolInput);
                     $this->recordTurnHudEvent('tool.started', $this->summarizeTurnDetail(trim($toolName.($args !== '' ? ': '.$args : ''))));
+                    $activityDesc = $this->getActivityDescription($toolName, $toolInput);
                     $this->line("\n".$this->formatter()->toolCall($toolName, $args));
-                    $turnStatus->setPhaseLabel($toolName);
+                    $turnStatus->setPhaseLabel($activityDesc ?? $toolName);
                     $turnStatus->resume();
                 },
-                onToolComplete: function (string $toolName, $result) use ($turnStatus) {
+                onToolComplete: function (string $toolName, $result) use ($turnStatus, $toolResultRenderer, &$lastToolInput) {
                     $turnStatus->pause();
                     $turnStatus->setPhaseLabel(null);
                     $event = in_array($toolName, ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskStop'], true)
                         ? 'plan.updated'
                         : 'tool.completed';
                     $detail = $toolName;
-                    if ($result->isError) {
+                    $input = ($lastToolInput['name'] ?? '') === $toolName ? ($lastToolInput['input'] ?? []) : [];
+                    $rendered = $toolResultRenderer->render($toolName, $input, (string) $result->output, $result->isError);
+                    if ($rendered !== null) {
+                        $this->line($rendered);
+                    } elseif ($result->isError) {
                         $message = trim((string) $result->output);
                         $detail = trim($toolName.' · '.($message === '' ? 'Unknown error' : $message));
                         $this->line($this->formatter()->toolFailure($toolName, $message === '' ? 'Unknown error' : $message));
@@ -3116,11 +3516,21 @@ class HaoCodeCommand extends Command
         } catch (ApiErrorException $e) {
             $turnStatus->pause();
             $markdownOutput->finalize();
+            if ($agent->isAborted()) {
+                $this->recordTurnHudEvent('turn.failed', 'aborted');
+                $this->line($this->formatter()->interruptedStatus()."\n");
+                return;
+            }
             $this->recordTurnHudEvent('turn.failed', $this->summarizeTurnDetail($e->getMessage()));
             $this->line("\n  <fg=red>API Error ({$e->getErrorType()}): {$e->getMessage()}</>\n");
         } catch (\Throwable $e) {
             $turnStatus->pause();
             $markdownOutput->finalize();
+            if ($agent->isAborted()) {
+                $this->recordTurnHudEvent('turn.failed', 'aborted');
+                $this->line($this->formatter()->interruptedStatus()."\n");
+                return;
+            }
             $this->recordTurnHudEvent('turn.failed', $this->summarizeTurnDetail($e->getMessage()));
             $this->line("\n  <fg=red>Error: {$e->getMessage()}</>\n");
             if (config('app.debug')) {
@@ -3140,17 +3550,11 @@ class HaoCodeCommand extends Command
             }
         }
 
-        $args = $this->summarizeToolInput($toolName, $input);
+        $lines = $this->buildPermissionPreview($toolName, $input);
 
         $this->renderPanel(
             'Permission required',
-            [
-                $this->formatter()->keyValue('Tool', $toolName),
-                $args === ''
-                    ? $this->formatter()->keyValue('Target', 'this action', 'gray', 'gray')
-                    : $this->formatter()->keyValue('Target', $args, 'gray', 'gray'),
-                '<fg=green>[y]</> allow once  <fg=green>[a]</> allow session  <fg=red>[n]</> deny',
-            ],
+            $lines,
             'yellow',
             addSpacing: false,
         );
@@ -3174,13 +3578,85 @@ class HaoCodeCommand extends Command
         return in_array($answer, ['y', 'yes', ''], true);
     }
 
+    /**
+     * Build permission preview lines with context-aware content per tool type.
+     *
+     * @return array<int, string>
+     */
+    private function buildPermissionPreview(string $toolName, array $input): array
+    {
+        $lines = [];
+
+        switch ($toolName) {
+            case 'Bash':
+                $cmd = $input['command'] ?? '';
+                $desc = $input['description'] ?? null;
+                $lines[] = $this->formatter()->keyValue('Tool', 'Bash');
+                if ($desc) {
+                    $lines[] = $this->formatter()->keyValue('Action', $desc, 'gray', 'white');
+                }
+                // Show command preview (truncated, colored)
+                $cmdPreview = $this->truncate($cmd, 120);
+                $lines[] = '<fg=gray>Command:</> <fg=yellow>' . OutputFormatter::escape($cmdPreview) . '</>';
+                break;
+
+            case 'Edit':
+                $file = $input['file_path'] ?? '';
+                $old = $input['old_string'] ?? '';
+                $new = $input['new_string'] ?? '';
+                $lines[] = $this->formatter()->keyValue('Tool', 'Edit');
+                $lines[] = $this->formatter()->keyValue('File', basename($file), 'gray', 'cyan');
+                // Show mini diff preview
+                if ($old !== '' || $new !== '') {
+                    $oldPreview = $this->truncate(str_replace("\n", '\\n', $old), 80);
+                    $newPreview = $this->truncate(str_replace("\n", '\\n', $new), 80);
+                    $lines[] = '<fg=red>- ' . OutputFormatter::escape($oldPreview) . '</>';
+                    $lines[] = '<fg=green>+ ' . OutputFormatter::escape($newPreview) . '</>';
+                }
+                break;
+
+            case 'Write':
+                $file = $input['file_path'] ?? '';
+                $content = $input['content'] ?? '';
+                $lineCount = substr_count($content, "\n") + 1;
+                $bytes = strlen($content);
+                $lines[] = $this->formatter()->keyValue('Tool', 'Write');
+                $lines[] = $this->formatter()->keyValue('File', basename($file), 'gray', 'cyan');
+                $exists = file_exists($file);
+                $lines[] = '<fg=gray>' . ($exists ? 'Overwrite' : 'Create') . ": {$lineCount} lines, {$bytes} bytes</>";
+                break;
+
+            case 'Agent':
+                $type = $input['subagent_type'] ?? 'general-purpose';
+                $desc = $input['description'] ?? '';
+                $lines[] = $this->formatter()->keyValue('Tool', "Agent ({$type})");
+                if ($desc !== '') {
+                    $lines[] = $this->formatter()->keyValue('Task', $desc, 'gray', 'white');
+                }
+                break;
+
+            default:
+                $args = $this->summarizeToolInput($toolName, $input);
+                $lines[] = $this->formatter()->keyValue('Tool', $toolName);
+                if ($args !== '') {
+                    $lines[] = $this->formatter()->keyValue('Target', $args, 'gray', 'gray');
+                }
+                break;
+        }
+
+        $lines[] = '<fg=green>[y]</> allow once  <fg=green>[a]</> always allow  <fg=red>[n]</> deny';
+
+        return $lines;
+    }
+
     private function buildPermissionRule(string $toolName, array $input): ?string
     {
         $value = match ($toolName) {
-            'Bash' => $input['command'] ?? null,
-            'Read', 'Edit', 'Write' => $input['file_path'] ?? null,
+            'Bash' => $this->extractBashRulePrefix($input['command'] ?? ''),
+            'Read', 'Edit', 'Write' => $this->extractFileRulePattern($input['file_path'] ?? ''),
             'Glob', 'Grep' => $input['pattern'] ?? null,
             'WebFetch' => $input['url'] ?? null,
+            'Agent' => $input['subagent_type'] ?? null,
             default => null,
         };
 
@@ -3189,6 +3665,45 @@ class HaoCodeCommand extends Command
         }
 
         return sprintf('%s(%s)', $toolName, $value);
+    }
+
+    /**
+     * Extract a permission rule prefix from a bash command.
+     * e.g., "git push origin main" → "git:*" to allow all git commands.
+     */
+    private function extractBashRulePrefix(?string $command): ?string
+    {
+        if ($command === null || trim($command) === '') {
+            return null;
+        }
+
+        $words = preg_split('/\s+/', trim($command));
+        $base = $words[0] ?? '';
+
+        // For common commands, create a prefix rule
+        if (in_array($base, ['git', 'npm', 'yarn', 'pnpm', 'composer', 'php', 'node', 'python', 'pip', 'cargo', 'make', 'go', 'docker'], true)) {
+            return $base . ':*';
+        }
+
+        return $command;
+    }
+
+    /**
+     * Extract a file permission rule pattern.
+     * e.g., "/Users/foo/project/src/file.php" → "/Users/foo/project/src/*"
+     */
+    private function extractFileRulePattern(?string $filePath): ?string
+    {
+        if ($filePath === null || trim($filePath) === '') {
+            return null;
+        }
+
+        $dir = dirname($filePath);
+        if ($dir === '.' || $dir === '') {
+            return $filePath;
+        }
+
+        return $dir . '/*';
     }
 
     private function matchesPermissionRule(string $rule, string $toolName, array $input): bool
@@ -3723,8 +4238,40 @@ PROMPT;
             'Glob' => $this->truncate($input['pattern'] ?? '', 60),
             'Grep' => $this->truncate($input['pattern'] ?? '', 60),
             'WebFetch' => $this->truncate($input['url'] ?? '', 60),
+            'WebSearch' => $this->truncate($input['query'] ?? '', 60),
+            'Agent' => $this->truncate($input['description'] ?? ($input['subagent_type'] ?? 'agent'), 60),
             'TodoWrite' => count($input['todos'] ?? []).' items',
+            'TaskCreate' => $this->truncate($input['subject'] ?? '', 60),
+            'TaskUpdate' => $this->truncate(($input['taskId'] ?? '') . ' → ' . ($input['status'] ?? ''), 60),
             default => $this->truncate(json_encode($input), 60),
+        };
+    }
+
+    /**
+     * Get a human-readable activity description for the spinner.
+     * Delegates to the tool's own getActivityDescription method, with
+     * fallback for tools that don't implement it.
+     */
+    private function getActivityDescription(string $toolName, array $input): ?string
+    {
+        // Delegate to tool's own method
+        $registry = app(\App\Tools\ToolRegistry::class);
+        $tool = $registry->getTool($toolName);
+        if ($tool !== null) {
+            $desc = $tool->getActivityDescription($input);
+            if ($desc !== null) {
+                return $desc;
+            }
+        }
+
+        // Fallback for tools without custom descriptions
+        return match ($toolName) {
+            'WebFetch' => 'Fetching ' . (parse_url($input['url'] ?? '', PHP_URL_HOST) ?: 'page'),
+            'WebSearch' => 'Searching ' . $this->truncate($input['query'] ?? '', 30),
+            'Agent' => ($input['description'] ?? 'Running agent'),
+            'TaskCreate' => 'Creating task',
+            'TaskUpdate' => 'Updating task',
+            default => null,
         };
     }
 
@@ -3735,6 +4282,31 @@ PROMPT;
         }
 
         return $str;
+    }
+
+    /**
+     * Extract text content from a multi-content-block array (for display/logging).
+     */
+    private function extractTextFromContentBlocks(array $blocks): string
+    {
+        $parts = [];
+        $imageCount = 0;
+
+        foreach ($blocks as $block) {
+            if (($block['type'] ?? '') === 'text') {
+                $parts[] = $block['text'] ?? '';
+            } elseif (($block['type'] ?? '') === 'image') {
+                $imageCount++;
+            }
+        }
+
+        $text = implode(' ', $parts);
+        if ($imageCount > 0) {
+            $suffix = " [+{$imageCount} image" . ($imageCount > 1 ? 's' : '') . ']';
+            $text = trim($text) . $suffix;
+        }
+
+        return $text;
     }
 
     private function printUsageStats(AgentLoop $agent): void
@@ -4955,5 +5527,34 @@ PROMPT;
 
         $editor = getenv('EDITOR') ?: getenv('VISUAL') ?: 'vi';
         $this->line("<fg=gray>Open with:</> <fg=cyan>{$editor} {$keybindingsPath}</>");
+    }
+
+    /**
+     * /paste-image [prompt] - Grab image from clipboard and send to agent.
+     */
+    private function handlePasteImage(AgentLoop $agent, string $prompt): void
+    {
+        if (!ImagePaste::hasClipboardImage()) {
+            $this->line('<fg=yellow>No image found in clipboard.</> Copy an image first, then run /paste-image.');
+            return;
+        }
+
+        $imageData = ImagePaste::getClipboardImage();
+        if ($imageData === null) {
+            $this->line('<fg=red>Failed to read clipboard image.</>');
+            return;
+        }
+
+        $this->line("  <fg=cyan>📎 Clipboard image attached</> <fg=gray>(" . $imageData['media_type'] . ", "
+            . round(strlen(base64_decode($imageData['base64'])) / 1024, 1) . " KB)</>");
+
+        $textBlock = $prompt !== '' ? $prompt : 'What do you see in this image?';
+
+        $contentBlocks = [
+            ['type' => 'text', 'text' => $textBlock],
+            ImagePaste::buildImageBlock($imageData['base64'], $imageData['media_type']),
+        ];
+
+        $this->runAgentTurn($agent, $contentBlocks);
     }
 }

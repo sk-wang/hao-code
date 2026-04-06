@@ -130,6 +130,20 @@ class MessageHistoryTest extends TestCase
         $this->assertTrue($blocks[1]['is_error']);
     }
 
+    public function test_tool_result_message_can_append_retry_text(): void
+    {
+        $history = new MessageHistory;
+        $history->addToolResultMessage([
+            ['tool_use_id' => 'toolu_abc', 'content' => 'validation failed', 'is_error' => true],
+        ], 'retry with corrected input only');
+
+        $blocks = $history->getMessagesForApi()[0]['content'];
+
+        $this->assertSame('tool_result', $blocks[0]['type']);
+        $this->assertSame('text', $blocks[1]['type']);
+        $this->assertSame('retry with corrected input only', $blocks[1]['text']);
+    }
+
     public function test_empty_tool_input_is_normalized_to_object_for_api(): void
     {
         $history = new MessageHistory;

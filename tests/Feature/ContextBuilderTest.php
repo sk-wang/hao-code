@@ -101,6 +101,29 @@ class ContextBuilderTest extends TestCase
         $this->assertStringContainsString(date('Y-m-d'), $result[0]['text']);
     }
 
+    public function test_prompt_includes_truthful_validation_instructions(): void
+    {
+        $result = $this->makeBuilder()->buildSystemPrompt();
+
+        $this->assertStringContainsString('When you claim something was validated or tested', $result[0]['text']);
+        $this->assertStringContainsString('capture and report the exact HTTP status code', $result[0]['text']);
+        $this->assertStringContainsString('Do not say "all tests passed"', $result[0]['text']);
+        $this->assertStringContainsString('negative or invalid-input check', $result[0]['text']);
+        $this->assertStringContainsString('do not send a giant multiline payload in one Write or Bash call', $result[0]['text']);
+        $this->assertStringContainsString('Do not use Agent or Skill as a fallback for ordinary file creation or editing errors.', $result[0]['text']);
+    }
+
+    public function test_prompt_requires_finishing_requested_work_before_stopping(): void
+    {
+        $result = $this->makeBuilder()->buildSystemPrompt();
+
+        $this->assertStringContainsString('keep going until that work is actually finished', $result[0]['text']);
+        $this->assertStringContainsString('Do not stop after describing a plan', $result[0]['text']);
+        $this->assertStringContainsString('Do not end your response with "I\'ll do X next"', $result[0]['text']);
+        $this->assertStringContainsString('do not send a giant multiline payload in one Write or Bash call', $result[0]['text']);
+        $this->assertStringContainsString('Do not use Agent or Skill as a fallback', $result[0]['text']);
+    }
+
     public function test_append_system_prompt_is_included(): void
     {
         $settings = $this->makeSettings(['appendPrompt' => 'Extra instructions here']);

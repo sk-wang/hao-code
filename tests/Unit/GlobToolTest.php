@@ -147,6 +147,16 @@ class GlobToolTest extends TestCase
         $this->assertStringContainsString('default.txt', $result->output);
     }
 
+    public function test_it_normalizes_leading_dot_slash_patterns(): void
+    {
+        $this->touch('main.go', 'package main');
+
+        $result = $this->call(['pattern' => './*.go']);
+
+        $this->assertFalse($result->isError);
+        $this->assertStringContainsString('main.go', $result->output);
+    }
+
     public function test_is_read_only(): void
     {
         $this->assertTrue($this->tool->isReadOnly([]));

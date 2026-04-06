@@ -11,6 +11,8 @@ class BashTool extends BaseTool
 {
     /** @var array<string, array{pid: int, outFile: string, startTime: float}> */
     private static array $backgroundTasks = [];
+    /** @var array<string, string> */
+    private static array $sessionWorkingDirectories = [];
 
     public function name(): string
     {
@@ -31,6 +33,8 @@ Usage notes:
  - If your command will create new directories or files, first use this tool to run `ls` to verify the parent directory exists.
  - Always quote file paths that contain spaces with double quotes.
  - Try to maintain your current working directory throughout the session by using absolute paths.
+ - Do not spend tool calls on availability probes or shell no-ops like `: > /dev/null 2>&1` or `true`, and do not start commands with `:`; run the real command directly.
+ - Keep Bash commands short and concrete. Do not embed large heredocs, inline python/node scripts, base64 blobs, or long printf file-generation payloads in a single Bash call.
  - You may specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). Default timeout is 120000ms (2 minutes).
  - Use the `run_in_background` parameter to run the command in the background.
  - Write a clear, concise description of what your command does.
@@ -94,32 +98,72 @@ DESC;
 
         $timeout = ($input['timeout'] ?? 120000) / 1000;
 
+        $stdoutFile = tempnam(sys_get_temp_dir(), 'haocode_bash_stdout_');
+        $stderrFile = tempnam(sys_get_temp_dir(), 'haocode_bash_stderr_');
+
+        if ($stdoutFile === false || $stderrFile === false) {
+            if (is_string($stdoutFile) && file_exists($stdoutFile)) {
+                @unlink($stdoutFile);
+            }
+            if (is_string($stderrFile) && file_exists($stderrFile)) {
+                @unlink($stderrFile);
+            }
+
+            return ToolResult::error('Failed to allocate temporary files for command output.');
+        }
+
         $descriptors = [
             0 => ['pipe', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
+            // Use files instead of pipes so foreground commands that launch
+            // background children with `&` do not keep the tool waiting for EOF.
+            1 => ['file', $stdoutFile, 'w'],
+            2 => ['file', $stderrFile, 'w'],
         ];
 
-        $cwd = $context->workingDirectory;
+        $cwd = self::$sessionWorkingDirectories[$context->sessionId] ?? $context->workingDirectory;
+        $cwdMarker = '__HAOCODE_CWD__' . bin2hex(random_bytes(8)) . '__';
+        $wrappedCommand = $this->wrapCommandWithWorkingDirectoryCapture($command, $cwdMarker);
+
+        // Use getenv() to build the environment because $_ENV is often empty
+        // (PHP requires variables_order to include "E" for $_ENV population).
+        // getenv() always works regardless of php.ini settings.
+        $env = getenv();
+        $env['TERM'] = 'xterm-256color';
 
         $process = proc_open(
-            $command,
+            $wrappedCommand,
             $descriptors,
             $pipes,
             $cwd,
-            ['TERM' => 'xterm-256color'] + $_ENV,
+            $env,
         );
 
         if (!is_resource($process)) {
+            @unlink($stdoutFile);
+            @unlink($stderrFile);
             return ToolResult::error("Failed to execute command: {$command}");
         }
 
         fclose($pipes[0]);
 
-        // Enforce timeout using non-blocking stream_select so that commands
-        // which hang cannot exceed the requested limit.
-        stream_set_blocking($pipes[1], false);
-        stream_set_blocking($pipes[2], false);
+        $stdoutHandle = fopen($stdoutFile, 'r');
+        $stderrHandle = fopen($stderrFile, 'r');
+
+        if (!is_resource($stdoutHandle) || !is_resource($stderrHandle)) {
+            if (is_resource($stdoutHandle)) {
+                fclose($stdoutHandle);
+            }
+            if (is_resource($stderrHandle)) {
+                fclose($stderrHandle);
+            }
+
+            proc_terminate($process, 9);
+            proc_close($process);
+            @unlink($stdoutFile);
+            @unlink($stderrFile);
+
+            return ToolResult::error("Failed to capture command output: {$command}");
+        }
 
         $stdout = '';
         $stderr = '';
@@ -134,6 +178,14 @@ DESC;
                 break;
             }
 
+            $stdout .= $this->drainPipe($stdoutHandle);
+            $stderr .= $this->drainPipe($stderrHandle);
+
+            $status = proc_get_status($process);
+            if (!($status['running'] ?? false)) {
+                break;
+            }
+
             $remaining = $deadline - microtime(true);
             if ($remaining <= 0) {
                 $timedOut = true;
@@ -141,41 +193,21 @@ DESC;
                 break;
             }
 
-            $read   = array_filter([$pipes[1], $pipes[2]], 'is_resource');
-            $write  = null;
-            $except = null;
-
-            if (empty($read)) {
-                break;
-            }
-
-            // Poll up to 200 ms so we don't burn CPU while also staying responsive.
-            $usec    = (int) min($remaining * 1_000_000, 200_000);
-            $changed = @stream_select($read, $write, $except, 0, $usec);
-
-            if ($changed > 0) {
-                foreach ($read as $stream) {
-                    $chunk = fread($stream, 65536);
-                    if ($chunk !== false && $chunk !== '') {
-                        if ($stream === $pipes[1]) {
-                            $stdout .= $chunk;
-                        } else {
-                            $stderr .= $chunk;
-                        }
-                    }
-                }
-            }
-
-            // Stop when both streams are at EOF (process exited).
-            if (feof($pipes[1]) && feof($pipes[2])) {
-                break;
-            }
+            // Poll up to 200 ms so we stay responsive without busy waiting.
+            usleep((int) min($remaining * 1_000_000, 200_000));
         }
 
-        fclose($pipes[1]);
-        fclose($pipes[2]);
+        $stdout .= $this->drainPipe($stdoutHandle);
+        $stderr .= $this->drainPipe($stderrHandle);
+
+        [$stdout, $capturedWorkingDirectory] = $this->extractWorkingDirectoryMarker($stdout, $cwdMarker);
+
+        fclose($stdoutHandle);
+        fclose($stderrHandle);
 
         $exitCode = proc_close($process);
+        @unlink($stdoutFile);
+        @unlink($stderrFile);
 
         if ($aborted) {
             $partial = trim($stdout . ($stderr ? "\n" . $stderr : ''));
@@ -197,6 +229,10 @@ DESC;
                 "Command timed out after {$timeout}s.{$partialNote}",
                 ['exitCode' => -1, 'timedOut' => true],
             );
+        }
+
+        if ($capturedWorkingDirectory !== null && is_dir($capturedWorkingDirectory)) {
+            self::$sessionWorkingDirectories[$context->sessionId] = $capturedWorkingDirectory;
         }
 
         $output = '';
@@ -244,6 +280,35 @@ DESC;
         }
 
         return ToolResult::success($output, ['exitCode' => $exitCode]);
+    }
+
+    private function wrapCommandWithWorkingDirectoryCapture(string $command, string $cwdMarker): string
+    {
+        $script = $command . "\n" .
+            "__haocode_status=\$?\n" .
+            "printf '\\n{$cwdMarker}%s' \"\$PWD\"\n" .
+            "exit \$__haocode_status";
+
+        return 'bash -lc ' . escapeshellarg($script);
+    }
+
+    /**
+     * @return array{0: string, 1: ?string}
+     */
+    private function extractWorkingDirectoryMarker(string $stdout, string $cwdMarker): array
+    {
+        $markerPos = strrpos($stdout, $cwdMarker);
+        if ($markerPos === false) {
+            return [$stdout, null];
+        }
+
+        $capturedWorkingDirectory = substr($stdout, $markerPos + strlen($cwdMarker));
+        $stdout = substr($stdout, 0, $markerPos);
+        if (str_ends_with($stdout, "\n")) {
+            $stdout = substr($stdout, 0, -1);
+        }
+
+        return [$stdout, trim($capturedWorkingDirectory)];
     }
 
     /**
@@ -305,6 +370,20 @@ DESC;
         unset(self::$backgroundTasks[$taskId]);
 
         return ToolResult::success("Task {$taskId} completed:\n{$output}");
+    }
+
+    /**
+     * Drain any output already written to a capture stream without waiting for EOF.
+     */
+    private function drainPipe($pipe): string
+    {
+        if (!is_resource($pipe)) {
+            return '';
+        }
+
+        $chunk = stream_get_contents($pipe);
+
+        return $chunk === false ? '' : $chunk;
     }
 
     /**
@@ -476,17 +555,70 @@ DESC;
 
     public function isConcurrencySafe(array $input): bool
     {
-        return false;
+        $command = $input['command'] ?? '';
+        // Read-only commands that only pipe to other read commands are safe
+        return $this->isReadOnly($input) && CommandClassifier::isConcurrencySafe($command);
+    }
+
+    /**
+     * Classify this command for UI display (collapsible search/read results).
+     *
+     * @return array{isSearch: bool, isRead: bool, isList: bool}
+     */
+    public function classifyCommand(string $command): array
+    {
+        return CommandClassifier::classify($command);
     }
 
     public function maxResultSizeChars(): int
     {
-        return 30000;
+        return 100000;
+    }
+
+    public function getActivityDescription(array $input): ?string
+    {
+        $desc = $input['description'] ?? null;
+        if ($desc !== null && trim($desc) !== '') {
+            return $desc;
+        }
+
+        $cmd = $input['command'] ?? '';
+        $base = preg_split('/\s+/', trim($cmd))[0] ?? '';
+
+        return 'Running ' . basename($base);
+    }
+
+    public function isSearchOrReadCommand(array $input): array
+    {
+        $classification = CommandClassifier::classify($input['command'] ?? '');
+
+        return $classification;
     }
 
     public function validateInput(array $input, ToolUseContext $context): ?string
     {
-        $command = $input['command'] ?? '';
+        $command = trim((string) ($input['command'] ?? ''));
+
+        if ($command === '') {
+            return 'command must not be empty.';
+        }
+
+        if (preg_match('/^:\d*(?::\d+)?$/', $command) === 1) {
+            return 'command must be a real shell command, not a placeholder like ":" or ":2".';
+        }
+
+        if ($this->hasLeadingColonPrefix($command)) {
+            return 'command must not start with ":"; that is a shell no-op or malformed placeholder prefix. Run the real command directly.';
+        }
+
+        if ($this->isNoOpProbeCommand($command)) {
+            return 'command must materially advance the task; do not use Bash for availability probes or shell no-ops like ":" or "true".';
+        }
+
+        $newlineCount = substr_count($command, "\n");
+        if ($newlineCount > 20 || strlen($command) > 1200) {
+            return 'command is too large for a single Bash call. Split it into smaller concrete commands; do not send giant heredocs, inline scripts, or long printf/base64 payloads.';
+        }
 
         // Git safety: prevent force push to main/master
         if (preg_match('/\bgit\s+push\b.*(--force\b|-f\b)/i', $command)) {
@@ -531,5 +663,15 @@ DESC;
     public function userFacingName(array $input): string
     {
         return $input['description'] ?? $input['command'] ?? 'Bash';
+    }
+
+    private function isNoOpProbeCommand(string $command): bool
+    {
+        return preg_match('/^(?::|true)(?:\s+(?:[12]?>{1,2}\s*\S+|[12]>&\d+))*$/i', trim($command)) === 1;
+    }
+
+    private function hasLeadingColonPrefix(string $command): bool
+    {
+        return str_starts_with(ltrim($command), ':');
     }
 }

@@ -6,9 +6,16 @@ class MessageHistory
 {
     private array $messages = [];
 
-    public function addUserMessage(string $text): void
+    /**
+     * Add a user message. Accepts plain text string or an array of content blocks
+     * (for mixed text+image messages).
+     *
+     * @param string|array $content Plain text, or array of content blocks:
+     *   [['type' => 'text', 'text' => '...'], ['type' => 'image', 'source' => [...]]]
+     */
+    public function addUserMessage(string|array $content): void
     {
-        $this->messages[] = ['role' => 'user', 'content' => $text];
+        $this->messages[] = ['role' => 'user', 'content' => $content];
     }
 
     public function addAssistantMessage(array $message): void
@@ -19,7 +26,7 @@ class MessageHistory
     /**
      * @param array<int, array{tool_use_id: string, content: string, is_error: bool}> $toolResults
      */
-    public function addToolResultMessage(array $toolResults): void
+    public function addToolResultMessage(array $toolResults, ?string $text = null): void
     {
         $content = array_map(function (array $result) {
             return [
@@ -29,6 +36,14 @@ class MessageHistory
                 'is_error' => $result['is_error'] ?? false,
             ];
         }, $toolResults);
+
+        $text = trim((string) $text);
+        if ($text !== '') {
+            $content[] = [
+                'type' => 'text',
+                'text' => $text,
+            ];
+        }
 
         $this->messages[] = ['role' => 'user', 'content' => $content];
     }

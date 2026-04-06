@@ -210,4 +210,28 @@ class FileEditToolTest extends TestCase
 
         $this->assertNull($error);
     }
+
+    public function test_it_reports_recovery_hint_when_edit_requires_read(): void
+    {
+        $path = tempnam(sys_get_temp_dir(), 'edit_guardrail_');
+        file_put_contents($path, "hello world\n");
+
+        $freshContext = new ToolUseContext(
+            workingDirectory: sys_get_temp_dir(),
+            sessionId: 'test-session',
+        );
+
+        $result = $this->tool->call([
+            'file_path' => $path,
+            'old_string' => 'hello',
+            'new_string' => 'goodbye',
+        ], $freshContext);
+
+        $this->assertTrue($result->isError);
+        $this->assertStringContainsString('Read tool first', $result->output);
+        $this->assertStringContainsString($path, $result->output);
+        $this->assertStringContainsString('Next step: call Read', $result->output);
+
+        unlink($path);
+    }
 }

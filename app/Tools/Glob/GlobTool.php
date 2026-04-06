@@ -48,7 +48,7 @@ DESC;
 
     public function call(array $input, ToolUseContext $context): ToolResult
     {
-        $pattern = $input['pattern'];
+        $pattern = $this->normalizePattern($input['pattern']);
         $path = $input['path'] ?? $context->workingDirectory;
 
         if (!is_dir($path)) {
@@ -116,6 +116,17 @@ DESC;
         }
     }
 
+    private function normalizePattern(string $pattern): string
+    {
+        $pattern = trim($pattern);
+
+        if (str_starts_with($pattern, './')) {
+            return substr($pattern, 2);
+        }
+
+        return $pattern;
+    }
+
     private function globToRegex(string $pattern): string
     {
         // Use '#' as delimiter so '/' can appear unescaped inside character classes
@@ -129,5 +140,15 @@ DESC;
     public function isReadOnly(array $input): bool
     {
         return true;
+    }
+
+    public function getActivityDescription(array $input): ?string
+    {
+        return 'Searching for ' . ($input['pattern'] ?? 'files');
+    }
+
+    public function isSearchOrReadCommand(array $input): array
+    {
+        return ['isSearch' => true, 'isRead' => false, 'isList' => true];
     }
 }

@@ -4,6 +4,7 @@ namespace App\Services\Compact;
 
 use App\Services\Agent\MessageHistory;
 use App\Services\Agent\QueryEngine;
+use App\Services\Cache\FileStateCache;
 use App\Services\Hooks\HookExecutor;
 
 class ContextCompactor
@@ -31,13 +32,27 @@ class ContextCompactor
 
     private const COMPACTABLE_TOOLS = ['Read', 'Bash', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Edit', 'Write'];
 
+    /** Post-compact: max recently-read files to re-inject */
+    private const POST_COMPACT_MAX_FILES = 5;
+    /** Post-compact: max tokens budget for file re-injection (~50K tokens ≈ 200KB) */
+    private const POST_COMPACT_FILE_BUDGET_CHARS = 200_000;
+    /** Post-compact: per-file cap (~5K tokens ≈ 20KB) */
+    private const POST_COMPACT_PER_FILE_CAP_CHARS = 20_000;
+
     private int $compactFailures = 0;
     private const MAX_COMPACT_FAILURES = 3;
+
+    private ?FileStateCache $fileStateCache = null;
 
     public function __construct(
         private readonly QueryEngine $queryEngine,
         private readonly ?HookExecutor $hookExecutor = null,
     ) {}
+
+    public function setFileStateCache(FileStateCache $cache): void
+    {
+        $this->fileStateCache = $cache;
+    }
 
     /**
      * Compact message history using LLM-generated 9-section structured summary.
@@ -102,7 +117,13 @@ class ContextCompactor
 
         $this->replayMessages($history, $remaining);
 
-        return "Compacted {$removed} messages into structured summary. Kept last {$keepLast}.";
+        // Post-compact: re-inject recently-read files so model has context
+        $recentFiles = $this->extractRecentFiles($oldMessages);
+        $restoredFiles = $this->injectFileContext($history, $recentFiles);
+
+        $suffix = $restoredFiles > 0 ? " Re-injected {$restoredFiles} recently-read files." : '';
+
+        return "Compacted {$removed} messages into structured summary. Kept last {$keepLast}.{$suffix}";
     }
 
     public function shouldAutoCompact(int $totalInputTokens): bool
@@ -468,5 +489,97 @@ PROMPT,
         }
 
         return $summary;
+    }
+
+    /**
+     * Extract file paths mentioned in messages (from Read/Edit/Write tool calls).
+     *
+     * @param array $messages
+     * @return string[] file paths
+     */
+    public function extractRecentFiles(array $messages): array
+    {
+        $files = [];
+
+        foreach ($messages as $msg) {
+            $content = $msg['content'] ?? '';
+            if (!is_array($content)) {
+                continue;
+            }
+
+            foreach ($content as $block) {
+                if (($block['type'] ?? '') !== 'tool_use') {
+                    continue;
+                }
+
+                $name = $block['name'] ?? '';
+                if (!in_array($name, ['Read', 'Edit', 'Write'], true)) {
+                    continue;
+                }
+
+                $path = $block['input']['file_path'] ?? null;
+                if (is_string($path) && $path !== '' && file_exists($path)) {
+                    $files[$path] = true;
+                }
+            }
+        }
+
+        return array_keys($files);
+    }
+
+    /**
+     * Re-inject recently-read files into history as context attachments.
+     *
+     * @param MessageHistory $history
+     * @param string[] $filePaths
+     * @return int number of files injected
+     */
+    public function injectFileContext(MessageHistory $history, array $filePaths): int
+    {
+        $injected = 0;
+        $totalChars = 0;
+
+        // Take last N files (most recently accessed)
+        $filePaths = array_slice($filePaths, -self::POST_COMPACT_MAX_FILES);
+
+        $parts = [];
+        foreach ($filePaths as $path) {
+            if (!file_exists($path) || !is_readable($path)) {
+                continue;
+            }
+
+            $content = @file_get_contents($path);
+            if ($content === false || $content === '') {
+                continue;
+            }
+
+            // Per-file cap
+            if (mb_strlen($content) > self::POST_COMPACT_PER_FILE_CAP_CHARS) {
+                $content = mb_substr($content, 0, self::POST_COMPACT_PER_FILE_CAP_CHARS)
+                    . "\n[... truncated for post-compact context]";
+            }
+
+            // Budget check
+            if ($totalChars + mb_strlen($content) > self::POST_COMPACT_FILE_BUDGET_CHARS) {
+                break;
+            }
+
+            $totalChars += mb_strlen($content);
+            $parts[] = "<file_context path=\"{$path}\">\n{$content}\n</file_context>";
+            $injected++;
+        }
+
+        if ($injected > 0) {
+            $contextMsg = "[Post-compact: re-injecting {$injected} recently-accessed files for context]\n\n"
+                . implode("\n\n", $parts);
+
+            $history->addUserMessage($contextMsg);
+            $history->addAssistantMessage([
+                'role' => 'assistant',
+                'content' => '[Acknowledged. I have the re-injected file context available.]',
+            ]);
+        }
+
+        return $injected;
     }
 }

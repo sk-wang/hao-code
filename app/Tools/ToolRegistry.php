@@ -28,6 +28,22 @@ class ToolRegistry
     }
 
     /**
+     * Remove a tool by name (e.g. for dynamic MCP tool cleanup).
+     */
+    public function unregister(string $name): void
+    {
+        unset($this->tools[$name]);
+    }
+
+    /**
+     * Check if a tool with the given name is registered.
+     */
+    public function has(string $name): bool
+    {
+        return isset($this->tools[$name]);
+    }
+
+    /**
      * Convert all enabled tools to Anthropic API tool format.
      */
     public function toApiTools(): array

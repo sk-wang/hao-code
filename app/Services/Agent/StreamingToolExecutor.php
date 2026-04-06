@@ -15,6 +15,10 @@ use App\Tools\ToolResult;
  *
  * After the stream completes, collectResults() waits for forked children
  * and executes queued unsafe tools, returning all results in block order.
+ *
+ * Sibling abort: When a Bash tool errors, all other running tool processes
+ * are killed and pending tools receive synthetic error messages. This matches
+ * claude-code's siblingAbortController behavior.
  */
 class StreamingToolExecutor
 {
@@ -30,6 +34,11 @@ class StreamingToolExecutor
     private $onToolStart = null;
     /** @var callable|null */
     private $onToolComplete = null;
+
+    /** Whether a Bash tool has errored, triggering sibling abort. */
+    private bool $siblingAborted = false;
+    /** Description of the tool that triggered the sibling abort. */
+    private ?string $abortedByTool = null;
 
     public function __construct(
         private readonly ToolOrchestrator $toolOrchestrator,
@@ -55,6 +64,11 @@ class StreamingToolExecutor
             return;
         }
 
+        if (($block['input_json_error'] ?? null) !== null) {
+            $this->queuedBlocks[$index] = $block;
+            return;
+        }
+
         $tool = $this->toolRegistry->getTool($block['name']);
         $input = $block['input'] ?? [];
         $isSafe = $tool
@@ -75,6 +89,9 @@ class StreamingToolExecutor
     {
         $tempFile = sys_get_temp_dir() . '/haocode_stream_' . $index . '_' . getmypid() . '_' . $block['id'];
 
+        // Snapshot readFileState before fork so we can detect child additions.
+        $stateBefore = ToolUseContext::getReadFileStateSnapshot();
+
         $pid = pcntl_fork();
         if ($pid === -1) {
             // Fork failed, queue for sequential execution
@@ -83,9 +100,12 @@ class StreamingToolExecutor
         }
 
         if ($pid === 0) {
-            // Child process: execute tool and write result
+            // Child process: execute tool and serialize result + readFileState changes
             $result = $this->toolOrchestrator->executeToolBlock($block, $this->context);
-            file_put_contents($tempFile, serialize($result));
+            $childState = ToolUseContext::getReadFileStateSnapshot();
+            $newEntries = array_diff_key($childState, $stateBefore);
+            $payload = ['result' => $result, 'readState' => $newEntries];
+            file_put_contents($tempFile, serialize($payload));
             exit(0);
         }
 
@@ -104,6 +124,7 @@ class StreamingToolExecutor
     /**
      * After the stream completes, collect all tool results.
      * Waits for early-forked safe tools, then executes queued unsafe tools.
+     * If a Bash tool errors, remaining queued tools receive synthetic errors.
      *
      * @return array API-format tool_result blocks in original block order
      */
@@ -111,13 +132,22 @@ class StreamingToolExecutor
     {
         $results = [];
 
-        // 1. Collect results from early-forked processes
+        // 1. Collect results from early-forked processes and merge readFileState
         foreach ($this->earlyPids as $index => $info) {
             pcntl_waitpid($info['pid'], $status);
             $data = @file_get_contents($info['temp_file']);
-            $result = $data !== false ? @unserialize($data) : false;
+            $payload = $data !== false ? @unserialize($data) : false;
 
-            if ($result === false) {
+            if (is_array($payload) && isset($payload['result'])) {
+                // New format: result + readFileState from child
+                $result = $payload['result'];
+                if (!empty($payload['readState'])) {
+                    ToolUseContext::mergeReadFileStateSnapshot($payload['readState']);
+                }
+            } elseif (is_array($payload)) {
+                // Legacy format: bare result
+                $result = $payload;
+            } else {
                 $result = [
                     'tool_use_id' => $info['block']['id'],
                     'content' => 'Failed to read streaming tool result',
@@ -134,20 +164,47 @@ class StreamingToolExecutor
             }
         }
 
-        // 2. Execute queued unsafe tools sequentially
+        // 2. Execute queued unsafe tools sequentially, with sibling abort
         foreach ($this->queuedBlocks as $index => $block) {
-            $results[$index] = $this->toolOrchestrator->executeToolBlock(
+            if ($this->siblingAborted) {
+                // Sibling abort: give synthetic error to remaining tools
+                $results[$index] = [
+                    'tool_use_id' => $block['id'],
+                    'content' => "Tool execution skipped: a sibling Bash command ({$this->abortedByTool}) failed. Fix the error and retry.",
+                    'is_error' => true,
+                ];
+                continue;
+            }
+
+            $result = $this->toolOrchestrator->executeToolBlock(
                 $block,
                 $this->context,
                 $this->onToolStart,
                 $this->onToolComplete,
             );
+
+            $results[$index] = $result;
+
+            // Check for Bash tool errors → trigger sibling abort
+            if ($block['name'] === 'Bash' && ($result['is_error'] ?? false)) {
+                $exitCode = $result['metadata']['exitCode'] ?? null;
+                // Only abort on real errors, not semantic non-errors (grep no match, etc.)
+                if ($exitCode !== null && $exitCode !== 0) {
+                    $this->siblingAborted = true;
+                    $this->abortedByTool = $block['input']['description']
+                        ?? $block['input']['command']
+                        ?? 'Bash';
+                    $this->killEarlyPids();
+                }
+            }
         }
 
         // Sort by original block index and re-index
         ksort($results);
         $this->earlyPids = [];
         $this->queuedBlocks = [];
+        $this->siblingAborted = false;
+        $this->abortedByTool = null;
         return array_values($results);
     }
 
@@ -160,9 +217,26 @@ class StreamingToolExecutor
     }
 
     /**
-     * Kill any running child processes (e.g. on stream error or abort).
+     * Kill any running child processes (e.g. on stream error, abort, or sibling abort).
      */
     public function cleanup(): void
+    {
+        $this->killEarlyPids();
+        $this->queuedBlocks = [];
+    }
+
+    /**
+     * Count of tools that were started early via fork.
+     */
+    public function earlyExecutionCount(): int
+    {
+        return count($this->earlyPids);
+    }
+
+    /**
+     * Kill all early-forked child processes and clean up temp files.
+     */
+    private function killEarlyPids(): void
     {
         foreach ($this->earlyPids as $info) {
             if (function_exists('posix_kill')) {
@@ -176,15 +250,6 @@ class StreamingToolExecutor
             }
         }
         $this->earlyPids = [];
-        $this->queuedBlocks = [];
-    }
-
-    /**
-     * Count of tools that were started early via fork.
-     */
-    public function earlyExecutionCount(): int
-    {
-        return count($this->earlyPids);
     }
 
     private function resultArrayToToolResult(array $result): ToolResult

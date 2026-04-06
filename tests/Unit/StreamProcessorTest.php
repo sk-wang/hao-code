@@ -133,6 +133,36 @@ class StreamProcessorTest extends TestCase
         $this->assertNull($p->getStopReason());
     }
 
+    public function test_has_final_message_event_false_without_message_delta_or_stop(): void
+    {
+        $p = new StreamProcessor;
+        $p->processEvent($this->event('message_start', [
+            'message' => ['id' => 'msg_1', 'usage' => []],
+        ]));
+        $p->processEvent($this->startText());
+        $p->processEvent($this->textDelta('partial'));
+
+        $this->assertFalse($p->hasFinalMessageEvent());
+    }
+
+    public function test_has_final_message_event_true_after_message_delta(): void
+    {
+        $p = new StreamProcessor;
+        $p->processEvent($this->event('message_delta', [
+            'delta' => ['stop_reason' => 'end_turn'],
+        ]));
+
+        $this->assertTrue($p->hasFinalMessageEvent());
+    }
+
+    public function test_has_final_message_event_true_after_message_stop(): void
+    {
+        $p = new StreamProcessor;
+        $p->processEvent($this->event('message_stop'));
+
+        $this->assertTrue($p->hasFinalMessageEvent());
+    }
+
     // ─── message_delta merges usage ────────────────────────────────────────
 
     public function test_message_delta_merges_usage(): void
@@ -180,6 +210,69 @@ class StreamProcessorTest extends TestCase
         $this->assertSame('tid', $block['id']);
         $this->assertSame('Bash', $block['name']);
         $this->assertSame('ls', $block['input']['command']);
+    }
+
+    public function test_invalid_tool_use_json_is_reported_without_dropping_context(): void
+    {
+        $p = new StreamProcessor;
+        $p->processEvent($this->event('content_block_start', [
+            'index' => 0,
+            'content_block' => ['type' => 'tool_use', 'id' => 'tid', 'name' => 'Write'],
+        ]));
+        $p->processEvent($this->event('content_block_delta', [
+            'index' => 0,
+            'delta' => ['type' => 'input_json_delta', 'partial_json' => ':{"file_path":"/tmp/demo.txt"}'],
+        ]));
+
+        $blocks = $p->getIndexedToolUseBlocks();
+
+        $this->assertSame([], $blocks[0]['input']);
+        $this->assertSame(':{"file_path":"/tmp/demo.txt"}', $blocks[0]['raw_input']);
+        $this->assertStringContainsString('could not be parsed', $blocks[0]['input_json_error']);
+        $this->assertSame([], $p->toAssistantMessage()['content'][0]['input']);
+    }
+
+    public function test_tool_use_json_with_literal_newlines_in_strings_is_repaired(): void
+    {
+        $p = new StreamProcessor;
+        $p->processEvent($this->event('content_block_start', [
+            'index' => 0,
+            'content_block' => ['type' => 'tool_use', 'id' => 'tid', 'name' => 'Write'],
+        ]));
+        $p->processEvent($this->event('content_block_delta', [
+            'index' => 0,
+            'delta' => [
+                'type' => 'input_json_delta',
+                'partial_json' => "{\"file_path\":\"/tmp/demo.txt\",\"content\":\"line1\nline2\"}",
+            ],
+        ]));
+
+        $blocks = $p->getIndexedToolUseBlocks();
+
+        $this->assertNull($blocks[0]['input_json_error']);
+        $this->assertSame('/tmp/demo.txt', $blocks[0]['input']['file_path']);
+        $this->assertSame("line1\nline2", $blocks[0]['input']['content']);
+    }
+
+    public function test_tool_use_json_with_other_control_characters_in_strings_is_repaired(): void
+    {
+        $p = new StreamProcessor;
+        $p->processEvent($this->event('content_block_start', [
+            'index' => 0,
+            'content_block' => ['type' => 'tool_use', 'id' => 'tid', 'name' => 'Write'],
+        ]));
+        $p->processEvent($this->event('content_block_delta', [
+            'index' => 0,
+            'delta' => [
+                'type' => 'input_json_delta',
+                'partial_json' => "{\"file_path\":\"/tmp/demo.txt\",\"content\":\"line1" . chr(12) . "line2\"}",
+            ],
+        ]));
+
+        $blocks = $p->getIndexedToolUseBlocks();
+
+        $this->assertNull($blocks[0]['input_json_error']);
+        $this->assertSame("line1" . chr(12) . "line2", $blocks[0]['input']['content']);
     }
 
     public function test_to_assistant_message_with_thinking_block(): void

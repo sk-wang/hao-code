@@ -95,6 +95,75 @@ class BashToolTest extends TestCase
         }
     }
 
+    public function test_validate_input_rejects_placeholder_only_command(): void
+    {
+        $error = $this->tool->validateInput(['command' => ':2'], $this->context);
+
+        $this->assertNotNull($error);
+        $this->assertStringContainsString('placeholder', $error);
+    }
+
+    public function test_validate_input_rejects_no_op_bash_probe(): void
+    {
+        $error = $this->tool->validateInput(
+            ['command' => 'true > /dev/null 2>&1'],
+            $this->context,
+        );
+
+        $this->assertNotNull($error);
+        $this->assertStringContainsString('materially advance', $error);
+    }
+
+    public function test_validate_input_rejects_colon_prefixed_placeholder_command(): void
+    {
+        $error = $this->tool->validateInput(
+            ['command' => ':17,'],
+            $this->context,
+        );
+
+        $this->assertNotNull($error);
+        $this->assertStringContainsString('must not start with ":"', $error);
+    }
+
+    public function test_validate_input_rejects_colon_prefixed_garbage_before_real_command(): void
+    {
+        $error = $this->tool->validateInput(
+            ['command' => ': true}  ls -la /tmp'],
+            $this->context,
+        );
+
+        $this->assertNotNull($error);
+        $this->assertStringContainsString('must not start with ":"', $error);
+    }
+
+    public function test_validate_input_rejects_large_multiline_command(): void
+    {
+        $command = implode("\n", array_fill(0, 25, "echo 'line' >> /tmp/demo.txt"));
+
+        $error = $this->tool->validateInput(
+            ['command' => $command],
+            $this->context,
+        );
+
+        $this->assertNotNull($error);
+        $this->assertStringContainsString('too large for a single Bash call', $error);
+        $this->assertStringContainsString('Split it into smaller concrete commands', $error);
+    }
+
+    public function test_validate_input_rejects_giant_multiline_command(): void
+    {
+        $command = "cat <<'EOF' > /tmp/demo.js\n" . implode("\n", array_fill(0, 25, 'console.log("x")')) . "\nEOF";
+
+        $error = $this->tool->validateInput(
+            ['command' => $command],
+            $this->context,
+        );
+
+        $this->assertNotNull($error);
+        $this->assertStringContainsString('too large for a single Bash call', $error);
+        $this->assertStringContainsString('giant heredocs', $error);
+    }
+
     // ─── detectDangerousPatterns (via reflection) ─────────────────────────
 
     private function detectDangerous(string $command): array
@@ -314,6 +383,39 @@ class BashToolTest extends TestCase
         $this->assertStringContainsString('hello', $result->output);
     }
 
+    public function test_call_returns_promptly_when_shell_backgrounds_a_child(): void
+    {
+        $marker = tempnam(sys_get_temp_dir(), 'bash_bg_marker_');
+        $this->assertNotFalse($marker);
+        @unlink($marker);
+
+        $command = sprintf(
+            'sh -c %s & echo started',
+            escapeshellarg('sleep 1.2; echo late; echo done > ' . escapeshellarg($marker))
+        );
+
+        $start = microtime(true);
+
+        $result = $this->tool->call([
+            'command' => $command,
+            'timeout' => 1000,
+        ], $this->context);
+
+        $elapsed = microtime(true) - $start;
+
+        $this->assertFalse($result->isError, 'Shell should finish even if a background child keeps running');
+        $this->assertStringContainsString('started', $result->output);
+        $this->assertFalse($result->metadata['timedOut'] ?? false);
+        $this->assertLessThan(1.5, $elapsed, 'Foreground shell should return without waiting for the background child');
+
+        usleep(1_500_000);
+
+        $this->assertFileExists($marker, 'Background child should keep running after the shell exits');
+        $this->assertSame('done', trim((string) file_get_contents($marker)));
+
+        @unlink($marker);
+    }
+
     // ─── call: warns on dangerous patterns ───────────────────────────────
 
     public function test_call_prepends_warning_for_rm_rf(): void
@@ -325,5 +427,52 @@ class BashToolTest extends TestCase
         ], $this->context);
 
         $this->assertStringContainsString('<warnings>', $result->output);
+    }
+
+    public function test_call_persists_working_directory_between_commands(): void
+    {
+        $baseDir = sys_get_temp_dir() . '/bash-tool-cwd-' . uniqid();
+        $childDir = $baseDir . '/child';
+        mkdir($childDir, 0777, true);
+
+        $context = new ToolUseContext(
+            workingDirectory: $baseDir,
+            sessionId: 'cwd-session-' . uniqid(),
+        );
+
+        $first = $this->tool->call([
+            'command' => 'cd child && pwd',
+        ], $context);
+        $second = $this->tool->call([
+            'command' => 'pwd',
+        ], $context);
+
+        $this->assertFalse($first->isError);
+        $this->assertFalse($second->isError);
+        $this->assertStringContainsString($childDir, trim($first->output));
+        $this->assertStringContainsString($childDir, trim($second->output));
+    }
+
+    public function test_call_persists_working_directory_after_cd_then_failing_command(): void
+    {
+        $baseDir = sys_get_temp_dir() . '/bash-tool-cwd-fail-' . uniqid();
+        $childDir = $baseDir . '/child';
+        mkdir($childDir, 0777, true);
+
+        $context = new ToolUseContext(
+            workingDirectory: $baseDir,
+            sessionId: 'cwd-session-fail-' . uniqid(),
+        );
+
+        $result = $this->tool->call([
+            'command' => 'cd child && nonexistent_command_haocode_test',
+        ], $context);
+        $followUp = $this->tool->call([
+            'command' => 'pwd',
+        ], $context);
+
+        $this->assertTrue($result->isError);
+        $this->assertFalse($followUp->isError);
+        $this->assertStringContainsString($childDir, trim($followUp->output));
     }
 }

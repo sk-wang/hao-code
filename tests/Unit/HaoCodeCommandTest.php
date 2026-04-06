@@ -16,6 +16,42 @@ class HaoCodeCommandTest extends TestCase
         return $m->invoke($target, ...$args);
     }
 
+    private function withWorkingDirectory(string $directory, callable $callback): mixed
+    {
+        $original = getcwd();
+        chdir($directory);
+
+        try {
+            return $callback();
+        } finally {
+            if ($original !== false) {
+                chdir($original);
+            }
+        }
+    }
+
+    private function removeDirectory(string $directory): void
+    {
+        if (!is_dir($directory)) {
+            return;
+        }
+
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($directory, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST,
+        );
+
+        foreach ($iterator as $item) {
+            if ($item->isDir()) {
+                @rmdir($item->getPathname());
+            } else {
+                @unlink($item->getPathname());
+            }
+        }
+
+        @rmdir($directory);
+    }
+
     public function test_find_history_match_returns_latest_matching_entry(): void
     {
         $command = new HaoCodeCommand;
@@ -96,8 +132,8 @@ class HaoCodeCommandTest extends TestCase
             'file_path' => '/tmp/README.md',
         ]);
 
-        $this->assertSame('Bash(git status)', $bashRule);
-        $this->assertSame('Write(/tmp/README.md)', $writeRule);
+        $this->assertSame('Bash(git:*)', $bashRule);
+        $this->assertSame('Write(/tmp/*)', $writeRule);
     }
 
     public function test_matches_permission_rule_supports_exact_and_prefix_patterns(): void
@@ -210,5 +246,36 @@ class HaoCodeCommandTest extends TestCase
         $this->assertSame('from-print', $prompt);
         $this->assertSame('from-prompt', $deprecated);
         $this->assertSame('from-arg', $argument);
+    }
+
+    public function test_detect_project_info_recognizes_split_full_stack_project(): void
+    {
+        $root = sys_get_temp_dir() . '/haocode-fullstack-' . bin2hex(random_bytes(4));
+        mkdir($root . '/backend', 0755, true);
+        mkdir($root . '/frontend', 0755, true);
+
+        file_put_contents($root . '/backend/artisan', "#!/usr/bin/env php\n");
+        file_put_contents($root . '/backend/composer.json', json_encode([
+            'require' => ['laravel/framework' => '^12.0'],
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+        file_put_contents($root . '/frontend/package.json', json_encode([
+            'dependencies' => ['react' => '^19.0.0'],
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+        file_put_contents($root . '/frontend/pnpm-lock.yaml', "lockfileVersion: '9.0'\n");
+
+        try {
+            $command = new HaoCodeCommand;
+            $info = $this->withWorkingDirectory(
+                $root,
+                fn () => $this->invoke($command, 'detectProjectInfo'),
+            );
+
+            $this->assertSame('Full-stack (Laravel + React/Next.js)', $info['framework']);
+            $this->assertSame('(cd backend && php artisan test) && (cd frontend && pnpm test)', $info['test_command']);
+            $this->assertSame('Composer + pnpm', $info['package_manager']);
+            $this->assertSame('full-stack', $info['structure']);
+        } finally {
+            $this->removeDirectory($root);
+        }
     }
 }

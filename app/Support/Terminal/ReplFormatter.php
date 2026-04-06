@@ -655,7 +655,7 @@ class ReplFormatter
         ], 'yellow');
     }
 
-    public function loadingStatus(string $verb, int $elapsedSeconds, ?int $approxTokens = null): string
+    public function loadingStatus(string $verb, int $elapsedSeconds, ?int $approxTokens = null, bool $isStalled = false): string
     {
         $details = "{$elapsedSeconds}s";
 
@@ -663,7 +663,10 @@ class ReplFormatter
             $details .= " · ↓ {$approxTokens} tokens";
         }
 
-        return '  <fg='.self::LOADING_COLOR.'>✻ '.$this->escape($verb).'...</> <fg=gray>('.$details.')</>';
+        $color = $isStalled ? 'red' : self::LOADING_COLOR;
+        $stallNote = $isStalled ? ' (stalled)' : '';
+
+        return '  <fg='.$color.'>✻ '.$this->escape($verb).'...</> <fg=gray>('.$details.$stallNote.')</>';
     }
 
     public function interruptedStatus(): string
@@ -676,9 +679,12 @@ class ReplFormatter
         return '  <fg=yellow>⏸ Aborting...</> <fg=gray>(Ctrl+C again to force exit)</>';
     }
 
-    public function runningToolStatus(string $toolName, int $elapsedSeconds): string
+    public function runningToolStatus(string $toolName, int $elapsedSeconds, bool $isStalled = false): string
     {
-        return '  <fg='.self::LOADING_COLOR.'>✻ Running '.$this->escape($toolName).'...</> <fg=gray>('.$elapsedSeconds.'s)</>';
+        $color = $isStalled ? 'red' : self::LOADING_COLOR;
+        $stallNote = $isStalled ? ' (stalled)' : '';
+
+        return '  <fg='.$color.'>✻ '.$this->escape($toolName).'...</> <fg=gray>('.$elapsedSeconds.'s'.$stallNote.')</>';
     }
 
     public function usageFooter(

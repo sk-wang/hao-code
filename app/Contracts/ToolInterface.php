@@ -34,8 +34,8 @@ interface ToolInterface
     public function validateInput(array $input, ToolUseContext $context): ?string;
 
     /**
-     * Maximum result size in characters before truncation.
-     * Return PHP_INT_MAX to disable truncation.
+     * Maximum result size in characters before truncation/persistence.
+     * Return PHP_INT_MAX to disable truncation (e.g., FileReadTool).
      */
     public function maxResultSizeChars(): int;
 
@@ -44,4 +44,18 @@ interface ToolInterface
      * Expands ~ and relative paths to absolute paths so that permission patterns cannot be bypassed.
      */
     public function backfillObservableInput(array $input, ToolUseContext $context): array;
+
+    /**
+     * Human-readable activity description for the spinner.
+     * e.g., "Reading foo.ts", "Searching for pattern".
+     * Returns null to use the tool name as-is.
+     */
+    public function getActivityDescription(array $input): ?string;
+
+    /**
+     * Classify this tool invocation for UI display (collapsible results).
+     *
+     * @return array{isSearch: bool, isRead: bool, isList: bool}
+     */
+    public function isSearchOrReadCommand(array $input): array;
 }

@@ -62,6 +62,9 @@ class TurnStatusRenderer
 
     private ?string $phaseLabel = null;
 
+    /** Seconds after which spinner shows stall warning (red). */
+    private const STALL_THRESHOLD_SECONDS = 30;
+
     public function __construct(
         private readonly OutputInterface $output,
         private readonly ReplFormatter $formatter,
@@ -165,10 +168,14 @@ class TurnStatusRenderer
         }
 
         $this->lastElapsedSecond = $elapsedSeconds;
+        $isStalled = $elapsedSeconds >= self::STALL_THRESHOLD_SECONDS && $this->approximateChars === 0;
         $approxTokens = $this->approximateChars > 0 ? (int) ceil($this->approximateChars / 4) : null;
-        $status = $this->phaseLabel !== null
-            ? $this->formatter->runningToolStatus($this->phaseLabel, $elapsedSeconds)
-            : $this->formatter->loadingStatus($this->verb, $elapsedSeconds, $approxTokens);
+
+        if ($this->phaseLabel !== null) {
+            $status = $this->formatter->runningToolStatus($this->phaseLabel, $elapsedSeconds, $isStalled);
+        } else {
+            $status = $this->formatter->loadingStatus($this->verb, $elapsedSeconds, $approxTokens, $isStalled);
+        }
 
         $this->clearLine();
         $this->writeRaw("\r");

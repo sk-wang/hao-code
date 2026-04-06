@@ -46,6 +46,52 @@ abstract class BaseTool implements \App\Contracts\ToolInterface
         return $input;
     }
 
+    public function getActivityDescription(array $input): ?string
+    {
+        return null;
+    }
+
+    public function isSearchOrReadCommand(array $input): array
+    {
+        return ['isSearch' => false, 'isRead' => $this->isReadOnly($input), 'isList' => false];
+    }
+
+    /**
+     * Detect placeholders like ":12" that only encode a line reference with no path.
+     */
+    protected function isBareLineReference(string $value): bool
+    {
+        return preg_match('/^:\d+(?::\d+)?$/', trim($value)) === 1;
+    }
+
+    /**
+     * Strip trailing :line[:column] from path-like inputs when it looks like the
+     * model copied a code reference instead of a raw file path.
+     */
+    protected function normalizeFileReferencePath(string $path, string $workingDir): string
+    {
+        $trimmed = trim($path);
+        if ($trimmed === '' || $this->isBareLineReference($trimmed)) {
+            return $trimmed;
+        }
+
+        if (!preg_match('/^(.*):(\d+)(?::(\d+))?$/', $trimmed, $matches)) {
+            return $trimmed;
+        }
+
+        $candidate = $matches[1] ?? '';
+        if ($candidate === '' || preg_match('/^[A-Za-z]$/', $candidate) === 1) {
+            return $trimmed;
+        }
+
+        $resolvedCandidate = $this->resolvePath($candidate, $workingDir);
+        if (file_exists($resolvedCandidate) || str_contains(basename($candidate), '.')) {
+            return $candidate;
+        }
+
+        return $trimmed;
+    }
+
     /**
      * Resolve a path: expand ~, handle relative paths against the working directory.
      */

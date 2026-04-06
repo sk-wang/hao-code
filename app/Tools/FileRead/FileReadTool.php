@@ -66,10 +66,8 @@ DESC;
         $offset = $input['offset'] ?? 1;
         $limit = $input['limit'] ?? 2000;
 
-        if (!file_exists($filePath)) {
-            // Still record the read attempt so Edit knows we tried
-        } else {
-            // Track that this file was read (for Edit read-before-write enforcement)
+        if (file_exists($filePath)) {
+            // Track read — content cached below after successful read
             $context->recordFileRead($filePath);
         }
 
@@ -133,8 +131,13 @@ DESC;
             $output .= sprintf("%6d\t%s\n", $lineNum, $line);
         }
 
+        // Cache file content in FileStateCache for Edit/Write read-before-write
+        $isPartial = ($offset > 1 || $limit < $totalLines);
+        $rawContent = implode("\n", $lines);
+        $context->recordFileRead($filePath, $rawContent, $offset, $limit, $isPartial);
+
         $header = "File: {$filePath} ({$totalLines} lines total)\n";
-        if ($offset > 1 || $limit < $totalLines) {
+        if ($isPartial) {
             $endLine = $offset + count($selectedLines) - 1;
             $header .= "Lines {$offset}-{$endLine}\n";
         }
@@ -148,17 +151,49 @@ DESC;
         return true;
     }
 
+    public function validateInput(array $input, ToolUseContext $context): ?string
+    {
+        $filePath = trim((string) ($input['file_path'] ?? ''));
+        if ($filePath === '') {
+            return 'file_path must not be empty.';
+        }
+
+        if ($this->isBareLineReference($filePath)) {
+            return 'file_path must include an actual path, not only a line reference like ":12".';
+        }
+
+        if (isset($input['pages']) && trim((string) $input['pages']) !== '') {
+            $pages = trim((string) $input['pages']);
+            if (preg_match('/^\d+(\s*-\s*\d+)?$/', $pages) !== 1) {
+                return 'pages must be a page number or range like "3" or "1-5".';
+            }
+        }
+
+        return null;
+    }
+
     public function backfillObservableInput(array $input, ToolUseContext $context): array
     {
         if (isset($input['file_path'])) {
-            $input['file_path'] = $this->resolvePath($input['file_path'], $context->workingDirectory);
+            $normalizedPath = $this->normalizeFileReferencePath($input['file_path'], $context->workingDirectory);
+            $input['file_path'] = $this->resolvePath($normalizedPath, $context->workingDirectory);
         }
         return $input;
     }
 
     public function maxResultSizeChars(): int
     {
-        return PHP_INT_MAX; // Never truncate - avoid circular Read->file->Read loop
+        return PHP_INT_MAX; // Never truncate/persist - avoid circular Read->file->Read loop
+    }
+
+    public function getActivityDescription(array $input): ?string
+    {
+        return 'Reading ' . basename($input['file_path'] ?? 'file');
+    }
+
+    public function isSearchOrReadCommand(array $input): array
+    {
+        return ['isSearch' => false, 'isRead' => true, 'isList' => false];
     }
 
     private function getImageFormat(string $mimeType): string

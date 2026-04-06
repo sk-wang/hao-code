@@ -27,6 +27,7 @@ Usage notes:
 - Each task should have both a content (imperative) and activeForm (present continuous) form
 - Only ONE task should be in_progress at a time
 - Mark tasks complete IMMEDIATELY after finishing
+- If there is nothing meaningful to track, skip TodoWrite instead of sending a placeholder update
 DESC;
     }
 
@@ -51,7 +52,7 @@ DESC;
             ],
             'required' => ['todos'],
         ], [
-            'todos' => 'required|array',
+            'todos' => 'present|array',
             'todos.*.content' => 'required|string',
             'todos.*.status' => 'required|string|in:pending,in_progress,completed',
             'todos.*.activeForm' => 'required|string',

@@ -250,7 +250,7 @@ class ReplFormatterTest extends TestCase
         $formatter = new ReplFormatter;
 
         $this->assertSame(
-            '  <fg=yellow>✻ Running Bash...</> <fg=gray>(3s)</>',
+            '  <fg=yellow>✻ Bash...</> <fg=gray>(3s)</>',
             $formatter->runningToolStatus('Bash', 3),
         );
     }

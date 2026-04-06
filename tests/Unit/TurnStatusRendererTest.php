@@ -252,7 +252,7 @@ class TurnStatusRendererTest extends TestCase
         $renderer->setPhaseLabel('Bash');
         $display = $output->fetch();
 
-        $this->assertStringContainsString('Running Bash...', $display);
+        $this->assertStringContainsString('Bash...', $display);
         $this->assertStringNotContainsString('Thinking...', $display);
     }
 

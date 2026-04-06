@@ -15,6 +15,8 @@ use App\Services\Agent\MessageHistory;
 use App\Services\Compact\ContextCompactor;
 use App\Services\Cost\CostTracker;
 use App\Services\Hooks\HookExecutor;
+use App\Services\Mcp\McpConnectionManager;
+use App\Services\Mcp\McpServerConfigManager;
 use App\Services\Notification\Notifier;
 use App\Services\OutputStyle\OutputStyleLoader;
 use App\Services\Session\AwaySummaryService;
@@ -73,6 +75,12 @@ class AgentServiceProvider extends ServiceProvider
         $this->app->singleton(\App\Services\Task\TaskManager::class);
         $this->app->singleton(BackgroundAgentManager::class);
         $this->app->singleton(GitContext::class);
+        $this->app->singleton(McpServerConfigManager::class);
+        $this->app->singleton(McpConnectionManager::class, function ($app) {
+            return new McpConnectionManager(
+                configManager: $app->make(McpServerConfigManager::class),
+            );
+        });
 
         // Register ContextBuilder with its dependencies
         $this->app->singleton(ContextBuilder::class, function ($app) {
@@ -96,6 +104,8 @@ class AgentServiceProvider extends ServiceProvider
                 thinkingEnabled: (bool) env('HAOCODE_THINKING', false),
                 thinkingBudget: (int) env('HAOCODE_THINKING_BUDGET', 10000),
                 settingsManager: $settings,
+                idleTimeoutSeconds: (int) config('haocode.api_stream_idle_timeout', 60),
+                streamPollTimeoutSeconds: (float) config('haocode.api_stream_poll_timeout', 1.0),
             );
         });
 

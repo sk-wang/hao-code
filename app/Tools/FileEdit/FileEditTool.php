@@ -47,6 +47,7 @@ DESC;
                 'replace_all' => [
                     'type' => 'boolean',
                     'description' => 'Replace all occurrences of old_string (default false)',
+                    'default' => false,
                 ],
             ],
             'required' => ['file_path', 'old_string', 'new_string'],
@@ -69,11 +70,11 @@ DESC;
             return ToolResult::error("File does not exist: {$filePath}");
         }
 
-        // Enforce read-before-write: file must have been read in this conversation
+        // Enforce read-before-write
         if (!$context->wasFileRead($filePath)) {
             return ToolResult::error(
-                "You must use the Read tool to read this file before editing it. " .
-                "This tool will error if you attempt an edit without reading the file first."
+                "Read tool first: {$filePath} must be read before editing. " .
+                "Next step: call Read on this exact path, then retry Edit."
             );
         }
 
@@ -93,40 +94,73 @@ DESC;
             return ToolResult::error("old_string and new_string are identical. No changes needed.");
         }
 
-        if (!str_contains($content, $oldString)) {
+        // Detect line ending style for preservation
+        $lineEnding = $this->detectLineEnding($content);
+
+        // Try finding old_string with curly quote normalization fallback
+        $actualOldString = QuoteNormalizer::findActualString($content, $oldString);
+        if ($actualOldString === null) {
             return ToolResult::error("old_string not found in file: {$filePath}");
         }
 
-        if (!$replaceAll) {
-            // Check uniqueness
-            $count = substr_count($content, $oldString);
-            if ($count > 1) {
-                return ToolResult::error(
-                    "old_string is not unique in the file (found {$count} occurrences). " .
-                    "Either provide a larger string with more surrounding context to make it unique, " .
-                    "or use `replace_all: true` to change every instance."
-                );
-            }
+        // Preserve file's curly quote style in replacement
+        $actualNewString = QuoteNormalizer::preserveQuoteStyle($oldString, $actualOldString, $newString);
+
+        // Count occurrences (using the actual string from the file)
+        $count = substr_count($content, $actualOldString);
+        if ($count === 0) {
+            // Fallback: count via normalization
+            $count = QuoteNormalizer::countOccurrences($content, $oldString);
         }
 
+        if (!$replaceAll && $count > 1) {
+            return ToolResult::error(
+                "old_string is not unique in the file (found {$count} occurrences). " .
+                "Either provide a larger string with more surrounding context to make it unique, " .
+                "or use `replace_all: true` to change every instance."
+            );
+        }
+
+        // Apply the edit
+        $originalContent = $content;
         if ($replaceAll) {
-            $newContent = str_replace($oldString, $newString, $content);
+            $newContent = str_replace($actualOldString, $actualNewString, $content);
         } else {
-            $pos = strpos($content, $oldString);
+            $pos = strpos($content, $actualOldString);
             if ($pos !== false) {
-                $newContent = substr($content, 0, $pos) . $newString . substr($content, $pos + strlen($oldString));
+                $newContent = substr($content, 0, $pos) . $actualNewString . substr($content, $pos + strlen($actualOldString));
             } else {
                 $newContent = $content;
             }
         }
 
-        $result = file_put_contents($filePath, $newContent);
+        // Preserve line ending style
+        if ($lineEnding !== "\n") {
+            $newContent = $this->normalizeLineEndings($newContent, $lineEnding);
+        }
 
+        $result = file_put_contents($filePath, $newContent);
         if ($result === false) {
             return ToolResult::error("Failed to write file: {$filePath}");
         }
 
-        return ToolResult::success("Successfully edited {$filePath}");
+        // Generate diff output
+        $changeSummary = DiffGenerator::changeSummary($originalContent, $newContent);
+        $output = "Successfully edited {$filePath} ({$changeSummary})";
+
+        // Append snippet diff for visibility
+        $snippet = $this->generateSnippetDiff($oldString, $newString, $replaceAll, $count);
+        if ($snippet !== '') {
+            $output .= "\n" . $snippet;
+        }
+
+        // Try git diff
+        $gitDiff = DiffGenerator::gitDiff($filePath);
+        if ($gitDiff !== '') {
+            $output .= "\n\nGit diff:\n" . $gitDiff;
+        }
+
+        return ToolResult::success($output);
     }
 
     public function isReadOnly(array $input): bool
@@ -137,14 +171,35 @@ DESC;
     public function backfillObservableInput(array $input, ToolUseContext $context): array
     {
         if (isset($input['file_path'])) {
-            $input['file_path'] = $this->resolvePath($input['file_path'], $context->workingDirectory);
+            $normalizedPath = $this->normalizeFileReferencePath($input['file_path'], $context->workingDirectory);
+            $input['file_path'] = $this->resolvePath($normalizedPath, $context->workingDirectory);
         }
         return $input;
     }
 
+    public function maxResultSizeChars(): int
+    {
+        return 100000;
+    }
+
+    public function getActivityDescription(array $input): ?string
+    {
+        return 'Editing ' . basename($input['file_path'] ?? 'file');
+    }
+
     public function validateInput(array $input, ToolUseContext $context): ?string
     {
-        $filePath = $input['file_path'] ?? '';
+        $filePath = trim((string) ($input['file_path'] ?? ''));
+        if ($filePath === '') {
+            return 'file_path must not be empty.';
+        }
+
+        if ($this->isBareLineReference($filePath)) {
+            return 'file_path must include an actual path, not only a line reference like ":12".';
+        }
+
+        $filePath = $this->normalizeFileReferencePath($filePath, $context->workingDirectory);
+        $filePath = $this->resolvePath($filePath, $context->workingDirectory);
 
         // Block editing sensitive files
         $sensitivePatterns = [
@@ -174,5 +229,62 @@ DESC;
         }
 
         return null;
+    }
+
+    /**
+     * Detect the dominant line ending style in content.
+     */
+    private function detectLineEnding(string $content): string
+    {
+        $crlf = substr_count($content, "\r\n");
+        $lf = substr_count($content, "\n") - $crlf;
+        $cr = substr_count($content, "\r") - $crlf;
+
+        if ($crlf > $lf && $crlf > $cr) {
+            return "\r\n";
+        }
+        if ($cr > $lf) {
+            return "\r";
+        }
+
+        return "\n";
+    }
+
+    /**
+     * Normalize line endings in content to the target style.
+     */
+    private function normalizeLineEndings(string $content, string $target): string
+    {
+        // First normalize everything to \n, then convert to target
+        $normalized = str_replace("\r\n", "\n", $content);
+        $normalized = str_replace("\r", "\n", $normalized);
+
+        if ($target === "\n") {
+            return $normalized;
+        }
+
+        return str_replace("\n", $target, $normalized);
+    }
+
+    /**
+     * Generate a compact snippet showing the replacement.
+     */
+    private function generateSnippetDiff(string $oldString, string $newString, bool $replaceAll, int $count): string
+    {
+        $oldPreview = $this->truncate($oldString, 200);
+        $newPreview = $this->truncate($newString, 200);
+        $suffix = $replaceAll && $count > 1 ? " ({$count} occurrences)" : '';
+
+        return "Replaced{$suffix}:\n- {$oldPreview}\n+ {$newPreview}";
+    }
+
+    private function truncate(string $str, int $maxLen): string
+    {
+        $singleLine = str_replace(["\n", "\r"], ['\\n', '\\r'], $str);
+        if (mb_strlen($singleLine) > $maxLen) {
+            return mb_substr($singleLine, 0, $maxLen) . '...';
+        }
+
+        return $singleLine;
     }
 }

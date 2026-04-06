@@ -40,12 +40,13 @@ class AgentLoopTest extends TestCase
         QueryEngine $queryEngine,
         ?ToolRegistry $registry = null,
         ?ContextCompactor $compactor = null,
+        ?SessionManager $sessionManager = null,
     ): AgentLoop
     {
         $contextBuilder = $this->createMock(ContextBuilder::class);
         $contextBuilder->method('buildSystemPrompt')->willReturn([]);
 
-        $sessionManager = $this->createMock(SessionManager::class);
+        $sessionManager ??= $this->createMock(SessionManager::class);
         $sessionManager->method('getSessionId')->willReturn('test-session');
 
         $permissionChecker = $this->createMock(PermissionChecker::class);
@@ -91,6 +92,112 @@ class AgentLoopTest extends TestCase
         $loop = $this->makeLoop($qe);
         $result = $loop->run('hi');
         $this->assertSame('Hello there', $result);
+    }
+
+    public function test_simple_end_turn_records_final_assistant_turn(): void
+    {
+        $qe = $this->createMock(QueryEngine::class);
+        $qe->method('query')->willReturn($this->makePlainTextProcessor('Hello there'));
+
+        $sessionManager = $this->createMock(SessionManager::class);
+        $sessionManager->method('getSessionId')->willReturn('test-session');
+        $sessionManager->expects($this->once())
+            ->method('recordTurn')
+            ->with(
+                ['role' => 'assistant', 'content' => [['type' => 'text', 'text' => 'Hello there']]],
+                [],
+            );
+
+        $loop = $this->makeLoop($qe, sessionManager: $sessionManager);
+        $loop->run('hi');
+    }
+
+    public function test_incomplete_plain_text_response_is_retried_before_returning(): void
+    {
+        $qe = $this->createMock(QueryEngine::class);
+        $qe->expects($this->exactly(2))
+            ->method('query')
+            ->willReturnOnConsecutiveCalls(
+                $this->makeIncompletePlainTextProcessor('已拿到部分结果，请继续补全剩余内容。'),
+                $this->makePlainTextProcessor('已完成'),
+            );
+
+        $loop = $this->makeLoop($qe);
+        $result = $loop->run('继续');
+
+        $this->assertSame('已完成', $result);
+        $messages = $loop->getMessageHistory()->getMessages();
+        $this->assertCount(4, $messages);
+        $this->assertSame('assistant', $messages[1]['role']);
+        $this->assertSame('已拿到部分结果，请继续补全剩余内容。', $messages[1]['content'][0]['text']);
+        $this->assertSame('user', $messages[2]['role']);
+        $this->assertStringContainsString('Continue exactly from where you left off.', $messages[2]['content']);
+    }
+
+    public function test_incomplete_progress_note_is_not_added_to_history_before_retry(): void
+    {
+        $qe = $this->createMock(QueryEngine::class);
+        $qe->expects($this->exactly(2))
+            ->method('query')
+            ->willReturnOnConsecutiveCalls(
+                $this->makeIncompletePlainTextProcessor('继续创建前端项目。'),
+                $this->makePlainTextProcessor('已完成'),
+            );
+
+        $loop = $this->makeLoop($qe);
+        $result = $loop->run('继续');
+
+        $this->assertSame('已完成', $result);
+        $messages = $loop->getMessageHistory()->getMessages();
+        $this->assertCount(3, $messages);
+        $this->assertSame('user', $messages[1]['role']);
+        $this->assertStringContainsString('Do not narrate progress or announce the next step.', $messages[1]['content']);
+        $this->assertSame('assistant', $messages[2]['role']);
+        $this->assertSame('已完成', $messages[2]['content'][0]['text']);
+    }
+
+    public function test_narration_only_end_turn_is_retried_before_returning(): void
+    {
+        $qe = $this->createMock(QueryEngine::class);
+        $qe->expects($this->exactly(2))
+            ->method('query')
+            ->willReturnOnConsecutiveCalls(
+                $this->makePlainTextProcessor('让我尝试用Python来创建文件。'),
+                $this->makePlainTextProcessor('已完成'),
+            );
+
+        $loop = $this->makeLoop($qe);
+        $result = $loop->run('继续');
+
+        $this->assertSame('已完成', $result);
+        $messages = $loop->getMessageHistory()->getMessages();
+        $this->assertCount(3, $messages);
+        $this->assertSame('user', $messages[1]['role']);
+        $this->assertStringContainsString('Take the next concrete action immediately.', $messages[1]['content']);
+        $this->assertSame('assistant', $messages[2]['role']);
+        $this->assertSame('已完成', $messages[2]['content'][0]['text']);
+    }
+
+    public function test_narration_only_end_turn_is_retried_instead_of_returned(): void
+    {
+        $qe = $this->createMock(QueryEngine::class);
+        $qe->expects($this->exactly(2))
+            ->method('query')
+            ->willReturnOnConsecutiveCalls(
+                $this->makePlainTextProcessor('让我先改用 Bash 来创建文件。'),
+                $this->makePlainTextProcessor('已完成'),
+            );
+
+        $loop = $this->makeLoop($qe);
+        $result = $loop->run('继续');
+
+        $this->assertSame('已完成', $result);
+        $messages = $loop->getMessageHistory()->getMessages();
+        $this->assertCount(3, $messages);
+        $this->assertSame('user', $messages[1]['role']);
+        $this->assertStringContainsString('Do not narrate progress or announce the next step.', $messages[1]['content']);
+        $this->assertSame('assistant', $messages[2]['role']);
+        $this->assertSame('已完成', $messages[2]['content'][0]['text']);
     }
 
     // ─── abort ────────────────────────────────────────────────────────────
@@ -306,13 +413,29 @@ class AgentLoopTest extends TestCase
 
     public function test_it_retries_the_turn_when_the_model_returns_malformed_tool_input(): void
     {
+        $retryMessages = [];
+        $queryCount = 0;
         $queryEngine = $this->createMock(QueryEngine::class);
         $queryEngine->expects($this->exactly(2))
             ->method('query')
-            ->willReturnOnConsecutiveCalls(
-                $this->makeMalformedToolUseProcessor(),
-                $this->makePlainTextProcessor('最终回答'),
-            );
+            ->willReturnCallback(function (
+                array $systemPrompt,
+                array $messages,
+                ?callable $onTextDelta = null,
+                ?callable $onToolBlockComplete = null,
+                ?callable $onThinkingDelta = null,
+                ?callable $shouldAbort = null,
+            ) use (&$queryCount, &$retryMessages) {
+                $queryCount++;
+
+                if ($queryCount === 1) {
+                    return $this->makeMalformedToolUseProcessor();
+                }
+
+                $retryMessages = $messages;
+
+                return $this->makePlainTextProcessor('最终回答');
+            });
 
         $toolOrchestrator = $this->createMock(ToolOrchestrator::class);
         $toolOrchestrator->expects($this->never())->method('executeToolBlock');
@@ -392,7 +515,790 @@ class AgentLoopTest extends TestCase
         $result = $agent->run('这个代码库是干嘛的');
 
         $this->assertSame('最终回答', $result);
-        $this->assertSame(2, $messageHistory->count());
+        $this->assertSame(4, $messageHistory->count());
+        $this->assertCount(3, $retryMessages);
+        $this->assertSame(['user', 'assistant', 'user'], array_column($retryMessages, 'role'));
+        $this->assertSame(
+            '{}',
+            json_encode($retryMessages[1]['content'][0]['input']),
+        );
+        $this->assertIsArray($retryMessages[2]['content']);
+        $this->assertSame('tool_result', $retryMessages[2]['content'][0]['type']);
+        $this->assertTrue($retryMessages[2]['content'][0]['is_error']);
+        $this->assertStringContainsString(
+            'Tool input validation failed. This tool call was not executed.',
+            $retryMessages[2]['content'][0]['content'],
+        );
+        $this->assertStringContainsString(
+            'Tool input validation failed: The file_path field is required.',
+            $retryMessages[2]['content'][0]['content'],
+        );
+        $this->assertSame('text', $retryMessages[2]['content'][1]['type']);
+        $this->assertStringContainsString(
+            'Retry with corrected tool input only. Do not repeat the same malformed call.',
+            $retryMessages[2]['content'][1]['text'],
+        );
+    }
+
+    public function test_it_adds_write_specific_recovery_feedback_before_retrying(): void
+    {
+        $retryMessages = [];
+        $queryCount = 0;
+
+        $queryEngine = $this->createMock(QueryEngine::class);
+        $queryEngine->expects($this->exactly(2))
+            ->method('query')
+            ->willReturnCallback(function (
+                array $systemPrompt,
+                array $messages,
+                ?callable $onTextDelta = null,
+                ?callable $onToolBlockComplete = null,
+                ?callable $onThinkingDelta = null,
+                ?callable $shouldAbort = null,
+            ) use (&$queryCount, &$retryMessages) {
+                $queryCount++;
+
+                if ($queryCount === 1) {
+                    return $this->makeValidToolUseProcessor('Write', 'toolu_bad_write', []);
+                }
+
+                $retryMessages = $messages;
+
+                return $this->makePlainTextProcessor('已恢复');
+            });
+
+        $toolOrchestrator = $this->createMock(ToolOrchestrator::class);
+        $toolOrchestrator->expects($this->never())->method('executeToolBlock');
+
+        $contextBuilder = $this->createMock(ContextBuilder::class);
+        $contextBuilder->method('buildSystemPrompt')->willReturn([]);
+
+        $messageHistory = new MessageHistory;
+
+        $permissionChecker = $this->createMock(PermissionChecker::class);
+
+        $sessionManager = $this->createMock(SessionManager::class);
+        $sessionManager->method('getSessionId')->willReturn('test-session');
+        $sessionManager->method('recordEntry');
+        $sessionManager->method('recordTurn');
+
+        $contextCompactor = $this->createMock(ContextCompactor::class);
+        $contextCompactor->method('shouldAutoCompact')->willReturn(false);
+
+        $toolRegistry = new ToolRegistry;
+        $toolRegistry->register(new class extends BaseTool
+        {
+            public function name(): string
+            {
+                return 'Write';
+            }
+
+            public function description(): string
+            {
+                return 'Test write tool';
+            }
+
+            public function inputSchema(): ToolInputSchema
+            {
+                return new class([
+                    'type' => 'object',
+                    'properties' => [
+                        'file_path' => ['type' => 'string'],
+                        'content' => ['type' => 'string'],
+                    ],
+                ]) extends ToolInputSchema
+                {
+                    public function validate(array $input): array
+                    {
+                        if (! isset($input['file_path']) || ! is_string($input['file_path']) || $input['file_path'] === '') {
+                            throw new \InvalidArgumentException('Tool input validation failed: The file_path field is required.');
+                        }
+
+                        if (! isset($input['content']) || ! is_string($input['content'])) {
+                            throw new \InvalidArgumentException('Tool input validation failed: The content field is required.');
+                        }
+
+                        return $input;
+                    }
+                };
+            }
+
+            public function call(array $input, ToolUseContext $context): ToolResult
+            {
+                return ToolResult::success('ok');
+            }
+        });
+
+        $hookExecutor = $this->createMock(HookExecutor::class);
+        $hookExecutor->method('execute')->willReturn(new HookResult(true));
+
+        $agent = new AgentLoop(
+            queryEngine: $queryEngine,
+            toolOrchestrator: $toolOrchestrator,
+            contextBuilder: $contextBuilder,
+            messageHistory: $messageHistory,
+            permissionChecker: $permissionChecker,
+            sessionManager: $sessionManager,
+            contextCompactor: $contextCompactor,
+            costTracker: new CostTracker,
+            toolRegistry: $toolRegistry,
+            hookExecutor: $hookExecutor,
+        );
+
+        $result = $agent->run('创建 package.json');
+
+        $this->assertSame('已恢复', $result);
+        $this->assertSame(4, $messageHistory->count());
+        $this->assertCount(3, $retryMessages);
+        $this->assertSame(['user', 'assistant', 'user'], array_column($retryMessages, 'role'));
+        $this->assertIsArray($retryMessages[2]['content']);
+        $this->assertSame('tool_result', $retryMessages[2]['content'][0]['type']);
+        $this->assertTrue($retryMessages[2]['content'][0]['is_error']);
+        $this->assertStringContainsString(
+            'Tool input validation failed. This tool call was not executed.',
+            $retryMessages[2]['content'][0]['content'],
+        );
+        $this->assertStringContainsString(
+            'For Write: include an absolute file_path',
+            $retryMessages[2]['content'][0]['content'],
+        );
+        $this->assertStringContainsString(
+            'do not prefix JSON or file contents with stray ":" placeholder text.',
+            $retryMessages[2]['content'][0]['content'],
+        );
+        $this->assertSame('text', $retryMessages[2]['content'][1]['type']);
+        $this->assertStringContainsString(
+            'For Write: send a valid JSON object with both absolute file_path and full content strings.',
+            $retryMessages[2]['content'][1]['text'],
+        );
+    }
+
+    public function test_it_reports_tool_input_json_parse_errors_during_retry(): void
+    {
+        $retryMessages = [];
+        $queryCount = 0;
+
+        $queryEngine = $this->createMock(QueryEngine::class);
+        $queryEngine->expects($this->exactly(2))
+            ->method('query')
+            ->willReturnCallback(function (
+                array $systemPrompt,
+                array $messages,
+                ?callable $onTextDelta = null,
+                ?callable $onToolBlockComplete = null,
+                ?callable $onThinkingDelta = null,
+                ?callable $shouldAbort = null,
+            ) use (&$queryCount, &$retryMessages) {
+                $queryCount++;
+
+                if ($queryCount === 1) {
+                    return $this->makeInvalidJsonToolUseProcessor(
+                        'Write',
+                        'toolu_bad_json',
+                        ':{"file_path":"/tmp/demo.txt"}',
+                    );
+                }
+
+                $retryMessages = $messages;
+
+                return $this->makePlainTextProcessor('已恢复');
+            });
+
+        $toolOrchestrator = $this->createMock(ToolOrchestrator::class);
+        $toolOrchestrator->expects($this->never())->method('executeToolBlock');
+
+        $contextBuilder = $this->createMock(ContextBuilder::class);
+        $contextBuilder->method('buildSystemPrompt')->willReturn([]);
+
+        $messageHistory = new MessageHistory;
+
+        $permissionChecker = $this->createMock(PermissionChecker::class);
+
+        $sessionManager = $this->createMock(SessionManager::class);
+        $sessionManager->method('getSessionId')->willReturn('test-session');
+        $sessionManager->method('recordEntry');
+        $sessionManager->method('recordTurn');
+
+        $contextCompactor = $this->createMock(ContextCompactor::class);
+        $contextCompactor->method('shouldAutoCompact')->willReturn(false);
+
+        $toolRegistry = new ToolRegistry;
+        $toolRegistry->register(new class extends BaseTool
+        {
+            public function name(): string
+            {
+                return 'Write';
+            }
+
+            public function description(): string
+            {
+                return 'Test write tool';
+            }
+
+            public function inputSchema(): ToolInputSchema
+            {
+                return ToolInputSchema::make(['type' => 'object'], []);
+            }
+
+            public function call(array $input, ToolUseContext $context): ToolResult
+            {
+                return ToolResult::success('ok');
+            }
+        });
+
+        $hookExecutor = $this->createMock(HookExecutor::class);
+        $hookExecutor->method('execute')->willReturn(new HookResult(true));
+
+        $agent = new AgentLoop(
+            queryEngine: $queryEngine,
+            toolOrchestrator: $toolOrchestrator,
+            contextBuilder: $contextBuilder,
+            messageHistory: $messageHistory,
+            permissionChecker: $permissionChecker,
+            sessionManager: $sessionManager,
+            contextCompactor: $contextCompactor,
+            costTracker: new CostTracker,
+            toolRegistry: $toolRegistry,
+            hookExecutor: $hookExecutor,
+        );
+
+        $result = $agent->run('继续创建文件');
+
+        $this->assertSame('已恢复', $result);
+        $this->assertCount(3, $retryMessages);
+        $this->assertStringContainsString(
+            'Tool input JSON could not be parsed',
+            $retryMessages[2]['content'][0]['content'],
+        );
+        $this->assertStringContainsString(
+            'Raw input: :{"file_path":"/tmp/demo.txt"}',
+            $retryMessages[2]['content'][0]['content'],
+        );
+        $this->assertStringContainsString(
+            'Split the file into smaller writes or create it in smaller Bash heredoc chunks.',
+            $retryMessages[2]['content'][0]['content'],
+        );
+        $this->assertStringContainsString(
+            'Do not use Agent or Skill as a fallback for ordinary file creation or editing.',
+            $retryMessages[2]['content'][1]['text'],
+        );
+        $this->assertStringContainsString(
+            'Prefer a tiny initial Write followed by Edit chunks for long files.',
+            $retryMessages[2]['content'][1]['text'],
+        );
+        $this->assertSame('text', $retryMessages[2]['content'][1]['type']);
+        $this->assertStringContainsString(
+            'If a large multiline payload keeps breaking tool JSON',
+            $retryMessages[2]['content'][1]['text'],
+        );
+        $this->assertStringContainsString(
+            'Do not use Agent or Skill as a fallback',
+            $retryMessages[2]['content'][1]['text'],
+        );
+    }
+
+    public function test_malformed_retry_strips_narration_text_from_assistant_history(): void
+    {
+        $retryMessages = [];
+        $queryCount = 0;
+
+        $queryEngine = $this->createMock(QueryEngine::class);
+        $queryEngine->expects($this->exactly(2))
+            ->method('query')
+            ->willReturnCallback(function (
+                array $systemPrompt,
+                array $messages,
+                ?callable $onTextDelta = null,
+                ?callable $onToolBlockComplete = null,
+                ?callable $onThinkingDelta = null,
+                ?callable $shouldAbort = null,
+            ) use (&$queryCount, &$retryMessages) {
+                $queryCount++;
+
+                if ($queryCount === 1) {
+                    $processor = new StreamProcessor;
+                    $processor->processEvent(new \App\Services\Api\StreamEvent('message_start', [
+                        'message' => ['id' => 'msg_bad_json_with_text', 'usage' => []],
+                    ]));
+                    $processor->processEvent(new \App\Services\Api\StreamEvent('content_block_start', [
+                        'index' => 0,
+                        'content_block' => ['type' => 'text', 'text' => ''],
+                    ]));
+                    $processor->processEvent(new \App\Services\Api\StreamEvent('content_block_delta', [
+                        'index' => 0,
+                        'delta' => ['type' => 'text_delta', 'text' => '我使用Bash来创建文件，避免JSON编码问题。'],
+                    ]));
+                    $processor->processEvent(new \App\Services\Api\StreamEvent('content_block_stop', [
+                        'index' => 0,
+                    ]));
+                    $processor->processEvent(new \App\Services\Api\StreamEvent('content_block_start', [
+                        'index' => 1,
+                        'content_block' => ['type' => 'tool_use', 'id' => 'toolu_bad_bash_text', 'name' => 'Bash'],
+                    ]));
+                    $processor->processEvent(new \App\Services\Api\StreamEvent('content_block_delta', [
+                        'index' => 1,
+                        'delta' => ['type' => 'input_json_delta', 'partial_json' => '{"command":"cat <<EOF'],
+                    ]));
+                    $processor->processEvent(new \App\Services\Api\StreamEvent('message_delta', [
+                        'delta' => ['stop_reason' => 'tool_use'],
+                    ]));
+
+                    return $processor;
+                }
+
+                $retryMessages = $messages;
+
+                return $this->makePlainTextProcessor('已恢复');
+            });
+
+        $toolOrchestrator = $this->createMock(ToolOrchestrator::class);
+        $toolOrchestrator->expects($this->never())->method('executeToolBlock');
+
+        $contextBuilder = $this->createMock(ContextBuilder::class);
+        $contextBuilder->method('buildSystemPrompt')->willReturn([]);
+
+        $messageHistory = new MessageHistory;
+
+        $permissionChecker = $this->createMock(PermissionChecker::class);
+
+        $sessionManager = $this->createMock(SessionManager::class);
+        $sessionManager->method('getSessionId')->willReturn('test-session');
+        $sessionManager->method('recordEntry');
+        $sessionManager->method('recordTurn');
+
+        $contextCompactor = $this->createMock(ContextCompactor::class);
+        $contextCompactor->method('shouldAutoCompact')->willReturn(false);
+
+        $toolRegistry = new ToolRegistry;
+        $toolRegistry->register(new class extends BaseTool
+        {
+            public function name(): string
+            {
+                return 'Bash';
+            }
+
+            public function description(): string
+            {
+                return 'Test bash tool';
+            }
+
+            public function inputSchema(): ToolInputSchema
+            {
+                return ToolInputSchema::make(['type' => 'object'], []);
+            }
+
+            public function call(array $input, ToolUseContext $context): ToolResult
+            {
+                return ToolResult::success('ok');
+            }
+        });
+
+        $hookExecutor = $this->createMock(HookExecutor::class);
+        $hookExecutor->method('execute')->willReturn(new HookResult(true));
+
+        $agent = new AgentLoop(
+            queryEngine: $queryEngine,
+            toolOrchestrator: $toolOrchestrator,
+            contextBuilder: $contextBuilder,
+            messageHistory: $messageHistory,
+            permissionChecker: $permissionChecker,
+            sessionManager: $sessionManager,
+            contextCompactor: $contextCompactor,
+            costTracker: new CostTracker,
+            toolRegistry: $toolRegistry,
+            hookExecutor: $hookExecutor,
+        );
+
+        $result = $agent->run('继续');
+
+        $this->assertSame('已恢复', $result);
+        $this->assertCount(3, $retryMessages);
+        $assistantBlocks = $retryMessages[1]['content'];
+        $this->assertCount(1, $assistantBlocks);
+        $this->assertSame('tool_use', $assistantBlocks[0]['type']);
+    }
+
+    public function test_it_only_replays_failed_tool_calls_during_malformed_retry(): void
+    {
+        $retryMessages = [];
+        $queryCount = 0;
+
+        $queryEngine = $this->createMock(QueryEngine::class);
+        $queryEngine->expects($this->exactly(2))
+            ->method('query')
+            ->willReturnCallback(function (
+                array $systemPrompt,
+                array $messages,
+                ?callable $onTextDelta = null,
+                ?callable $onToolBlockComplete = null,
+                ?callable $onThinkingDelta = null,
+                ?callable $shouldAbort = null,
+            ) use (&$queryCount, &$retryMessages) {
+                $queryCount++;
+
+                if ($queryCount === 1) {
+                    return $this->makeMultiToolUseProcessor([
+                        ['id' => 'toolu_read_ok', 'name' => 'Read', 'input' => ['file_path' => '/tmp/example.txt']],
+                        ['id' => 'toolu_write_bad', 'name' => 'Write', 'input' => []],
+                    ]);
+                }
+
+                $retryMessages = $messages;
+
+                return $this->makePlainTextProcessor('已恢复');
+            });
+
+        $toolOrchestrator = $this->createMock(ToolOrchestrator::class);
+        $toolOrchestrator->expects($this->never())->method('executeToolBlock');
+
+        $contextBuilder = $this->createMock(ContextBuilder::class);
+        $contextBuilder->method('buildSystemPrompt')->willReturn([]);
+
+        $messageHistory = new MessageHistory;
+
+        $permissionChecker = $this->createMock(PermissionChecker::class);
+
+        $sessionManager = $this->createMock(SessionManager::class);
+        $sessionManager->method('getSessionId')->willReturn('test-session');
+        $sessionManager->method('recordEntry');
+        $sessionManager->method('recordTurn');
+
+        $contextCompactor = $this->createMock(ContextCompactor::class);
+        $contextCompactor->method('shouldAutoCompact')->willReturn(false);
+
+        $toolRegistry = new ToolRegistry;
+        $toolRegistry->register(new class extends BaseTool
+        {
+            public function name(): string
+            {
+                return 'Read';
+            }
+
+            public function description(): string
+            {
+                return 'Test read tool';
+            }
+
+            public function inputSchema(): ToolInputSchema
+            {
+                return new class([
+                    'type' => 'object',
+                    'properties' => [
+                        'file_path' => ['type' => 'string'],
+                    ],
+                ]) extends ToolInputSchema
+                {
+                    public function validate(array $input): array
+                    {
+                        if (! isset($input['file_path']) || ! is_string($input['file_path']) || $input['file_path'] === '') {
+                            throw new \InvalidArgumentException('Tool input validation failed: The file_path field is required.');
+                        }
+
+                        return $input;
+                    }
+                };
+            }
+
+            public function call(array $input, ToolUseContext $context): ToolResult
+            {
+                return ToolResult::success('ok');
+            }
+        });
+        $toolRegistry->register(new class extends BaseTool
+        {
+            public function name(): string
+            {
+                return 'Write';
+            }
+
+            public function description(): string
+            {
+                return 'Test write tool';
+            }
+
+            public function inputSchema(): ToolInputSchema
+            {
+                return new class([
+                    'type' => 'object',
+                    'properties' => [
+                        'file_path' => ['type' => 'string'],
+                        'content' => ['type' => 'string'],
+                    ],
+                ]) extends ToolInputSchema
+                {
+                    public function validate(array $input): array
+                    {
+                        if (! isset($input['file_path']) || ! is_string($input['file_path']) || $input['file_path'] === '') {
+                            throw new \InvalidArgumentException('Tool input validation failed: The file_path field is required.');
+                        }
+
+                        if (! isset($input['content']) || ! is_string($input['content'])) {
+                            throw new \InvalidArgumentException('Tool input validation failed: The content field is required.');
+                        }
+
+                        return $input;
+                    }
+                };
+            }
+
+            public function call(array $input, ToolUseContext $context): ToolResult
+            {
+                return ToolResult::success('ok');
+            }
+        });
+
+        $hookExecutor = $this->createMock(HookExecutor::class);
+        $hookExecutor->method('execute')->willReturn(new HookResult(true));
+
+        $agent = new AgentLoop(
+            queryEngine: $queryEngine,
+            toolOrchestrator: $toolOrchestrator,
+            contextBuilder: $contextBuilder,
+            messageHistory: $messageHistory,
+            permissionChecker: $permissionChecker,
+            sessionManager: $sessionManager,
+            contextCompactor: $contextCompactor,
+            costTracker: new CostTracker,
+            toolRegistry: $toolRegistry,
+            hookExecutor: $hookExecutor,
+        );
+
+        $result = $agent->run('继续创建文件');
+
+        $this->assertSame('已恢复', $result);
+        $this->assertCount(3, $retryMessages);
+        $assistantBlocks = array_values(array_filter(
+            $retryMessages[1]['content'],
+            fn (array $block): bool => ($block['type'] ?? null) === 'tool_use',
+        ));
+        $this->assertCount(1, $assistantBlocks);
+        $this->assertSame('toolu_write_bad', $assistantBlocks[0]['id']);
+        $this->assertSame('{}', json_encode($assistantBlocks[0]['input']));
+        $this->assertSame('toolu_write_bad', $retryMessages[2]['content'][0]['tool_use_id']);
+    }
+
+    public function test_it_retries_the_turn_when_the_model_returns_placeholder_file_references(): void
+    {
+        $queryEngine = $this->createMock(QueryEngine::class);
+        $queryEngine->expects($this->exactly(2))
+            ->method('query')
+            ->willReturnOnConsecutiveCalls(
+                $this->makeValidToolUseProcessor('Read', 'toolu_placeholder', ['file_path' => ':0']),
+                $this->makePlainTextProcessor('已恢复'),
+            );
+
+        $toolOrchestrator = $this->createMock(ToolOrchestrator::class);
+        $toolOrchestrator->expects($this->never())->method('executeToolBlock');
+
+        $contextBuilder = $this->createMock(ContextBuilder::class);
+        $contextBuilder->method('buildSystemPrompt')->willReturn([]);
+
+        $messageHistory = new MessageHistory;
+
+        $permissionChecker = $this->createMock(PermissionChecker::class);
+
+        $sessionManager = $this->createMock(SessionManager::class);
+        $sessionManager->method('getSessionId')->willReturn('test-session');
+        $sessionManager->method('recordEntry');
+        $sessionManager->method('recordTurn');
+
+        $contextCompactor = $this->createMock(ContextCompactor::class);
+        $contextCompactor->method('shouldAutoCompact')->willReturn(false);
+
+        $toolRegistry = new ToolRegistry;
+        $toolRegistry->register(new class extends BaseTool
+        {
+            public function name(): string
+            {
+                return 'Read';
+            }
+
+            public function description(): string
+            {
+                return 'Test read tool';
+            }
+
+            public function inputSchema(): ToolInputSchema
+            {
+                return new class([
+                    'type' => 'object',
+                    'properties' => [
+                        'file_path' => ['type' => 'string'],
+                    ],
+                ]) extends ToolInputSchema
+                {
+                    public function validate(array $input): array
+                    {
+                        if (! isset($input['file_path']) || ! is_string($input['file_path']) || $input['file_path'] === '') {
+                            throw new \InvalidArgumentException('Tool input validation failed: The file_path field is required.');
+                        }
+
+                        return $input;
+                    }
+                };
+            }
+
+            public function validateInput(array $input, ToolUseContext $context): ?string
+            {
+                return ($input['file_path'] ?? null) === ':0'
+                    ? 'file_path must include an actual path, not only a line reference like ":12".'
+                    : null;
+            }
+
+            public function call(array $input, ToolUseContext $context): ToolResult
+            {
+                return ToolResult::success('ok');
+            }
+        });
+
+        $hookExecutor = $this->createMock(HookExecutor::class);
+        $hookExecutor->method('execute')->willReturn(new HookResult(true));
+
+        $agent = new AgentLoop(
+            queryEngine: $queryEngine,
+            toolOrchestrator: $toolOrchestrator,
+            contextBuilder: $contextBuilder,
+            messageHistory: $messageHistory,
+            permissionChecker: $permissionChecker,
+            sessionManager: $sessionManager,
+            contextCompactor: $contextCompactor,
+            costTracker: new CostTracker,
+            toolRegistry: $toolRegistry,
+            hookExecutor: $hookExecutor,
+        );
+
+        $result = $agent->run('继续修复');
+
+        $this->assertSame('已恢复', $result);
+        $this->assertSame(4, $messageHistory->count());
+    }
+
+    public function test_it_retries_the_turn_when_the_model_returns_colon_prefixed_bash_garbage(): void
+    {
+        $retryMessages = [];
+
+        $queryEngine = $this->createMock(QueryEngine::class);
+        $queryEngine->expects($this->exactly(2))
+            ->method('query')
+            ->willReturnCallback(function (
+                array $systemPrompt,
+                array $messages,
+                ?callable $onTextDelta = null,
+                ?callable $onToolBlockComplete = null,
+                ?callable $onThinkingDelta = null,
+                ?callable $shouldAbort = null,
+            ) use (&$retryMessages) {
+                static $queryCount = 0;
+                $queryCount++;
+
+                if ($queryCount === 1) {
+                    return $this->makeValidToolUseProcessor('Bash', 'toolu_bad_bash', ['command' => ': > /dev/null 2>&1']);
+                }
+
+                $retryMessages = $messages;
+
+                return $this->makePlainTextProcessor('已恢复');
+            });
+
+        $toolOrchestrator = $this->createMock(ToolOrchestrator::class);
+        $toolOrchestrator->expects($this->never())->method('executeToolBlock');
+
+        $contextBuilder = $this->createMock(ContextBuilder::class);
+        $contextBuilder->method('buildSystemPrompt')->willReturn([]);
+
+        $messageHistory = new MessageHistory;
+
+        $permissionChecker = $this->createMock(PermissionChecker::class);
+
+        $sessionManager = $this->createMock(SessionManager::class);
+        $sessionManager->method('getSessionId')->willReturn('test-session');
+        $sessionManager->method('recordEntry');
+        $sessionManager->method('recordTurn');
+
+        $contextCompactor = $this->createMock(ContextCompactor::class);
+        $contextCompactor->method('shouldAutoCompact')->willReturn(false);
+
+        $toolRegistry = new ToolRegistry;
+        $toolRegistry->register(new class extends BaseTool
+        {
+            public function name(): string
+            {
+                return 'Bash';
+            }
+
+            public function description(): string
+            {
+                return 'Test bash tool';
+            }
+
+            public function inputSchema(): ToolInputSchema
+            {
+                return new class([
+                    'type' => 'object',
+                    'properties' => [
+                        'command' => ['type' => 'string'],
+                    ],
+                ]) extends ToolInputSchema
+                {
+                    public function validate(array $input): array
+                    {
+                        if (! isset($input['command']) || ! is_string($input['command']) || $input['command'] === '') {
+                            throw new \InvalidArgumentException('Tool input validation failed: The command field is required.');
+                        }
+
+                        return $input;
+                    }
+                };
+            }
+
+            public function validateInput(array $input, ToolUseContext $context): ?string
+            {
+                return str_starts_with(ltrim((string) ($input['command'] ?? '')), ':')
+                    ? 'command must not start with ":"; that is a shell no-op or malformed placeholder prefix. Run the real command directly.'
+                    : null;
+            }
+
+            public function call(array $input, ToolUseContext $context): ToolResult
+            {
+                return ToolResult::success('ok');
+            }
+        });
+
+        $hookExecutor = $this->createMock(HookExecutor::class);
+        $hookExecutor->method('execute')->willReturn(new HookResult(true));
+
+        $agent = new AgentLoop(
+            queryEngine: $queryEngine,
+            toolOrchestrator: $toolOrchestrator,
+            contextBuilder: $contextBuilder,
+            messageHistory: $messageHistory,
+            permissionChecker: $permissionChecker,
+            sessionManager: $sessionManager,
+            contextCompactor: $contextCompactor,
+            costTracker: new CostTracker,
+            toolRegistry: $toolRegistry,
+            hookExecutor: $hookExecutor,
+        );
+
+        $result = $agent->run('继续执行真实命令');
+
+        $this->assertSame('已恢复', $result);
+        $this->assertSame(4, $messageHistory->count());
+        $this->assertCount(3, $retryMessages);
+        $this->assertSame('tool_result', $retryMessages[2]['content'][0]['type']);
+        $this->assertStringContainsString(
+            'do not send shell no-ops or probes such as ": > /dev/null 2>&1" or "true".',
+            $retryMessages[2]['content'][0]['content'],
+        );
+        $this->assertSame('text', $retryMessages[2]['content'][1]['type']);
+        $this->assertStringContainsString(
+            'Never send ":" placeholders or no-op probes like ": > /dev/null 2>&1" or "true"',
+            $retryMessages[2]['content'][1]['text'],
+        );
+        $this->assertStringContainsString(
+            'Keep Bash commands short and concrete; avoid giant multiline file-generation commands.',
+            $retryMessages[2]['content'][1]['text'],
+        );
     }
 
     public function test_it_cleans_up_streaming_tools_when_querying_throws_after_tool_start(): void
@@ -597,6 +1503,45 @@ class AgentLoopTest extends TestCase
         return $processor;
     }
 
+    /**
+     * @param array<int, array{id: string, name: string, input: array}> $blocks
+     */
+    private function makeMultiToolUseProcessor(array $blocks): StreamProcessor
+    {
+        $processor = new StreamProcessor;
+
+        $processor->processEvent(new \App\Services\Api\StreamEvent('message_start', [
+            'message' => ['id' => 'msg_multi_tool', 'usage' => []],
+        ]));
+
+        foreach ($blocks as $index => $block) {
+            $processor->processEvent(new \App\Services\Api\StreamEvent('content_block_start', [
+                'index' => $index,
+                'content_block' => [
+                    'type' => 'tool_use',
+                    'id' => $block['id'],
+                    'name' => $block['name'],
+                ],
+            ]));
+            $processor->processEvent(new \App\Services\Api\StreamEvent('content_block_delta', [
+                'index' => $index,
+                'delta' => [
+                    'type' => 'input_json_delta',
+                    'partial_json' => json_encode($block['input']),
+                ],
+            ]));
+            $processor->processEvent(new \App\Services\Api\StreamEvent('content_block_stop', [
+                'index' => $index,
+            ]));
+        }
+
+        $processor->processEvent(new \App\Services\Api\StreamEvent('message_delta', [
+            'delta' => ['stop_reason' => 'tool_use'],
+        ]));
+
+        return $processor;
+    }
+
     private function makeMalformedToolUseProcessor(): StreamProcessor
     {
         $processor = new StreamProcessor;
@@ -617,6 +1562,35 @@ class AgentLoopTest extends TestCase
             'delta' => [
                 'type' => 'input_json_delta',
                 'partial_json' => '[]',
+            ],
+        ]));
+        $processor->processEvent(new \App\Services\Api\StreamEvent('message_delta', [
+            'delta' => ['stop_reason' => 'tool_use'],
+        ]));
+
+        return $processor;
+    }
+
+    private function makeInvalidJsonToolUseProcessor(string $toolName, string $toolId, string $rawInput): StreamProcessor
+    {
+        $processor = new StreamProcessor;
+
+        $processor->processEvent(new \App\Services\Api\StreamEvent('message_start', [
+            'message' => ['id' => 'msg_bad_json', 'usage' => []],
+        ]));
+        $processor->processEvent(new \App\Services\Api\StreamEvent('content_block_start', [
+            'index' => 0,
+            'content_block' => [
+                'type' => 'tool_use',
+                'id' => $toolId,
+                'name' => $toolName,
+            ],
+        ]));
+        $processor->processEvent(new \App\Services\Api\StreamEvent('content_block_delta', [
+            'index' => 0,
+            'delta' => [
+                'type' => 'input_json_delta',
+                'partial_json' => $rawInput,
             ],
         ]));
         $processor->processEvent(new \App\Services\Api\StreamEvent('message_delta', [
@@ -825,6 +1799,31 @@ class AgentLoopTest extends TestCase
         ]));
         $processor->processEvent(new \App\Services\Api\StreamEvent('message_delta', [
             'delta' => ['stop_reason' => 'end_turn'],
+        ]));
+
+        return $processor;
+    }
+
+    private function makeIncompletePlainTextProcessor(string $text): StreamProcessor
+    {
+        $processor = new StreamProcessor;
+
+        $processor->processEvent(new \App\Services\Api\StreamEvent('message_start', [
+            'message' => ['id' => 'msg_incomplete', 'usage' => []],
+        ]));
+        $processor->processEvent(new \App\Services\Api\StreamEvent('content_block_start', [
+            'index' => 0,
+            'content_block' => [
+                'type' => 'text',
+                'text' => '',
+            ],
+        ]));
+        $processor->processEvent(new \App\Services\Api\StreamEvent('content_block_delta', [
+            'index' => 0,
+            'delta' => [
+                'type' => 'text_delta',
+                'text' => $text,
+            ],
         ]));
 
         return $processor;

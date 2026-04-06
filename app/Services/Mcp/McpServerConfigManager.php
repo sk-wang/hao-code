@@ -2,7 +2,7 @@
 
 namespace App\Services\Mcp;
 
-final class McpServerConfigManager
+class McpServerConfigManager
 {
     /**
      * @return array{global: string, project: string}

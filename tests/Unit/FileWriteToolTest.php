@@ -74,7 +74,7 @@ class FileWriteToolTest extends TestCase
             'content' => 'new content',
         ], $this->context);
 
-        $this->assertStringContainsString('overwritten', $result->output);
+        $this->assertStringContainsString('updated', $result->output);
     }
 
     public function test_it_overwrites_existing_file_content(): void
@@ -103,7 +103,28 @@ class FileWriteToolTest extends TestCase
 
         $this->assertTrue($result->isError);
         $this->assertStringContainsString('Read tool first', $result->output);
+        $this->assertStringContainsString($path, $result->output);
+        $this->assertStringContainsString('Next step: call Read', $result->output);
         $this->assertSame('old content', file_get_contents($path));
+    }
+
+    public function test_it_allows_follow_up_overwrite_after_same_session_created_file(): void
+    {
+        $path = $this->tmpPath('.txt');
+
+        $first = $this->tool->call([
+            'file_path' => $path,
+            'content' => 'first version',
+        ], $this->context);
+
+        $second = $this->tool->call([
+            'file_path' => $path,
+            'content' => 'second version',
+        ], $this->context);
+
+        $this->assertFalse($first->isError);
+        $this->assertFalse($second->isError);
+        $this->assertSame('second version', file_get_contents($path));
     }
 
     // ─── directory creation ───────────────────────────────────────────────
@@ -180,4 +201,17 @@ class FileWriteToolTest extends TestCase
     {
         $this->assertFalse($this->tool->isReadOnly([]));
     }
+
+    public function test_validate_input_rejects_large_multiline_content(): void
+    {
+        $error = $this->tool->validateInput([
+            'file_path' => '/tmp/demo.js',
+            'content' => implode("\n", array_fill(0, 50, 'const x = 1;')),
+        ], $this->context);
+
+        $this->assertNotNull($error);
+        $this->assertStringContainsString('too large for a single Write call', $error);
+        $this->assertStringContainsString('Edit in small chunks', $error);
+    }
+
 }

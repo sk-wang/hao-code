@@ -21,7 +21,7 @@ final class SlashCommandCatalog
             ['name' => 'history', 'aliases' => [], 'description' => 'show message count'],
             ['name' => 'hooks', 'aliases' => [], 'description' => 'view configured hooks'],
             ['name' => 'files', 'aliases' => [], 'description' => 'list files currently in context'],
-            ['name' => 'mcp', 'aliases' => [], 'description' => 'manage MCP server configs', 'help' => 'manage MCP servers (/mcp list|add|show|enable|disable|remove)'],
+            ['name' => 'mcp', 'aliases' => [], 'description' => 'manage MCP server configs', 'help' => 'manage MCP servers (/mcp list|status|reconnect|add|show|enable|disable|remove)'],
             ['name' => 'model', 'aliases' => [], 'description' => 'show or set current model'],
             ['name' => 'provider', 'aliases' => [], 'description' => 'show or switch API provider', 'help' => 'show or switch API provider (/provider list|use|clear)'],
             ['name' => 'plan', 'aliases' => [], 'description' => 'enable plan mode or run a planning prompt', 'help' => 'enable plan mode or run a planning prompt (/plan off to exit)'],
@@ -67,6 +67,7 @@ final class SlashCommandCatalog
             ['name' => 'login', 'aliases' => [], 'description' => 'set or update API key'],
             ['name' => 'logout', 'aliases' => [], 'description' => 'clear API key and session'],
             ['name' => 'keybindings', 'aliases' => [], 'description' => 'open keybindings configuration'],
+            ['name' => 'paste-image', 'aliases' => ['paste', 'screenshot'], 'description' => 'attach clipboard image and send to agent', 'help' => 'grab image from clipboard (/paste-image [prompt])'],
         ];
     }
 

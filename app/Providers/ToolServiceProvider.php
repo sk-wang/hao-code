@@ -31,6 +31,8 @@ use App\Tools\Task\TaskGetTool;
 use App\Tools\Task\TaskListTool;
 use App\Tools\Task\TaskUpdateTool;
 use App\Tools\Task\TaskStopTool;
+use App\Tools\Mcp\ListMcpResourcesTool;
+use App\Tools\Mcp\ReadMcpResourceTool;
 use App\Tools\Sleep\SleepTool;
 use App\Tools\ToolSearch\ToolSearchTool;
 use Illuminate\Support\ServiceProvider;
@@ -92,6 +94,10 @@ class ToolServiceProvider extends ServiceProvider
 
             // Tool search
             $registry->register($app->make(ToolSearchTool::class));
+
+            // MCP resources
+            $registry->register($app->make(ListMcpResourcesTool::class));
+            $registry->register($app->make(ReadMcpResourceTool::class));
 
             // Utility
             $registry->register($app->make(SleepTool::class));

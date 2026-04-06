@@ -4,7 +4,7 @@ namespace Tests\Unit;
 
 use App\Tools\TodoWrite\TodoWriteTool;
 use App\Tools\ToolUseContext;
-use PHPUnit\Framework\TestCase;
+use Tests\TestCase;
 
 class TodoWriteToolTest extends TestCase
 {
@@ -13,6 +13,8 @@ class TodoWriteToolTest extends TestCase
 
     protected function setUp(): void
     {
+        parent::setUp();
+
         $this->context = new ToolUseContext(
             workingDirectory: sys_get_temp_dir(),
             sessionId: 'test',
@@ -113,6 +115,13 @@ class TodoWriteToolTest extends TestCase
 
         $this->assertFalse($result->isError);
         $this->assertStringContainsString('Todo list updated', $result->output);
+    }
+
+    public function test_input_schema_allows_empty_todo_list(): void
+    {
+        $validated = $this->tool->inputSchema()->validate(['todos' => []]);
+
+        $this->assertSame(['todos' => []], $validated);
     }
 
     public function test_output_header_says_updated(): void

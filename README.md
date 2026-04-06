@@ -24,7 +24,32 @@ _Real terminal session running Hao Code in the terminal._
 
 ## Jump To
 
-[Quick Start](#quick-start) · [Global Install](#global-install) · [Launch Modes](#launch-modes) · [Built-in HUD](#built-in-hud) · [Slash Commands](#slash-commands) · [Built-in Tools](#built-in-tools) · [Configuration](#configuration) · [Architecture](#architecture) · [Skills System](#skills-system) · [Permissions and Hooks](#permissions-and-hooks) · [Testing](#testing)
+[Stabilization Status](#stabilization-status) · [Quick Start](#quick-start) · [Global Install](#global-install) · [Launch Modes](#launch-modes) · [Built-in HUD](#built-in-hud) · [Slash Commands](#slash-commands) · [Built-in Tools](#built-in-tools) · [Configuration](#configuration) · [Architecture](#architecture) · [Skills System](#skills-system) · [Permissions and Hooks](#permissions-and-hooks) · [Testing](#testing)
+
+---
+
+## Stabilization Status
+
+Updated April 6, 2026.
+
+Current repair work is based on the findings documented in [docs/hao-code-bug-report-2026-04-05.md](docs/hao-code-bug-report-2026-04-05.md).
+
+The current branch includes:
+
+- stronger agent-loop guardrails for repeated invalid tool patterns and recovery messaging
+- file-state caching plus stricter read-before-write/edit enforcement across file tools
+- richer bash command classification for safer concurrency and better result handling
+- MCP connection management, dynamic tool registration, and resource access plumbing
+- persisted large tool results with richer terminal rendering for edits, bash output, reads, search, and agent runs
+- broader regression coverage across agent loop, streaming, file tools, bash, MCP, tool-result storage, and terminal UI behavior
+
+Still being validated:
+
+- long-running service orchestration during self-hosted verification flows
+- stricter completion checks for generated-app repair tasks
+- PTY output cleanup during long prompts and recovery-heavy sessions
+
+This is a progress checkpoint, not a final stabilization release.
 
 ---
 
