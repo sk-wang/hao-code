@@ -24,12 +24,21 @@ class DockedPromptScreen
 
     /**
      * @param array<int, string> $suggestionLines
+     * @param array<int, string> $promptLines
      * @param array<int, string> $hudLines
      */
-    public function render(array $suggestionLines, string $promptLine, int $cursorColumn, array $hudLines): void
+    public function render(
+        array $suggestionLines,
+        array $promptLines,
+        int $cursorLineIndex,
+        int $cursorColumn,
+        array $hudLines,
+    ): void
     {
         $terminalHeight = $this->terminalHeight();
-        $reservedHeight = max(1, count($suggestionLines) + 1 + count($hudLines));
+        $promptLines = $promptLines === [] ? [''] : $promptLines;
+        $cursorLineIndex = max(0, min($cursorLineIndex, count($promptLines) - 1));
+        $reservedHeight = max(1, count($suggestionLines) + count($promptLines) + count($hudLines));
         $line = max(1, $terminalHeight - $reservedHeight + 1);
         $nextFrame = [];
 
@@ -37,10 +46,12 @@ class DockedPromptScreen
             $nextFrame[$line++] = $suggestionLine;
         }
 
-        $promptLineNumber = $line;
-        $nextFrame[$promptLineNumber] = $promptLine;
+        $promptStartLine = $line;
+        foreach ($promptLines as $promptLine) {
+            $nextFrame[$line++] = $promptLine;
+        }
 
-        $hudStartLine = max($promptLineNumber + 1, $terminalHeight - count($hudLines) + 1);
+        $hudStartLine = max($line, $terminalHeight - count($hudLines) + 1);
         foreach ($hudLines as $index => $hudLine) {
             $nextFrame[$hudStartLine + $index] = $hudLine;
         }
@@ -65,7 +76,7 @@ class DockedPromptScreen
             }
         }
 
-        $this->writeRaw(sprintf("\033[%d;%dH", $promptLineNumber, max(1, $cursorColumn + 1)));
+        $this->writeRaw(sprintf("\033[%d;%dH", $promptStartLine + $cursorLineIndex, max(1, $cursorColumn + 1)));
         $this->renderedLines = $nextFrame;
     }
 

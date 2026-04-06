@@ -23,6 +23,7 @@ use App\Services\Session\SessionTitleService;
 use App\Services\Settings\SettingsManager;
 use App\Services\Task\TaskManager;
 use App\Support\Terminal\Autocomplete\AutocompleteEngine;
+use App\Support\Terminal\DraftInputBuffer;
 use App\Support\Terminal\DockedPromptScreen;
 use App\Support\Terminal\Autocomplete\SlashCommandCatalog;
 use App\Support\Terminal\InputSanitizer;
@@ -182,15 +183,17 @@ class HaoCodeCommand extends Command
     private function runRepl(AgentLoop $agent): int
     {
         // Load input history
-        $historyFile = storage_path('app/haocode/input_history');
-        $history = [];
-        if (file_exists($historyFile)) {
-            $history = array_filter(explode("\n", file_get_contents($historyFile)));
-        }
+        $historyFile = storage_path('app/haocode/input_history.json');
+        $legacyHistoryFile = storage_path('app/haocode/input_history');
+        $readlineHistoryFile = storage_path('app/haocode/input_history.readline');
+        $history = $this->loadInputHistory($historyFile, $legacyHistoryFile);
         $historyPtr = count($history);
 
-        if ($this->supportsReadline() && file_exists($historyFile)) {
-            @readline_read_history($historyFile);
+        if ($this->supportsReadline()) {
+            $nativeReadlineHistoryFile = file_exists($readlineHistoryFile) ? $readlineHistoryFile : $legacyHistoryFile;
+            if (file_exists($nativeReadlineHistoryFile)) {
+                @readline_read_history($nativeReadlineHistoryFile);
+            }
         }
 
         // Register readline tab completion for slash commands and @file paths
@@ -220,11 +223,13 @@ class HaoCodeCommand extends Command
             if (count($history) > 500) {
                 $history = array_slice($history, -500);
             }
+            $this->saveInputHistory($historyFile, $history);
+
             if ($this->supportsReadline()) {
-                readline_add_history($input);
-                @readline_write_history($historyFile);
-            } else {
-                @file_put_contents($historyFile, implode("\n", $history));
+                if (! str_contains($input, "\n")) {
+                    readline_add_history($input);
+                    @readline_write_history($readlineHistoryFile);
+                }
             }
 
             // Handle slash commands
@@ -498,6 +503,48 @@ class HaoCodeCommand extends Command
         return trim($fullInput) !== '' ? trim($fullInput) : '';
     }
 
+    /**
+     * @return array<int, string>
+     */
+    private function loadInputHistory(string $historyFile, string $legacyHistoryFile): array
+    {
+        if (file_exists($historyFile)) {
+            try {
+                $decoded = json_decode((string) file_get_contents($historyFile), true, flags: JSON_THROW_ON_ERROR);
+                if (is_array($decoded)) {
+                    return array_values(array_filter(
+                        $decoded,
+                        static fn (mixed $entry): bool => is_string($entry) && $entry !== '',
+                    ));
+                }
+            } catch (\JsonException) {
+                // Fall through to the legacy plain-text history file.
+            }
+        }
+
+        if (! file_exists($legacyHistoryFile)) {
+            return [];
+        }
+
+        return array_values(array_filter(explode("\n", (string) file_get_contents($legacyHistoryFile))));
+    }
+
+    /**
+     * @param array<int, string> $history
+     */
+    private function saveInputHistory(string $historyFile, array $history): void
+    {
+        $directory = dirname($historyFile);
+        if (! is_dir($directory)) {
+            @mkdir($directory, 0755, true);
+        }
+
+        @file_put_contents($historyFile, json_encode(
+            array_values($history),
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT,
+        ));
+    }
+
     private function readInputRaw(AgentLoop $agent, array &$history, int &$historyPtr, bool $useDockedHud = true): ?string
     {
         $cwd = basename(getcwd());
@@ -517,19 +564,21 @@ class HaoCodeCommand extends Command
             }
         }
 
-        $lines = [];
-        $currentLine = '';
-        $continuationPrompt = false;
+        $draft = new DraftInputBuffer;
         $liveSuggestions = [];
         $selectedSuggestionIndex = 0;
+        $bracketedPasteEnabled = $sttyMode !== '';
+
+        if ($bracketedPasteEnabled) {
+            $this->writeRaw("\033[?2004h");
+        }
 
         $this->redrawActiveRawInput(
             agent: $agent,
             useDockedHud: $useDockedHud,
             cwd: $cwd,
-            currentLine: $currentLine,
+            draft: $draft,
             autocomplete: $autocomplete,
-            continuationPrompt: $continuationPrompt,
             suggestions: $liveSuggestions,
             selectedSuggestionIndex: $selectedSuggestionIndex,
         );
@@ -543,47 +592,14 @@ class HaoCodeCommand extends Command
 
                 if ($char === "\r" || $char === "\n") {
                     $selectedSuggestion = $liveSuggestions[$selectedSuggestionIndex] ?? null;
-                    if ($selectedSuggestion !== null) {
-                        $completed = $this->applySelectedSuggestion($autocomplete, $currentLine, $selectedSuggestion['label']);
-                        if ($completed !== null && $completed !== $currentLine) {
-                            $currentLine = $completed;
-                            [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
-                            $this->redrawActiveRawInput(
-                                agent: $agent,
-                                useDockedHud: $useDockedHud,
-                                cwd: $cwd,
-                                currentLine: $currentLine,
-                                autocomplete: $autocomplete,
-                                continuationPrompt: $continuationPrompt,
-                                suggestions: $liveSuggestions,
-                                selectedSuggestionIndex: $selectedSuggestionIndex,
-                            );
-
-                            continue;
-                        }
-                    }
-
-                    // Enter key
-                    if ($useDockedHud) {
-                        $this->clearDockedPromptScreen();
-                    } elseif ($sttyMode) {
-                        echo "\r\n";
-                    }
-
-                    // Check for backslash continuation
-                    if (str_ends_with(rtrim($currentLine), '\\')) {
-                        $currentLine = rtrim($currentLine, ' \\');
-                        $lines[] = $currentLine;
-                        $currentLine = '';
-                        $continuationPrompt = true;
-                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                    if ($selectedSuggestion !== null && $this->applySelectedSuggestion($autocomplete, $draft, $selectedSuggestion['label'])) {
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
                         $this->redrawActiveRawInput(
                             agent: $agent,
                             useDockedHud: $useDockedHud,
                             cwd: $cwd,
-                            currentLine: $currentLine,
+                            draft: $draft,
                             autocomplete: $autocomplete,
-                            continuationPrompt: $continuationPrompt,
                             suggestions: $liveSuggestions,
                             selectedSuggestionIndex: $selectedSuggestionIndex,
                         );
@@ -591,7 +607,27 @@ class HaoCodeCommand extends Command
                         continue;
                     }
 
-                    $lines[] = $currentLine;
+                    if ($draft->commitContinuationLine()) {
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
+                        $this->redrawActiveRawInput(
+                            agent: $agent,
+                            useDockedHud: $useDockedHud,
+                            cwd: $cwd,
+                            draft: $draft,
+                            autocomplete: $autocomplete,
+                            suggestions: $liveSuggestions,
+                            selectedSuggestionIndex: $selectedSuggestionIndex,
+                        );
+
+                        continue;
+                    }
+
+                    if ($useDockedHud) {
+                        $this->clearDockedPromptScreen();
+                    } elseif ($sttyMode) {
+                        echo "\r\n";
+                    }
+
                     break;
                 }
 
@@ -618,9 +654,8 @@ class HaoCodeCommand extends Command
                         agent: $agent,
                         useDockedHud: $useDockedHud,
                         cwd: $cwd,
-                        currentLine: $currentLine,
+                        draft: $draft,
                         autocomplete: $autocomplete,
-                        continuationPrompt: $continuationPrompt,
                         suggestions: $liveSuggestions,
                         selectedSuggestionIndex: $selectedSuggestionIndex,
                     );
@@ -632,17 +667,16 @@ class HaoCodeCommand extends Command
                     if ($useDockedHud) {
                         $this->clearDockedPromptScreen();
                     }
-                    $match = $this->readReverseHistorySearch($handle, $history, $currentLine, $cwd);
+                    $match = $this->readReverseHistorySearch($handle, $history, $draft->text(), $cwd);
                     if ($match !== null) {
-                        $currentLine = $match;
-                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                        $draft->replaceWith($match);
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
                         $this->redrawActiveRawInput(
                             agent: $agent,
                             useDockedHud: $useDockedHud,
                             cwd: $cwd,
-                            currentLine: $currentLine,
+                            draft: $draft,
                             autocomplete: $autocomplete,
-                            continuationPrompt: $continuationPrompt,
                             suggestions: $liveSuggestions,
                             selectedSuggestionIndex: $selectedSuggestionIndex,
                         );
@@ -662,7 +696,27 @@ class HaoCodeCommand extends Command
                 }
 
                 if ($char === "\x1b") { // Escape sequence
-                    $seq = fread($handle, 2);
+                    $seq = $this->readEscapeSequence($handle);
+                    if ($seq === false || $seq === '') {
+                        continue;
+                    }
+
+                    if ($seq === '[200~') {
+                        $draft->paste($this->readBracketedPaste($handle));
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
+                        $this->redrawActiveRawInput(
+                            agent: $agent,
+                            useDockedHud: $useDockedHud,
+                            cwd: $cwd,
+                            draft: $draft,
+                            autocomplete: $autocomplete,
+                            suggestions: $liveSuggestions,
+                            selectedSuggestionIndex: $selectedSuggestionIndex,
+                        );
+
+                        continue;
+                    }
+
                     if ($seq === '[A') { // Up arrow
                         if ($liveSuggestions !== []) {
                             $selectedSuggestionIndex = $this->wrapSuggestionIndex($selectedSuggestionIndex - 1, count($liveSuggestions));
@@ -670,9 +724,8 @@ class HaoCodeCommand extends Command
                                 agent: $agent,
                                 useDockedHud: $useDockedHud,
                                 cwd: $cwd,
-                                currentLine: $currentLine,
+                                draft: $draft,
                                 autocomplete: $autocomplete,
-                                continuationPrompt: $continuationPrompt,
                                 suggestions: $liveSuggestions,
                                 selectedSuggestionIndex: $selectedSuggestionIndex,
                             );
@@ -680,17 +733,16 @@ class HaoCodeCommand extends Command
                             continue;
                         }
 
-                        if ($historyPtr > 0) {
+                        if ($draft->committedLines() === [] && $historyPtr > 0) {
                             $historyPtr--;
-                            $currentLine = $history[$historyPtr];
-                            [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                            $draft->replaceWith($history[$historyPtr]);
+                            [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
                             $this->redrawActiveRawInput(
                                 agent: $agent,
                                 useDockedHud: $useDockedHud,
                                 cwd: $cwd,
-                                currentLine: $currentLine,
+                                draft: $draft,
                                 autocomplete: $autocomplete,
-                                continuationPrompt: $continuationPrompt,
                                 suggestions: $liveSuggestions,
                                 selectedSuggestionIndex: $selectedSuggestionIndex,
                             );
@@ -705,9 +757,8 @@ class HaoCodeCommand extends Command
                                 agent: $agent,
                                 useDockedHud: $useDockedHud,
                                 cwd: $cwd,
-                                currentLine: $currentLine,
+                                draft: $draft,
                                 autocomplete: $autocomplete,
-                                continuationPrompt: $continuationPrompt,
                                 suggestions: $liveSuggestions,
                                 selectedSuggestionIndex: $selectedSuggestionIndex,
                             );
@@ -715,17 +766,16 @@ class HaoCodeCommand extends Command
                             continue;
                         }
 
-                        if ($historyPtr < count($history) - 1) {
+                        if ($draft->committedLines() === [] && $historyPtr < count($history) - 1) {
                             $historyPtr++;
-                            $currentLine = $history[$historyPtr];
-                            [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                            $draft->replaceWith($history[$historyPtr]);
+                            [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
                             $this->redrawActiveRawInput(
                                 agent: $agent,
                                 useDockedHud: $useDockedHud,
                                 cwd: $cwd,
-                                currentLine: $currentLine,
+                                draft: $draft,
                                 autocomplete: $autocomplete,
-                                continuationPrompt: $continuationPrompt,
                                 suggestions: $liveSuggestions,
                                 selectedSuggestionIndex: $selectedSuggestionIndex,
                             );
@@ -734,21 +784,101 @@ class HaoCodeCommand extends Command
                         continue;
                     }
 
-                    // Ignore other escape sequences (arrow left/right, etc.)
-                    continue;
-                }
+                    if ($seq === '[D' || $seq === '[1;2D') {
+                        if ($draft->moveLeft()) {
+                            [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft, $selectedSuggestionIndex);
+                            $this->redrawActiveRawInput(
+                                agent: $agent,
+                                useDockedHud: $useDockedHud,
+                                cwd: $cwd,
+                                draft: $draft,
+                                autocomplete: $autocomplete,
+                                suggestions: $liveSuggestions,
+                                selectedSuggestionIndex: $selectedSuggestionIndex,
+                            );
+                        }
 
-                if ($char === "\x7f" || $char === "\x08") { // Backspace
-                    if ($currentLine !== '') {
-                        $currentLine = $this->trimLastCharacter($currentLine);
-                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                        continue;
+                    }
+
+                    if ($seq === '[C' || $seq === '[1;2C') {
+                        if ($draft->moveRight()) {
+                            [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft, $selectedSuggestionIndex);
+                            $this->redrawActiveRawInput(
+                                agent: $agent,
+                                useDockedHud: $useDockedHud,
+                                cwd: $cwd,
+                                draft: $draft,
+                                autocomplete: $autocomplete,
+                                suggestions: $liveSuggestions,
+                                selectedSuggestionIndex: $selectedSuggestionIndex,
+                            );
+                        }
+
+                        continue;
+                    }
+
+                    if (in_array($seq, ['[H', '[1~', 'OH'], true)) {
+                        $draft->moveHome();
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft, $selectedSuggestionIndex);
                         $this->redrawActiveRawInput(
                             agent: $agent,
                             useDockedHud: $useDockedHud,
                             cwd: $cwd,
-                            currentLine: $currentLine,
+                            draft: $draft,
                             autocomplete: $autocomplete,
-                            continuationPrompt: $continuationPrompt,
+                            suggestions: $liveSuggestions,
+                            selectedSuggestionIndex: $selectedSuggestionIndex,
+                        );
+
+                        continue;
+                    }
+
+                    if (in_array($seq, ['[F', '[4~', 'OF'], true)) {
+                        $draft->moveEnd();
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft, $selectedSuggestionIndex);
+                        $this->redrawActiveRawInput(
+                            agent: $agent,
+                            useDockedHud: $useDockedHud,
+                            cwd: $cwd,
+                            draft: $draft,
+                            autocomplete: $autocomplete,
+                            suggestions: $liveSuggestions,
+                            selectedSuggestionIndex: $selectedSuggestionIndex,
+                        );
+
+                        continue;
+                    }
+
+                    if ($seq === '[3~') {
+                        if ($draft->delete()) {
+                            [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft, $selectedSuggestionIndex);
+                            $this->redrawActiveRawInput(
+                                agent: $agent,
+                                useDockedHud: $useDockedHud,
+                                cwd: $cwd,
+                                draft: $draft,
+                                autocomplete: $autocomplete,
+                                suggestions: $liveSuggestions,
+                                selectedSuggestionIndex: $selectedSuggestionIndex,
+                            );
+                        }
+
+                        continue;
+                    }
+
+                    continue;
+                }
+
+                if ($char === "\x7f" || $char === "\x08") { // Backspace
+                    if ($draft->backspace()) {
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft, $selectedSuggestionIndex);
+                        $this->redrawActiveRawInput(
+                            agent: $agent,
+                            useDockedHud: $useDockedHud,
+                            cwd: $cwd,
+                            draft: $draft,
+                            autocomplete: $autocomplete,
                             suggestions: $liveSuggestions,
                             selectedSuggestionIndex: $selectedSuggestionIndex,
                         );
@@ -759,15 +889,14 @@ class HaoCodeCommand extends Command
 
                 if ($char === "\t") { // Tab - autocomplete
                     if ($liveSuggestions !== []) {
-                        $currentLine = $autocomplete->acceptSuggestion($currentLine, $liveSuggestions[$selectedSuggestionIndex]['label']);
-                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                        $draft->replaceCurrentLine($autocomplete->acceptSuggestion($draft->currentLine(), $liveSuggestions[$selectedSuggestionIndex]['label']));
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
                         $this->redrawActiveRawInput(
                             agent: $agent,
                             useDockedHud: $useDockedHud,
                             cwd: $cwd,
-                            currentLine: $currentLine,
+                            draft: $draft,
                             autocomplete: $autocomplete,
-                            continuationPrompt: $continuationPrompt,
                             suggestions: $liveSuggestions,
                             selectedSuggestionIndex: $selectedSuggestionIndex,
                         );
@@ -775,20 +904,18 @@ class HaoCodeCommand extends Command
                         continue;
                     }
 
-                    $suggestions = $autocomplete->getSuggestions($currentLine);
+                    $suggestions = $draft->isCursorAtEnd() ? $autocomplete->getSuggestions($draft->currentLine()) : [];
 
                     if (count($suggestions) === 1) {
                         // Single match: auto-complete
-                        $completed = $autocomplete->acceptSuggestion($currentLine, $suggestions[0]['label']);
-                        $currentLine = $completed;
-                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                        $draft->replaceCurrentLine($autocomplete->acceptSuggestion($draft->currentLine(), $suggestions[0]['label']));
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
                         $this->redrawActiveRawInput(
                             agent: $agent,
                             useDockedHud: $useDockedHud,
                             cwd: $cwd,
-                            currentLine: $currentLine,
+                            draft: $draft,
                             autocomplete: $autocomplete,
-                            continuationPrompt: $continuationPrompt,
                             suggestions: $liveSuggestions,
                             selectedSuggestionIndex: $selectedSuggestionIndex,
                         );
@@ -799,9 +926,8 @@ class HaoCodeCommand extends Command
                             agent: $agent,
                             useDockedHud: $useDockedHud,
                             cwd: $cwd,
-                            currentLine: $currentLine,
+                            draft: $draft,
                             autocomplete: $autocomplete,
-                            continuationPrompt: $continuationPrompt,
                             suggestions: $liveSuggestions,
                             selectedSuggestionIndex: $selectedSuggestionIndex,
                         );
@@ -817,9 +943,8 @@ class HaoCodeCommand extends Command
                         agent: $agent,
                         useDockedHud: $useDockedHud,
                         cwd: $cwd,
-                        currentLine: $currentLine,
+                        draft: $draft,
                         autocomplete: $autocomplete,
-                        continuationPrompt: $continuationPrompt,
                         suggestions: $liveSuggestions,
                         selectedSuggestionIndex: $selectedSuggestionIndex,
                     );
@@ -827,32 +952,101 @@ class HaoCodeCommand extends Command
                     continue;
                 }
 
-                // Normal printable character
-                if (ord($char) >= 32) {
-                    $currentLine .= $char;
-                    [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
+                if ($char === "\x01") { // Ctrl+A
+                    $draft->moveHome();
+                    [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft, $selectedSuggestionIndex);
                     $this->redrawActiveRawInput(
                         agent: $agent,
                         useDockedHud: $useDockedHud,
                         cwd: $cwd,
-                        currentLine: $currentLine,
+                        draft: $draft,
                         autocomplete: $autocomplete,
-                        continuationPrompt: $continuationPrompt,
+                        suggestions: $liveSuggestions,
+                        selectedSuggestionIndex: $selectedSuggestionIndex,
+                    );
+
+                    continue;
+                }
+
+                if ($char === "\x05") { // Ctrl+E
+                    $draft->moveEnd();
+                    [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft, $selectedSuggestionIndex);
+                    $this->redrawActiveRawInput(
+                        agent: $agent,
+                        useDockedHud: $useDockedHud,
+                        cwd: $cwd,
+                        draft: $draft,
+                        autocomplete: $autocomplete,
+                        suggestions: $liveSuggestions,
+                        selectedSuggestionIndex: $selectedSuggestionIndex,
+                    );
+
+                    continue;
+                }
+
+                if ($char === "\x02") { // Ctrl+B
+                    if ($draft->moveLeft()) {
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft, $selectedSuggestionIndex);
+                        $this->redrawActiveRawInput(
+                            agent: $agent,
+                            useDockedHud: $useDockedHud,
+                            cwd: $cwd,
+                            draft: $draft,
+                            autocomplete: $autocomplete,
+                            suggestions: $liveSuggestions,
+                            selectedSuggestionIndex: $selectedSuggestionIndex,
+                        );
+                    }
+
+                    continue;
+                }
+
+                if ($char === "\x06") { // Ctrl+F
+                    if ($draft->moveRight()) {
+                        [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft, $selectedSuggestionIndex);
+                        $this->redrawActiveRawInput(
+                            agent: $agent,
+                            useDockedHud: $useDockedHud,
+                            cwd: $cwd,
+                            draft: $draft,
+                            autocomplete: $autocomplete,
+                            suggestions: $liveSuggestions,
+                            selectedSuggestionIndex: $selectedSuggestionIndex,
+                        );
+                    }
+
+                    continue;
+                }
+
+                // Normal printable character
+                if (ord($char) >= 32) {
+                    $draft->insert($char);
+                    [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
+                    $this->redrawActiveRawInput(
+                        agent: $agent,
+                        useDockedHud: $useDockedHud,
+                        cwd: $cwd,
+                        draft: $draft,
+                        autocomplete: $autocomplete,
                         suggestions: $liveSuggestions,
                         selectedSuggestionIndex: $selectedSuggestionIndex,
                     );
                 }
             }
         } finally {
+            if ($bracketedPasteEnabled) {
+                $this->writeRaw("\033[?2004l");
+            }
             if ($sttyMode) {
                 shell_exec("stty {$sttyMode} 2>/dev/null");
             }
             fclose($handle);
         }
 
-        $fullInput = InputSanitizer::sanitize(implode("\n", $lines));
+        $fullInput = InputSanitizer::sanitize($draft->text());
+        $fullInput = rtrim(str_replace(["\r\n", "\r"], "\n", $fullInput), "\n");
 
-        return trim($fullInput) !== '' ? trim($fullInput) : '';
+        return preg_match('/\S/u', $fullInput) === 1 ? $fullInput : '';
     }
 
     private function supportsReadline(): bool
@@ -4685,19 +4879,18 @@ PROMPT;
         }
     }
 
-    private function redrawRawPrompt(string $cwd, string $currentLine): void
+    private function redrawRawPrompt(string $cwd, DraftInputBuffer $draft): void
     {
         $this->writeRaw("\033[H\033[2J");
-        $this->redrawRawEditorLine($cwd, $currentLine);
+        $this->redrawRawEditorLine($cwd, $draft);
     }
 
     private function redrawActiveRawInput(
         AgentLoop $agent,
         bool $useDockedHud,
         string $cwd,
-        string $currentLine,
+        DraftInputBuffer $draft,
         ?AutocompleteEngine $autocomplete = null,
-        bool $continuationPrompt = false,
         array $suggestions = [],
         int $selectedSuggestionIndex = 0,
     ): void {
@@ -4705,9 +4898,8 @@ PROMPT;
             $this->redrawRawInputScreen(
                 agent: $agent,
                 cwd: $cwd,
-                currentLine: $currentLine,
+                draft: $draft,
                 autocomplete: $autocomplete,
-                continuationPrompt: $continuationPrompt,
                 suggestions: $suggestions,
                 selectedSuggestionIndex: $selectedSuggestionIndex,
             );
@@ -4717,9 +4909,8 @@ PROMPT;
 
         $this->redrawRawEditorLine(
             cwd: $cwd,
-            currentLine: $currentLine,
+            draft: $draft,
             autocomplete: $autocomplete,
-            continuationPrompt: $continuationPrompt,
             suggestions: $suggestions,
             selectedSuggestionIndex: $selectedSuggestionIndex,
         );
@@ -4728,21 +4919,14 @@ PROMPT;
     private function redrawRawInputScreen(
         AgentLoop $agent,
         string $cwd,
-        string $currentLine,
+        DraftInputBuffer $draft,
         ?AutocompleteEngine $autocomplete = null,
-        bool $continuationPrompt = false,
         array $suggestions = [],
         int $selectedSuggestionIndex = 0,
     ): void
     {
         $autocomplete ??= app(AutocompleteEngine::class);
-        $promptPrefix = $continuationPrompt
-            ? $this->formatter()->continuationPrompt()
-            : $this->formatter()->prompt($cwd);
-        $ghostText = $autocomplete->getGhostText($currentLine);
-        $promptLine = $promptPrefix
-            . OutputFormatter::escape($currentLine)
-            . (($ghostText !== null && $ghostText !== '') ? $autocomplete->renderGhostText($ghostText) : '');
+        $ghostText = $this->draftGhostText($autocomplete, $draft);
 
         $suggestionLines = [];
         if ($suggestions !== []) {
@@ -4755,9 +4939,10 @@ PROMPT;
 
         $this->renderDockedPromptScreen(
             $this->ensureDockedPromptScreen(),
-            $promptLine,
-            $this->rawPromptWidth($cwd, $continuationPrompt) + $this->displayWidth($currentLine),
             $suggestionLines,
+            $this->draftPromptLines($cwd, $draft, $ghostText),
+            $draft->currentLineIndex(),
+            $this->rawPromptWidth($cwd, $draft->currentLineIndex() > 0) + $this->displayWidth($draft->beforeCursor()),
             $this->currentPromptFooterLines($agent),
         );
     }
@@ -5094,14 +5279,16 @@ PROMPT;
      */
     private function renderDockedPromptScreen(
         DockedPromptScreen $screen,
-        string $promptLine,
-        int $cursorColumn,
         array $suggestionLines,
+        array $promptLines,
+        int $cursorLineIndex,
+        int $cursorColumn,
         array $hudLines,
     ): void {
         $screen->render(
             suggestionLines: $suggestionLines,
-            promptLine: $promptLine,
+            promptLines: $promptLines,
+            cursorLineIndex: $cursorLineIndex,
             cursorColumn: $cursorColumn,
             hudLines: $hudLines,
         );
@@ -5119,22 +5306,22 @@ PROMPT;
 
     private function redrawRawEditorLine(
         string $cwd,
-        string $currentLine,
+        DraftInputBuffer $draft,
         ?AutocompleteEngine $autocomplete = null,
-        bool $continuationPrompt = false,
         array $suggestions = [],
         int $selectedSuggestionIndex = 0,
     ): void
     {
         $autocomplete ??= app(AutocompleteEngine::class);
-        $ghostText = $autocomplete->getGhostText($currentLine);
+        $ghostText = $this->draftGhostText($autocomplete, $draft);
+        $promptLines = $this->draftPromptLines($cwd, $draft, $ghostText);
 
-        $this->writeRaw("\r\033[J");
-        $this->output->write($continuationPrompt ? $this->formatter()->continuationPrompt() : $this->formatter()->prompt($cwd));
-        $this->writeRaw($currentLine);
-
-        if ($ghostText !== null && $ghostText !== '') {
-            $this->output->write($autocomplete->renderGhostText($ghostText), false);
+        $this->writeRaw("\033[H\033[2J");
+        foreach ($promptLines as $index => $promptLine) {
+            if ($index > 0) {
+                $this->writeRaw("\r\n");
+            }
+            $this->output->write($promptLine, false);
         }
 
         if ($suggestions !== []) {
@@ -5145,19 +5332,63 @@ PROMPT;
                 $this->writeRaw("\r");
                 $this->line($autocomplete->renderSuggestion($suggestion, $index === $selectedSuggestionIndex, $labelWidth));
             }
-            $this->writeRaw(sprintf("\033[%dA", count($suggestions) + 1));
+            $this->writeRaw(sprintf("\033[%dA", count($suggestions) + 1 + max(0, count($promptLines) - 1)));
+        } elseif (count($promptLines) > 1) {
+            $this->writeRaw(sprintf("\033[%dA", count($promptLines) - 1));
         }
 
-        $cursorWidth = $this->rawPromptWidth($cwd, $continuationPrompt) + $this->displayWidth($currentLine);
+        if ($draft->currentLineIndex() > 0) {
+            $this->writeRaw(sprintf("\033[%dB", $draft->currentLineIndex()));
+        }
+        $cursorWidth = $this->rawPromptWidth($cwd, $draft->currentLineIndex() > 0) + $this->displayWidth($draft->beforeCursor());
         $this->writeRaw("\r");
         if ($cursorWidth > 0) {
             $this->writeRaw(sprintf("\033[%dC", $cursorWidth));
         }
     }
 
-    private function refreshLiveSuggestions(AutocompleteEngine $autocomplete, string $currentLine, int $selectedSuggestionIndex = 0): array
+    /**
+     * @return array<int, string>
+     */
+    private function draftPromptLines(string $cwd, DraftInputBuffer $draft, ?string $ghostText = null): array
     {
-        $suggestions = $autocomplete->getLiveSuggestions($currentLine);
+        $lines = $draft->visibleLines();
+
+        return array_map(function (string $line, int $index) use ($cwd, $lines, $ghostText): string {
+            $prefix = $index === 0
+                ? $this->formatter()->prompt($cwd)
+                : $this->formatter()->continuationPrompt();
+
+            $content = OutputFormatter::escape($line);
+            if ($ghostText !== null && $ghostText !== '' && $index === count($lines) - 1) {
+                $content .= $ghostText;
+            }
+
+            return $prefix . $content;
+        }, $lines, array_keys($lines));
+    }
+
+    private function draftGhostText(AutocompleteEngine $autocomplete, DraftInputBuffer $draft): ?string
+    {
+        if (! $draft->isCursorAtEnd()) {
+            return null;
+        }
+
+        $ghostText = $autocomplete->getGhostText($draft->currentLine());
+        if ($ghostText === null || $ghostText === '') {
+            return null;
+        }
+
+        return $autocomplete->renderGhostText($ghostText);
+    }
+
+    private function refreshLiveSuggestions(AutocompleteEngine $autocomplete, DraftInputBuffer $draft, int $selectedSuggestionIndex = 0): array
+    {
+        if (! $draft->isCursorAtEnd()) {
+            return [[], 0];
+        }
+
+        $suggestions = $autocomplete->getLiveSuggestions($draft->currentLine());
         if ($suggestions === []) {
             return [[], 0];
         }
@@ -5176,16 +5407,25 @@ PROMPT;
         return $wrapped < 0 ? $wrapped + $count : $wrapped;
     }
 
-    private function applySelectedSuggestion(AutocompleteEngine $autocomplete, string $currentLine, string $label): ?string
+    private function applySelectedSuggestion(AutocompleteEngine $autocomplete, DraftInputBuffer $draft, string $label): bool
     {
+        if (! $draft->isCursorAtEnd()) {
+            return false;
+        }
+
+        $currentLine = $draft->currentLine();
         if (str_starts_with($currentLine, '/')
             || preg_match('/@(\S*)$/', $currentLine) === 1) {
             $completed = $autocomplete->acceptSuggestion($currentLine, $label);
 
-            return $completed === $currentLine ? null : $completed;
+            if ($completed !== $currentLine) {
+                $draft->replaceCurrentLine($completed);
+
+                return true;
+            }
         }
 
-        return null;
+        return false;
     }
 
     private function readRawCharacter($handle): string|false
@@ -5215,6 +5455,62 @@ PROMPT;
         }
 
         return InputSanitizer::sanitize($char . $remaining);
+    }
+
+    private function readEscapeSequence($handle): string|false
+    {
+        $prefix = fread($handle, 1);
+        if ($prefix === false || $prefix === '') {
+            return $prefix;
+        }
+
+        if ($prefix !== '[' && $prefix !== 'O') {
+            return $prefix;
+        }
+
+        $sequence = $prefix;
+        while (true) {
+            $next = fread($handle, 1);
+            if ($next === false || $next === '') {
+                break;
+            }
+
+            $sequence .= $next;
+            if (preg_match('/[A-Za-z~]$/', $sequence) === 1) {
+                break;
+            }
+        }
+
+        return $sequence;
+    }
+
+    private function readBracketedPaste($handle): string
+    {
+        $paste = '';
+
+        while (true) {
+            $char = $this->readRawCharacter($handle);
+            if ($char === false || $char === '') {
+                break;
+            }
+
+            if ($char === "\x1b") {
+                $sequence = $this->readEscapeSequence($handle);
+                if ($sequence === '[201~') {
+                    break;
+                }
+
+                if ($sequence !== false && $sequence !== '') {
+                    $paste .= "\x1b" . $sequence;
+                }
+
+                continue;
+            }
+
+            $paste .= $char;
+        }
+
+        return str_replace(["\r\n", "\r"], "\n", $paste);
     }
 
     private function expectedUtf8Bytes(int $leadByte): int

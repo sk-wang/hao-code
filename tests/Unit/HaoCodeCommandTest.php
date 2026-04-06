@@ -302,11 +302,12 @@ class HaoCodeCommandTest extends TestCase
                 parent::__construct(new BufferedOutput(OutputInterface::VERBOSITY_NORMAL, true), static fn (): int => 10);
             }
 
-            public function render(array $suggestionLines, string $promptLine, int $cursorColumn, array $hudLines): void
+            public function render(array $suggestionLines, array $promptLines, int $cursorLineIndex, int $cursorColumn, array $hudLines): void
             {
                 $this->renderCalls[] = [
                     'suggestionLines' => $suggestionLines,
-                    'promptLine' => $promptLine,
+                    'promptLines' => $promptLines,
+                    'cursorLineIndex' => $cursorLineIndex,
                     'cursorColumn' => $cursorColumn,
                     'hudLines' => $hudLines,
                 ];
@@ -317,15 +318,17 @@ class HaoCodeCommandTest extends TestCase
             $command,
             'renderDockedPromptScreen',
             $spy,
-            'prompt line',
-            7,
             ['suggestion one'],
+            ['prompt line'],
+            0,
+            7,
             ['hud line 1', 'hud line 2'],
         );
 
         $this->assertCount(1, $spy->renderCalls);
         $this->assertSame(['suggestion one'], $spy->renderCalls[0]['suggestionLines']);
-        $this->assertSame('prompt line', $spy->renderCalls[0]['promptLine']);
+        $this->assertSame(['prompt line'], $spy->renderCalls[0]['promptLines']);
+        $this->assertSame(0, $spy->renderCalls[0]['cursorLineIndex']);
         $this->assertSame(7, $spy->renderCalls[0]['cursorColumn']);
         $this->assertSame(['hud line 1', 'hud line 2'], $spy->renderCalls[0]['hudLines']);
     }
@@ -353,5 +356,62 @@ class HaoCodeCommandTest extends TestCase
         $this->invoke($command, 'clearDockedPromptScreen');
 
         $this->assertSame(1, $spy->clearCalls);
+    }
+
+    public function test_load_input_history_reads_json_entries_and_preserves_multiline_values(): void
+    {
+        $command = new HaoCodeCommand;
+        $directory = sys_get_temp_dir() . '/haocode-history-' . bin2hex(random_bytes(4));
+        mkdir($directory, 0755, true);
+        $historyFile = $directory . '/input_history.json';
+        file_put_contents($historyFile, json_encode([
+            'alpha',
+            "beta\ngamma",
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+
+        try {
+            $history = $this->invoke($command, 'loadInputHistory', $historyFile, $directory . '/legacy.txt');
+
+            $this->assertSame(['alpha', "beta\ngamma"], $history);
+        } finally {
+            $this->removeDirectory($directory);
+        }
+    }
+
+    public function test_load_input_history_falls_back_to_legacy_plain_text_history(): void
+    {
+        $command = new HaoCodeCommand;
+        $directory = sys_get_temp_dir() . '/haocode-history-' . bin2hex(random_bytes(4));
+        mkdir($directory, 0755, true);
+        $legacyHistoryFile = $directory . '/input_history';
+        file_put_contents($legacyHistoryFile, "alpha\nbeta\n");
+
+        try {
+            $history = $this->invoke($command, 'loadInputHistory', $directory . '/missing.json', $legacyHistoryFile);
+
+            $this->assertSame(['alpha', 'beta'], $history);
+        } finally {
+            $this->removeDirectory($directory);
+        }
+    }
+
+    public function test_save_input_history_writes_json_for_multiline_entries(): void
+    {
+        $command = new HaoCodeCommand;
+        $directory = sys_get_temp_dir() . '/haocode-history-' . bin2hex(random_bytes(4));
+        mkdir($directory, 0755, true);
+        $historyFile = $directory . '/input_history.json';
+
+        try {
+            $this->invoke($command, 'saveInputHistory', $historyFile, [
+                'alpha',
+                "beta\ngamma",
+            ]);
+
+            $decoded = json_decode((string) file_get_contents($historyFile), true, flags: JSON_THROW_ON_ERROR);
+            $this->assertSame(['alpha', "beta\ngamma"], $decoded);
+        } finally {
+            $this->removeDirectory($directory);
+        }
     }
 }

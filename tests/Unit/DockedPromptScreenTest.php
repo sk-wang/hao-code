@@ -16,7 +16,8 @@ class DockedPromptScreenTest extends TestCase
 
         $screen->render(
             suggestionLines: ['suggestion one', 'suggestion two'],
-            promptLine: 'prompt line',
+            promptLines: ['prompt line'],
+            cursorLineIndex: 0,
             cursorColumn: 3,
             hudLines: ['hud line 1', 'hud line 2'],
         );
@@ -37,7 +38,8 @@ class DockedPromptScreenTest extends TestCase
 
         $screen->render(
             suggestionLines: [],
-            promptLine: 'prompt line a',
+            promptLines: ['prompt line a'],
+            cursorLineIndex: 0,
             cursorColumn: 1,
             hudLines: ['hud line 1', 'hud line 2'],
         );
@@ -45,7 +47,8 @@ class DockedPromptScreenTest extends TestCase
 
         $screen->render(
             suggestionLines: [],
-            promptLine: 'prompt line ab',
+            promptLines: ['prompt line ab'],
+            cursorLineIndex: 0,
             cursorColumn: 2,
             hudLines: ['hud line 1', 'hud line 2'],
         );
@@ -66,7 +69,8 @@ class DockedPromptScreenTest extends TestCase
 
         $screen->render(
             suggestionLines: ['one', 'two', 'three'],
-            promptLine: 'prompt line',
+            promptLines: ['prompt line'],
+            cursorLineIndex: 0,
             cursorColumn: 0,
             hudLines: ['hud line 1', 'hud line 2'],
         );
@@ -74,7 +78,8 @@ class DockedPromptScreenTest extends TestCase
 
         $screen->render(
             suggestionLines: [],
-            promptLine: 'prompt line',
+            promptLines: ['prompt line'],
+            cursorLineIndex: 0,
             cursorColumn: 0,
             hudLines: ['hud line 1', 'hud line 2'],
         );
@@ -95,7 +100,8 @@ class DockedPromptScreenTest extends TestCase
 
         $screen->render(
             suggestionLines: ['one'],
-            promptLine: 'prompt line',
+            promptLines: ['prompt line'],
+            cursorLineIndex: 0,
             cursorColumn: 0,
             hudLines: ['hud line 1', 'hud line 2'],
         );
@@ -109,5 +115,25 @@ class DockedPromptScreenTest extends TestCase
         $this->assertStringContainsString("\033[8;1H\033[2K", $display);
         $this->assertStringContainsString("\033[9;1H\033[2K", $display);
         $this->assertStringContainsString("\033[10;1H\033[2K", $display);
+    }
+
+    public function test_it_renders_multiline_prompt_blocks_and_places_the_cursor_on_the_active_line(): void
+    {
+        $output = new BufferedOutput(OutputInterface::VERBOSITY_NORMAL, true);
+        $screen = new DockedPromptScreen($output, static fn (): int => 12);
+
+        $screen->render(
+            suggestionLines: [],
+            promptLines: ['first line', 'second line'],
+            cursorLineIndex: 1,
+            cursorColumn: 4,
+            hudLines: ['hud line 1', 'hud line 2'],
+        );
+
+        $display = $output->fetch();
+
+        $this->assertStringContainsString("\033[9;1H\033[2Kfirst line", $display);
+        $this->assertStringContainsString("\033[10;1H\033[2Ksecond line", $display);
+        $this->assertStringContainsString("\033[10;5H", $display);
     }
 }
