@@ -41,6 +41,9 @@ use App\Tools\Skill\SkillLoader;
 use App\Tools\ToolRegistry;
 use App\Tools\ToolUseContext;
 use Illuminate\Console\Command;
+use Symfony\Component\Console\Formatter\OutputFormatter;
+use Symfony\Component\Console\Terminal;
+
 class HaoCodeCommand extends Command
 {
     protected $signature = 'hao-code

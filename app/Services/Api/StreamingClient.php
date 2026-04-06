@@ -504,13 +504,7 @@ class StreamingClient
 
     private function preferredHttpVersion(?string $baseUrl = null): ?string
     {
-        $host = (string) parse_url($baseUrl ?? $this->resolveBaseUrl(), PHP_URL_HOST);
-
-        if ($host === 'api.kimi.com') {
-            return '1.1';
-        }
-
-        return null;
+        return '1.1';
     }
 
     private function normalizeTransportException(\Throwable $e): \Throwable

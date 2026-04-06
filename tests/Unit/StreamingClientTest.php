@@ -1053,4 +1053,35 @@ class StreamingClientTest extends TestCase
         $this->assertTrue($capturedOptions['verify_peer'] ?? false);
         $this->assertTrue($capturedOptions['verify_host'] ?? false);
     }
+
+    public function test_it_forces_http_1_1_for_zai_streaming_requests(): void
+    {
+        $capturedOptions = null;
+
+        $httpClient = new MockHttpClient(function (string $method, string $url, array $options) use (&$capturedOptions) {
+            $capturedOptions = $options;
+
+            return new MockResponse([
+                "event: message_stop\n",
+                "data: {}\n\n",
+            ], ['http_code' => 200]);
+        });
+
+        $client = new StreamingClient(
+            apiKey: 'test-key',
+            model: 'glm-5.1',
+            baseUrl: 'https://api.z.ai/api/anthropic',
+            httpClient: $httpClient,
+        );
+
+        iterator_to_array($client->streamMessages(
+            systemPrompt: [],
+            messages: [['role' => 'user', 'content' => 'hello']],
+            tools: [],
+        ));
+
+        $this->assertSame('1.1', $capturedOptions['http_version'] ?? null);
+        $this->assertTrue($capturedOptions['verify_peer'] ?? false);
+        $this->assertTrue($capturedOptions['verify_host'] ?? false);
+    }
 }
