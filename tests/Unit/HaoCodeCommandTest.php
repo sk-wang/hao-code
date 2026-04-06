@@ -3,10 +3,21 @@
 namespace Tests\Unit;
 
 use App\Console\Commands\HaoCodeCommand;
+use App\Support\Terminal\DockedPromptScreen;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\Console\Output\BufferedOutput;
+use Symfony\Component\Console\Output\OutputInterface;
 
 class HaoCodeCommandTest extends TestCase
 {
+    private function setPrivateProperty(object $target, string $property, mixed $value): void
+    {
+        $ref = new \ReflectionClass($target);
+        $p = $ref->getProperty($property);
+        $p->setAccessible(true);
+        $p->setValue($target, $value);
+    }
+
     private function invoke(object $target, string $method, mixed ...$args): mixed
     {
         $ref = new \ReflectionClass($target);
@@ -277,5 +288,70 @@ class HaoCodeCommandTest extends TestCase
         } finally {
             $this->removeDirectory($root);
         }
+    }
+
+    public function test_render_docked_prompt_screen_delegates_to_the_active_docked_prompt_screen(): void
+    {
+        $command = new HaoCodeCommand;
+        $spy = new class extends DockedPromptScreen
+        {
+            public array $renderCalls = [];
+
+            public function __construct()
+            {
+                parent::__construct(new BufferedOutput(OutputInterface::VERBOSITY_NORMAL, true), static fn (): int => 10);
+            }
+
+            public function render(array $suggestionLines, string $promptLine, int $cursorColumn, array $hudLines): void
+            {
+                $this->renderCalls[] = [
+                    'suggestionLines' => $suggestionLines,
+                    'promptLine' => $promptLine,
+                    'cursorColumn' => $cursorColumn,
+                    'hudLines' => $hudLines,
+                ];
+            }
+        };
+
+        $this->invoke(
+            $command,
+            'renderDockedPromptScreen',
+            $spy,
+            'prompt line',
+            7,
+            ['suggestion one'],
+            ['hud line 1', 'hud line 2'],
+        );
+
+        $this->assertCount(1, $spy->renderCalls);
+        $this->assertSame(['suggestion one'], $spy->renderCalls[0]['suggestionLines']);
+        $this->assertSame('prompt line', $spy->renderCalls[0]['promptLine']);
+        $this->assertSame(7, $spy->renderCalls[0]['cursorColumn']);
+        $this->assertSame(['hud line 1', 'hud line 2'], $spy->renderCalls[0]['hudLines']);
+    }
+
+    public function test_clear_docked_prompt_screen_clears_the_active_screen(): void
+    {
+        $command = new HaoCodeCommand;
+        $spy = new class extends DockedPromptScreen
+        {
+            public int $clearCalls = 0;
+
+            public function __construct()
+            {
+                parent::__construct(new BufferedOutput(OutputInterface::VERBOSITY_NORMAL, true), static fn (): int => 10);
+            }
+
+            public function clear(): void
+            {
+                $this->clearCalls++;
+            }
+        };
+
+        $this->setPrivateProperty($command, 'dockedPromptScreen', $spy);
+
+        $this->invoke($command, 'clearDockedPromptScreen');
+
+        $this->assertSame(1, $spy->clearCalls);
     }
 }

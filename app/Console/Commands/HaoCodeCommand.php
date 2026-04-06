@@ -23,6 +23,7 @@ use App\Services\Session\SessionTitleService;
 use App\Services\Settings\SettingsManager;
 use App\Services\Task\TaskManager;
 use App\Support\Terminal\Autocomplete\AutocompleteEngine;
+use App\Support\Terminal\DockedPromptScreen;
 use App\Support\Terminal\Autocomplete\SlashCommandCatalog;
 use App\Support\Terminal\InputSanitizer;
 use App\Support\Terminal\MarkdownRenderer;
@@ -69,6 +70,8 @@ class HaoCodeCommand extends Command
     private bool $titleGenerated = false;
 
     private ?ReplFormatter $replFormatter = null;
+
+    private ?DockedPromptScreen $dockedPromptScreen = null;
 
     private string $lastTranscriptQuery = '';
 
@@ -450,17 +453,17 @@ class HaoCodeCommand extends Command
 
     private function readInput(AgentLoop $agent, array &$history, int &$historyPtr): ?string
     {
-        $this->renderPromptFooter($agent);
-
         if ($this->supportsRawInput()) {
-            return $this->readInputRaw($agent, $history, $historyPtr);
+            return $this->readInputRaw($agent, $history, $historyPtr, useDockedHud: true);
         }
+
+        $this->renderPromptFooter($agent);
 
         if ($this->supportsReadline()) {
             return $this->readInputWithReadline();
         }
 
-        return $this->readInputRaw($agent, $history, $historyPtr);
+        return $this->readInputRaw($agent, $history, $historyPtr, useDockedHud: false);
     }
 
     private function readInputWithReadline(): ?string
@@ -495,7 +498,7 @@ class HaoCodeCommand extends Command
         return trim($fullInput) !== '' ? trim($fullInput) : '';
     }
 
-    private function readInputRaw(AgentLoop $agent, array &$history, int &$historyPtr): ?string
+    private function readInputRaw(AgentLoop $agent, array &$history, int &$historyPtr, bool $useDockedHud = true): ?string
     {
         $cwd = basename(getcwd());
         $autocomplete = app(AutocompleteEngine::class);
@@ -520,7 +523,9 @@ class HaoCodeCommand extends Command
         $liveSuggestions = [];
         $selectedSuggestionIndex = 0;
 
-        $this->redrawRawEditorLine(
+        $this->redrawActiveRawInput(
+            agent: $agent,
+            useDockedHud: $useDockedHud,
             cwd: $cwd,
             currentLine: $currentLine,
             autocomplete: $autocomplete,
@@ -543,7 +548,9 @@ class HaoCodeCommand extends Command
                         if ($completed !== null && $completed !== $currentLine) {
                             $currentLine = $completed;
                             [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
-                            $this->redrawRawEditorLine(
+                            $this->redrawActiveRawInput(
+                                agent: $agent,
+                                useDockedHud: $useDockedHud,
                                 cwd: $cwd,
                                 currentLine: $currentLine,
                                 autocomplete: $autocomplete,
@@ -557,7 +564,9 @@ class HaoCodeCommand extends Command
                     }
 
                     // Enter key
-                    if ($sttyMode) {
+                    if ($useDockedHud) {
+                        $this->clearDockedPromptScreen();
+                    } elseif ($sttyMode) {
                         echo "\r\n";
                     }
 
@@ -568,7 +577,9 @@ class HaoCodeCommand extends Command
                         $currentLine = '';
                         $continuationPrompt = true;
                         [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
-                        $this->redrawRawEditorLine(
+                        $this->redrawActiveRawInput(
+                            agent: $agent,
+                            useDockedHud: $useDockedHud,
                             cwd: $cwd,
                             currentLine: $currentLine,
                             autocomplete: $autocomplete,
@@ -585,7 +596,9 @@ class HaoCodeCommand extends Command
                 }
 
                 if ($char === "\x03") { // Ctrl+C
-                    if ($sttyMode) {
+                    if ($useDockedHud) {
+                        $this->clearDockedPromptScreen();
+                    } elseif ($sttyMode) {
                         echo "\r\n";
                     }
 
@@ -593,22 +606,39 @@ class HaoCodeCommand extends Command
                 }
 
                 if ($char === "\x0f") { // Ctrl+O
-                    if ($sttyMode) {
+                    if ($useDockedHud) {
+                        $this->clearDockedPromptScreen();
+                        $this->resetDockedPromptScreen();
+                    } elseif ($sttyMode) {
                         echo "\r\n";
                     }
 
                     $this->openTranscriptMode($agent, alreadyRaw: true, inputHandle: $handle);
-                    $this->redrawRawInputScreen($agent, $cwd, $currentLine, $continuationPrompt, $liveSuggestions, $selectedSuggestionIndex);
+                    $this->redrawActiveRawInput(
+                        agent: $agent,
+                        useDockedHud: $useDockedHud,
+                        cwd: $cwd,
+                        currentLine: $currentLine,
+                        autocomplete: $autocomplete,
+                        continuationPrompt: $continuationPrompt,
+                        suggestions: $liveSuggestions,
+                        selectedSuggestionIndex: $selectedSuggestionIndex,
+                    );
 
                     continue;
                 }
 
                 if ($char === "\x12") { // Ctrl+R
+                    if ($useDockedHud) {
+                        $this->clearDockedPromptScreen();
+                    }
                     $match = $this->readReverseHistorySearch($handle, $history, $currentLine, $cwd);
                     if ($match !== null) {
                         $currentLine = $match;
                         [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
-                        $this->redrawRawEditorLine(
+                        $this->redrawActiveRawInput(
+                            agent: $agent,
+                            useDockedHud: $useDockedHud,
                             cwd: $cwd,
                             currentLine: $currentLine,
                             autocomplete: $autocomplete,
@@ -621,7 +651,9 @@ class HaoCodeCommand extends Command
                 }
 
                 if ($char === "\x04") { // Ctrl+D
-                    if ($sttyMode) {
+                    if ($useDockedHud) {
+                        $this->clearDockedPromptScreen();
+                    } elseif ($sttyMode) {
                         echo "\r\n";
                     }
                     $this->shouldExit = true;
@@ -634,7 +666,9 @@ class HaoCodeCommand extends Command
                     if ($seq === '[A') { // Up arrow
                         if ($liveSuggestions !== []) {
                             $selectedSuggestionIndex = $this->wrapSuggestionIndex($selectedSuggestionIndex - 1, count($liveSuggestions));
-                            $this->redrawRawEditorLine(
+                            $this->redrawActiveRawInput(
+                                agent: $agent,
+                                useDockedHud: $useDockedHud,
                                 cwd: $cwd,
                                 currentLine: $currentLine,
                                 autocomplete: $autocomplete,
@@ -650,7 +684,9 @@ class HaoCodeCommand extends Command
                             $historyPtr--;
                             $currentLine = $history[$historyPtr];
                             [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
-                            $this->redrawRawEditorLine(
+                            $this->redrawActiveRawInput(
+                                agent: $agent,
+                                useDockedHud: $useDockedHud,
                                 cwd: $cwd,
                                 currentLine: $currentLine,
                                 autocomplete: $autocomplete,
@@ -665,7 +701,9 @@ class HaoCodeCommand extends Command
                     if ($seq === '[B') { // Down arrow
                         if ($liveSuggestions !== []) {
                             $selectedSuggestionIndex = $this->wrapSuggestionIndex($selectedSuggestionIndex + 1, count($liveSuggestions));
-                            $this->redrawRawEditorLine(
+                            $this->redrawActiveRawInput(
+                                agent: $agent,
+                                useDockedHud: $useDockedHud,
                                 cwd: $cwd,
                                 currentLine: $currentLine,
                                 autocomplete: $autocomplete,
@@ -681,7 +719,9 @@ class HaoCodeCommand extends Command
                             $historyPtr++;
                             $currentLine = $history[$historyPtr];
                             [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
-                            $this->redrawRawEditorLine(
+                            $this->redrawActiveRawInput(
+                                agent: $agent,
+                                useDockedHud: $useDockedHud,
                                 cwd: $cwd,
                                 currentLine: $currentLine,
                                 autocomplete: $autocomplete,
@@ -702,7 +742,9 @@ class HaoCodeCommand extends Command
                     if ($currentLine !== '') {
                         $currentLine = $this->trimLastCharacter($currentLine);
                         [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
-                        $this->redrawRawEditorLine(
+                        $this->redrawActiveRawInput(
+                            agent: $agent,
+                            useDockedHud: $useDockedHud,
                             cwd: $cwd,
                             currentLine: $currentLine,
                             autocomplete: $autocomplete,
@@ -719,7 +761,9 @@ class HaoCodeCommand extends Command
                     if ($liveSuggestions !== []) {
                         $currentLine = $autocomplete->acceptSuggestion($currentLine, $liveSuggestions[$selectedSuggestionIndex]['label']);
                         [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
-                        $this->redrawRawEditorLine(
+                        $this->redrawActiveRawInput(
+                            agent: $agent,
+                            useDockedHud: $useDockedHud,
                             cwd: $cwd,
                             currentLine: $currentLine,
                             autocomplete: $autocomplete,
@@ -738,7 +782,9 @@ class HaoCodeCommand extends Command
                         $completed = $autocomplete->acceptSuggestion($currentLine, $suggestions[0]['label']);
                         $currentLine = $completed;
                         [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
-                        $this->redrawRawEditorLine(
+                        $this->redrawActiveRawInput(
+                            agent: $agent,
+                            useDockedHud: $useDockedHud,
                             cwd: $cwd,
                             currentLine: $currentLine,
                             autocomplete: $autocomplete,
@@ -747,13 +793,11 @@ class HaoCodeCommand extends Command
                             selectedSuggestionIndex: $selectedSuggestionIndex,
                         );
                     } elseif (count($suggestions) > 1) {
-                        // Multiple matches: show suggestions
-                        echo "\r\n";
-                        foreach ($suggestions as $s) {
-                            $this->line($autocomplete->renderSuggestion($s));
-                        }
-                        // Redraw prompt and current input
-                        $this->redrawRawEditorLine(
+                        $liveSuggestions = $suggestions;
+                        $selectedSuggestionIndex = 0;
+                        $this->redrawActiveRawInput(
+                            agent: $agent,
+                            useDockedHud: $useDockedHud,
                             cwd: $cwd,
                             currentLine: $currentLine,
                             autocomplete: $autocomplete,
@@ -768,7 +812,17 @@ class HaoCodeCommand extends Command
 
                 if ($char === "\x0c") { // Ctrl+L
                     echo "\033[H\033[2J";
-                    $this->redrawRawInputScreen($agent, $cwd, $currentLine, $continuationPrompt, $liveSuggestions, $selectedSuggestionIndex);
+                    $this->resetDockedPromptScreen();
+                    $this->redrawActiveRawInput(
+                        agent: $agent,
+                        useDockedHud: $useDockedHud,
+                        cwd: $cwd,
+                        currentLine: $currentLine,
+                        autocomplete: $autocomplete,
+                        continuationPrompt: $continuationPrompt,
+                        suggestions: $liveSuggestions,
+                        selectedSuggestionIndex: $selectedSuggestionIndex,
+                    );
 
                     continue;
                 }
@@ -777,7 +831,9 @@ class HaoCodeCommand extends Command
                 if (ord($char) >= 32) {
                     $currentLine .= $char;
                     [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $currentLine);
-                    $this->redrawRawEditorLine(
+                    $this->redrawActiveRawInput(
+                        agent: $agent,
+                        useDockedHud: $useDockedHud,
                         cwd: $cwd,
                         currentLine: $currentLine,
                         autocomplete: $autocomplete,
@@ -2237,7 +2293,7 @@ class HaoCodeCommand extends Command
             $this->formatter()->keyValue('Tools', $statusline['show_tools'] ? 'on' : 'off', 'gray', $statusline['show_tools'] ? 'green' : 'yellow'),
             $this->formatter()->keyValue('Agents', $statusline['show_agents'] ? 'on' : 'off', 'gray', $statusline['show_agents'] ? 'green' : 'yellow'),
             $this->formatter()->keyValue('Todos', $statusline['show_todos'] ? 'on' : 'off', 'gray', $statusline['show_todos'] ? 'green' : 'yellow'),
-            '<fg=gray>The status line is the footer shown above the prompt in raw-terminal mode.</>',
+            '<fg=gray>The status line is docked at the bottom in raw-terminal mode; non-raw modes fall back to an inline footer.</>',
             '<fg=gray>Commands: /statusline on|off · /statusline layout compact|expanded · /statusline paths 1|2|3</>',
             '<fg=gray>Commands: /statusline tools on|off · /statusline agents on|off · /statusline todos on|off · /statusline reset</>',
             '',
@@ -4635,34 +4691,80 @@ PROMPT;
         $this->redrawRawEditorLine($cwd, $currentLine);
     }
 
-    private function redrawRawInputScreen(
+    private function redrawActiveRawInput(
         AgentLoop $agent,
+        bool $useDockedHud,
         string $cwd,
         string $currentLine,
+        ?AutocompleteEngine $autocomplete = null,
         bool $continuationPrompt = false,
         array $suggestions = [],
         int $selectedSuggestionIndex = 0,
-    ): void
-    {
-        $this->writeRaw("\033[H\033[2J");
-        $this->renderPromptFooter($agent);
+    ): void {
+        if ($useDockedHud) {
+            $this->redrawRawInputScreen(
+                agent: $agent,
+                cwd: $cwd,
+                currentLine: $currentLine,
+                autocomplete: $autocomplete,
+                continuationPrompt: $continuationPrompt,
+                suggestions: $suggestions,
+                selectedSuggestionIndex: $selectedSuggestionIndex,
+            );
+
+            return;
+        }
+
         $this->redrawRawEditorLine(
             cwd: $cwd,
             currentLine: $currentLine,
+            autocomplete: $autocomplete,
             continuationPrompt: $continuationPrompt,
             suggestions: $suggestions,
             selectedSuggestionIndex: $selectedSuggestionIndex,
         );
     }
 
+    private function redrawRawInputScreen(
+        AgentLoop $agent,
+        string $cwd,
+        string $currentLine,
+        ?AutocompleteEngine $autocomplete = null,
+        bool $continuationPrompt = false,
+        array $suggestions = [],
+        int $selectedSuggestionIndex = 0,
+    ): void
+    {
+        $autocomplete ??= app(AutocompleteEngine::class);
+        $promptPrefix = $continuationPrompt
+            ? $this->formatter()->continuationPrompt()
+            : $this->formatter()->prompt($cwd);
+        $ghostText = $autocomplete->getGhostText($currentLine);
+        $promptLine = $promptPrefix
+            . OutputFormatter::escape($currentLine)
+            . (($ghostText !== null && $ghostText !== '') ? $autocomplete->renderGhostText($ghostText) : '');
+
+        $suggestionLines = [];
+        if ($suggestions !== []) {
+            $maxLabelWidth = max(array_map(fn ($s) => mb_strlen($s['label']), $suggestions));
+            $labelWidth = max(16, $maxLabelWidth + 2);
+            foreach ($suggestions as $index => $suggestion) {
+                $suggestionLines[] = $autocomplete->renderSuggestion($suggestion, $index === $selectedSuggestionIndex, $labelWidth);
+            }
+        }
+
+        $this->renderDockedPromptScreen(
+            $this->ensureDockedPromptScreen(),
+            $promptLine,
+            $this->rawPromptWidth($cwd, $continuationPrompt) + $this->displayWidth($currentLine),
+            $suggestionLines,
+            $this->currentPromptFooterLines($agent),
+        );
+    }
+
     private function renderPromptFooter(AgentLoop $agent): void
     {
-        $settings = app(SettingsManager::class);
-        $snapshot = $this->buildPromptHudSnapshot($agent);
-        $lines = $settings->isStatuslineEnabled()
-            ? $this->formatter()->promptFooterLines($snapshot)
-            : [];
-
+        $lines = $this->currentPromptFooterLines($agent);
         if ($lines === []) {
             return;
         }
@@ -4670,6 +4772,18 @@ PROMPT;
         foreach ($lines as $line) {
             $this->line($line);
         }
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function currentPromptFooterLines(AgentLoop $agent): array
+    {
+        $settings = app(SettingsManager::class);
+
+        return $settings->isStatuslineEnabled()
+            ? $this->formatter()->promptFooterLines($this->buildPromptHudSnapshot($agent))
+            : [];
     }
 
     /**
@@ -4960,6 +5074,47 @@ PROMPT;
     private function writeRaw(string $text): void
     {
         $this->output->write($text, false, \Symfony\Component\Console\Output\OutputInterface::OUTPUT_RAW);
+    }
+
+    private function ensureDockedPromptScreen(): DockedPromptScreen
+    {
+        if ($this->dockedPromptScreen === null) {
+            $this->dockedPromptScreen = new DockedPromptScreen(
+                output: $this->output,
+                heightProvider: static fn (): int => max(1, (new Terminal)->getHeight()),
+            );
+        }
+
+        return $this->dockedPromptScreen;
+    }
+
+    /**
+     * @param array<int, string> $suggestionLines
+     * @param array<int, string> $hudLines
+     */
+    private function renderDockedPromptScreen(
+        DockedPromptScreen $screen,
+        string $promptLine,
+        int $cursorColumn,
+        array $suggestionLines,
+        array $hudLines,
+    ): void {
+        $screen->render(
+            suggestionLines: $suggestionLines,
+            promptLine: $promptLine,
+            cursorColumn: $cursorColumn,
+            hudLines: $hudLines,
+        );
+    }
+
+    private function clearDockedPromptScreen(): void
+    {
+        $this->dockedPromptScreen?->clear();
+    }
+
+    private function resetDockedPromptScreen(): void
+    {
+        $this->dockedPromptScreen?->reset();
     }
 
     private function redrawRawEditorLine(
