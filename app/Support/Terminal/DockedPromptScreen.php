@@ -6,7 +6,8 @@ use Symfony\Component\Console\Output\OutputInterface;
 
 class DockedPromptScreen
 {
-    private int $lastReservedHeight = 0;
+    /** @var array<int, string> */
+    private array $renderedLines = [];
 
     /** @var callable():int|null */
     private $heightProvider;
@@ -29,42 +30,64 @@ class DockedPromptScreen
     {
         $terminalHeight = $this->terminalHeight();
         $reservedHeight = max(1, count($suggestionLines) + 1 + count($hudLines));
-        $clearHeight = max($reservedHeight, $this->lastReservedHeight);
-        $clearFromLine = max(1, $terminalHeight - $clearHeight + 1);
-
-        $this->writeRaw(sprintf("\033[%d;1H\033[J", $clearFromLine));
-
         $line = max(1, $terminalHeight - $reservedHeight + 1);
+        $nextFrame = [];
+
         foreach ($suggestionLines as $suggestionLine) {
-            $this->writeLineAt($line++, $suggestionLine);
+            $nextFrame[$line++] = $suggestionLine;
         }
 
         $promptLineNumber = $line;
-        $this->writeLineAt($promptLineNumber, $promptLine);
+        $nextFrame[$promptLineNumber] = $promptLine;
 
         $hudStartLine = max($promptLineNumber + 1, $terminalHeight - count($hudLines) + 1);
         foreach ($hudLines as $index => $hudLine) {
-            $this->writeLineAt($hudStartLine + $index, $hudLine);
+            $nextFrame[$hudStartLine + $index] = $hudLine;
+        }
+
+        $linesToUpdate = array_unique(array_merge(
+            array_keys($this->renderedLines),
+            array_keys($nextFrame),
+        ));
+        sort($linesToUpdate, SORT_NUMERIC);
+
+        foreach ($linesToUpdate as $lineNumber) {
+            $previous = $this->renderedLines[$lineNumber] ?? null;
+            $current = $nextFrame[$lineNumber] ?? null;
+
+            if ($previous === $current) {
+                continue;
+            }
+
+            $this->clearLineAt($lineNumber);
+            if ($current !== null) {
+                $this->output->write($current, false);
+            }
         }
 
         $this->writeRaw(sprintf("\033[%d;%dH", $promptLineNumber, max(1, $cursorColumn + 1)));
-        $this->lastReservedHeight = $reservedHeight;
+        $this->renderedLines = $nextFrame;
     }
 
     public function clear(): void
     {
-        if ($this->lastReservedHeight <= 0) {
+        if ($this->renderedLines === []) {
             return;
         }
 
-        $clearFromLine = max(1, $this->terminalHeight() - $this->lastReservedHeight + 1);
-        $this->writeRaw(sprintf("\033[%d;1H\033[J", $clearFromLine));
-        $this->lastReservedHeight = 0;
+        $lines = array_keys($this->renderedLines);
+        sort($lines, SORT_NUMERIC);
+
+        foreach ($lines as $line) {
+            $this->clearLineAt($line);
+        }
+
+        $this->renderedLines = [];
     }
 
     public function reset(): void
     {
-        $this->lastReservedHeight = 0;
+        $this->renderedLines = [];
     }
 
     private function terminalHeight(): int
@@ -76,10 +99,9 @@ class DockedPromptScreen
         return max(1, $height);
     }
 
-    private function writeLineAt(int $line, string $content): void
+    private function clearLineAt(int $line): void
     {
         $this->writeRaw(sprintf("\033[%d;1H\033[2K", max(1, $line)));
-        $this->output->write($content, false);
     }
 
     private function writeRaw(string $text): void
