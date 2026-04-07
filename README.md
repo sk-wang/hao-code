@@ -20,6 +20,7 @@ An interactive CLI coding agent built with Laravel for Anthropic-compatible endp
 - **Team coordination** — create named teams of specialized agents, broadcast messaging, full lifecycle management
 - **Safety controls** — permission modes, hook system, cost tracking with warning/hard-stop thresholds
 - **Session management** — restore, branch, fork, context compaction
+- **PHP SDK** — `HaoCode::query()`, streaming, multi-turn conversations — use the agent as a library
 - **Extensible** — custom skills, multi-provider config, project/global settings
 
 ---
@@ -220,6 +221,64 @@ SendMessage(to: "team:research", message: "All sections done, begin compilation"
 
 # Check status
 TeamList(name: "research")
+```
+
+---
+
+## PHP SDK
+
+Use hao-code as a library in any PHP/Laravel application:
+
+```bash
+composer require sk-wang/hao-code
+```
+
+### One-shot query
+
+```php
+use App\Sdk\HaoCode;
+
+$response = HaoCode::query('Explain what this codebase does');
+```
+
+### With configuration
+
+```php
+use App\Sdk\{HaoCode, HaoCodeConfig};
+
+$response = HaoCode::query('Fix the bug in auth.php', new HaoCodeConfig(
+    allowedTools: ['Read', 'Edit', 'Bash'],
+    maxTurns: 10,
+    onText: fn(string $delta) => print($delta),
+));
+```
+
+### Streaming messages
+
+```php
+use App\Sdk\HaoCode;
+
+foreach (HaoCode::stream('Build a REST API') as $msg) {
+    match ($msg->type) {
+        'text'        => print($msg->text),
+        'tool_start'  => print("Running {$msg->toolName}...\n"),
+        'tool_result' => print("  Done.\n"),
+        'result'      => print("\nCost: \${$msg->cost}\n"),
+        default       => null,
+    };
+}
+```
+
+### Multi-turn conversation
+
+```php
+use App\Sdk\HaoCode;
+
+$conv = HaoCode::conversation();
+$conv->send('Create a User model with name and email');
+$conv->send('Add password hashing');
+$conv->send('Write a test for the User model');
+$conv->close();
 ```
 
 ---

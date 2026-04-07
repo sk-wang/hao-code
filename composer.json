@@ -1,7 +1,7 @@
 {
     "$schema": "https://getcomposer.org/schema.json",
     "name": "sk-wang/hao-code",
-    "version": "v0.1.1",
+    "version": "v0.1.2",
     "type": "library",
     "description": "Terminal-first AI coding agent with Anthropic-compatible APIs.",
     "keywords": ["ai", "agent", "cli", "coding-agent", "laravel", "anthropic"],
@@ -73,7 +73,10 @@
     },
     "extra": {
         "laravel": {
-            "dont-discover": []
+            "dont-discover": [],
+            "providers": [
+                "App\\Sdk\\HaoCodeSdkServiceProvider"
+            ]
         }
     },
     "config": {

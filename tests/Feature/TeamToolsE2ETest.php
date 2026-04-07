@@ -667,7 +667,7 @@ class TeamToolsE2ETest extends TestCase
 <?php
 function getEnemyStats($type) {
     $enemies = [
-        'goblin'          => ['hp' => 10, 'attack' => 999, 'name' => 'Goblin'],
+        'goblin'          => ['hp' => 5, 'attack' => 999, 'name' => 'Goblin'],
         'dragon-skeleton' => ['hp' => 80, 'attack' => 15,  'name' => 'Dragon Skeleton'],
     ];
     return $enemies[$type] ?? ['hp' => 10, 'attack' => 3, 'name' => 'Unknown'];
