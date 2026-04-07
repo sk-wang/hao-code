@@ -10,6 +10,7 @@ use App\Sdk\HaoCode;
 use App\Sdk\HaoCodeConfig;
 use App\Sdk\Message;
 use App\Sdk\QueryResult;
+use App\Sdk\SdkSkill;
 use App\Sdk\SdkTool;
 use App\Sdk\StructuredResult;
 use App\Services\Agent\AgentLoopFactory;
@@ -997,6 +998,156 @@ class SdkE2ETest extends TestCase
         $this->assertSame(2, $conv->getTurnCount());
 
         $conv->close();
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 31: SdkSkill — agent invokes a custom skill via SkillTool
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_sdk_skill_is_invocable_by_agent(): void
+    {
+        $this->bootWithMock([
+            // Agent decides to invoke the custom skill
+            MockAnthropicSse::toolUseResponse('toolu_skill', 'Skill', [
+                'skill' => 'security-review',
+                'args' => 'auth.php',
+            ]),
+            // Agent receives the expanded skill prompt and acts on it
+            function (array $payload): MockResponse {
+                $toolResult = MockAnthropicSse::lastToolResultText($payload);
+                // Skill prompt should be returned as tool result
+                $this->assertStringContainsString('OWASP Top 10', $toolResult);
+                $this->assertStringContainsString('auth.php', $toolResult);
+
+                return MockAnthropicSse::textResponse('Security review complete. No critical issues found.');
+            },
+        ]);
+
+        chdir($this->projectDir);
+
+        $result = HaoCode::query('Review auth.php for security', new HaoCodeConfig(
+            skills: [
+                new SdkSkill(
+                    name: 'security-review',
+                    description: 'Review code for security vulnerabilities',
+                    prompt: 'Review the following file for OWASP Top 10 vulnerabilities. Focus on injection, XSS, and auth bypass. File: $ARGUMENTS',
+                ),
+            ],
+        ));
+
+        $this->assertStringContainsString('Security review complete', $result->text);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 32: SdkSkill with allowedTools restriction
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_sdk_skill_definition_converts_correctly(): void
+    {
+        $skill = new SdkSkill(
+            name: 'lint-check',
+            description: 'Run linting on the project',
+            prompt: 'Run lint checks on $ARGUMENTS and report issues.',
+            allowedTools: ['Bash', 'Read'],
+            model: 'haiku',
+        );
+
+        $def = $skill->toDefinition();
+
+        $this->assertSame('lint-check', $def->name);
+        $this->assertSame('Run linting on the project', $def->description);
+        $this->assertStringContainsString('Run lint checks', $def->prompt);
+        $this->assertSame(['Bash', 'Read'], $def->allowedTools);
+        $this->assertSame('haiku', $def->model);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 33: Multiple skills registered at once
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_multiple_sdk_skills_registered(): void
+    {
+        $this->bootWithMock([
+            // Agent invokes the second skill
+            MockAnthropicSse::toolUseResponse('toolu_s2', 'Skill', [
+                'skill' => 'deploy',
+            ]),
+            function (array $payload): MockResponse {
+                $toolResult = MockAnthropicSse::lastToolResultText($payload);
+                $this->assertStringContainsString('Deploy to production', $toolResult);
+
+                return MockAnthropicSse::textResponse('Deployment initiated.');
+            },
+        ]);
+
+        chdir($this->projectDir);
+
+        $result = HaoCode::query('Deploy the app', new HaoCodeConfig(
+            skills: [
+                new SdkSkill(
+                    name: 'test-suite',
+                    description: 'Run the test suite',
+                    prompt: 'Run all tests and report failures.',
+                ),
+                new SdkSkill(
+                    name: 'deploy',
+                    description: 'Deploy to production',
+                    prompt: 'Deploy to production. Run tests first, then build and push.',
+                ),
+            ],
+        ));
+
+        $this->assertStringContainsString('Deployment', $result->text);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 34: Skills and tools together in one query
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_sdk_skills_and_tools_work_together(): void
+    {
+        $dbTool = new class extends SdkTool {
+            public function name(): string { return 'CheckDB'; }
+            public function description(): string { return 'Check database status.'; }
+            public function parameters(): array { return []; }
+            public function handle(array $input): string { return 'DB: 3 tables, 150 rows, healthy'; }
+        };
+
+        $this->bootWithMock([
+            // Agent invokes custom skill first
+            MockAnthropicSse::toolUseResponse('toolu_skill', 'Skill', [
+                'skill' => 'health-check',
+            ]),
+            // Agent then calls custom tool
+            function (array $payload): MockResponse {
+                $toolResult = MockAnthropicSse::lastToolResultText($payload);
+                $this->assertStringContainsString('Check all systems', $toolResult);
+
+                return MockAnthropicSse::toolUseResponse('toolu_db', 'CheckDB', []);
+            },
+            // Summary
+            function (array $payload): MockResponse {
+                $toolResult = MockAnthropicSse::lastToolResultText($payload);
+                $this->assertStringContainsString('3 tables', $toolResult);
+
+                return MockAnthropicSse::textResponse('Health check passed. DB is healthy with 150 rows.');
+            },
+        ]);
+
+        chdir($this->projectDir);
+
+        $result = HaoCode::query('Run a full health check', new HaoCodeConfig(
+            skills: [
+                new SdkSkill(
+                    name: 'health-check',
+                    description: 'Run system health check',
+                    prompt: 'Check all systems: database, cache, and queues. Use CheckDB tool for database.',
+                ),
+            ],
+            tools: [$dbTool],
+        ));
+
+        $this->assertStringContainsString('Health check passed', $result->text);
     }
 
     // ══════════════════════════════════════════════════════════════

@@ -6,6 +6,7 @@ use App\Services\Agent\AgentLoop;
 use App\Services\Agent\AgentLoopFactory;
 use App\Services\Api\StreamingClient;
 use App\Services\Session\SessionManager;
+use App\Tools\Skill\SkillLoader;
 
 /**
  * HaoCode SDK — programmatic access to the agent's capabilities.
@@ -257,6 +258,9 @@ class HaoCode
         // before the factory creates ContextBuilder and PermissionChecker
         self::applySettingsOverrides($config);
 
+        // Register SDK skills into SkillLoader so they appear in system prompt
+        self::registerSdkSkills($config);
+
         /** @var AgentLoopFactory $factory */
         $factory = app(AgentLoopFactory::class);
 
@@ -307,6 +311,21 @@ class HaoCode
 
         if ($config->permissionMode !== 'bypass_permissions') {
             $settings->set('permission_mode', $config->permissionMode);
+        }
+    }
+
+    /**
+     * Register SDK-defined skills into SkillLoader.
+     */
+    private static function registerSdkSkills(HaoCodeConfig $config): void
+    {
+        if ($config->skills === []) {
+            return;
+        }
+
+        $loader = app(SkillLoader::class);
+        foreach ($config->skills as $skill) {
+            $loader->registerSkillDefinition($skill->toDefinition());
         }
     }
 

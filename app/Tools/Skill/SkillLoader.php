@@ -89,6 +89,17 @@ class SkillLoader
         return $list;
     }
 
+    /**
+     * Register a skill programmatically (e.g., from SDK config).
+     * Overwrites any existing skill with the same name.
+     */
+    public function registerSkillDefinition(SkillDefinition $skill): void
+    {
+        // Ensure skills cache is initialized
+        $this->loadSkills();
+        $this->skills[$skill->name] = $skill;
+    }
+
     private function getSkillDirectories(): array
     {
         $home = $_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir();

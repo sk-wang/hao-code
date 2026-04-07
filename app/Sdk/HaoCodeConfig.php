@@ -102,6 +102,13 @@ class HaoCodeConfig
          */
         public readonly array $tools = [],
 
+        /**
+         * Custom skills to register (instances of SdkSkill).
+         * Skills are named prompt templates the agent can invoke.
+         * @var SdkSkill[]
+         */
+        public readonly array $skills = [],
+
         /** AbortController for cancellation from external code. */
         public readonly ?AbortController $abortController = null,
 
