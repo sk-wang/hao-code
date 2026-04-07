@@ -648,6 +648,357 @@ class SdkE2ETest extends TestCase
         $this->assertStringContainsString('Default client response', $result->text);
     }
 
+    // ──────────────────────────────────────────────────────────────
+    //  Test 21: maxBudgetUsd wires to CostTracker
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_max_budget_usd_wires_to_cost_tracker(): void
+    {
+        $this->bootWithMock([
+            MockAnthropicSse::textResponse('Budget test.'),
+        ]);
+
+        chdir($this->projectDir);
+
+        $config = new HaoCodeConfig(maxBudgetUsd: 2.50);
+
+        // Use reflection to verify CostTracker thresholds were set
+        $method = new \ReflectionMethod(HaoCode::class, 'createLoop');
+        $loop = $method->invoke(null, $config);
+
+        $tracker = $loop->getCostTracker();
+        $this->assertSame(2.50, $tracker->getStopThreshold());
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 22: systemPrompt overrides default
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_system_prompt_override_reaches_settings_manager(): void
+    {
+        $this->bootWithMock([
+            MockAnthropicSse::textResponse('Custom prompt response.'),
+        ]);
+
+        chdir($this->projectDir);
+
+        HaoCode::query('Test', new HaoCodeConfig(
+            systemPrompt: 'You are a pirate. Always say "Arrr!".',
+        ));
+
+        // Verify the system prompt was set in SettingsManager
+        $settings = app(\App\Services\Settings\SettingsManager::class);
+        $this->assertSame('You are a pirate. Always say "Arrr!".', $settings->getSystemPrompt());
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 23: appendSystemPrompt reaches SettingsManager
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_append_system_prompt_reaches_settings_manager(): void
+    {
+        $this->bootWithMock([
+            MockAnthropicSse::textResponse('Appended response.'),
+        ]);
+
+        chdir($this->projectDir);
+
+        HaoCode::query('Test', new HaoCodeConfig(
+            appendSystemPrompt: 'Always respond in JSON format.',
+        ));
+
+        $settings = app(\App\Services\Settings\SettingsManager::class);
+        $this->assertSame('Always respond in JSON format.', $settings->getAppendSystemPrompt());
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 24: Custom SdkTool with error handling
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_sdk_tool_error_is_returned_to_model(): void
+    {
+        $failingTool = new class extends SdkTool {
+            public function name(): string { return 'FailTool'; }
+            public function description(): string { return 'A tool that always fails.'; }
+            public function parameters(): array {
+                return ['input' => ['type' => 'string', 'required' => true]];
+            }
+            public function handle(array $input): string {
+                throw new \RuntimeException('Database connection refused');
+            }
+        };
+
+        $this->bootWithMock([
+            MockAnthropicSse::toolUseResponse('toolu_fail', 'FailTool', [
+                'input' => 'test',
+            ]),
+            function (array $payload): MockResponse {
+                $toolResult = MockAnthropicSse::lastToolResultText($payload);
+                $this->assertStringContainsString('Database connection refused', $toolResult);
+
+                return MockAnthropicSse::textResponse('The tool failed with a database error.');
+            },
+        ]);
+
+        chdir($this->projectDir);
+
+        $result = HaoCode::query('Try the failing tool', new HaoCodeConfig(
+            tools: [$failingTool],
+        ));
+
+        $this->assertStringContainsString('database error', $result->text);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 25: Multi-tool SDK query — custom + built-in tools together
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_custom_and_builtin_tools_work_together(): void
+    {
+        $dbTool = new class extends SdkTool {
+            public function name(): string { return 'QueryDB'; }
+            public function description(): string { return 'Query the database.'; }
+            public function parameters(): array {
+                return ['sql' => ['type' => 'string', 'required' => true]];
+            }
+            public function handle(array $input): string {
+                return json_encode([
+                    ['id' => 1, 'name' => 'Alice', 'role' => 'admin'],
+                    ['id' => 2, 'name' => 'Bob', 'role' => 'user'],
+                ]);
+            }
+        };
+
+        $this->bootWithMock([
+            // Turn 1: AI calls custom QueryDB tool
+            MockAnthropicSse::toolUseResponse('toolu_db', 'QueryDB', [
+                'sql' => 'SELECT * FROM users',
+            ]),
+            // Turn 2: AI writes query results to file using built-in Write
+            function (array $payload): MockResponse {
+                $toolResult = MockAnthropicSse::lastToolResultText($payload);
+                $this->assertStringContainsString('Alice', $toolResult);
+                $this->assertStringContainsString('Bob', $toolResult);
+
+                return MockAnthropicSse::toolUseResponse('toolu_write', 'Write', [
+                    'file_path' => 'users.json',
+                    'content' => $toolResult,
+                ]);
+            },
+            // Turn 3: Summarize
+            function (array $payload): MockResponse {
+                return MockAnthropicSse::textResponse('Exported 2 users to users.json.');
+            },
+        ]);
+
+        chdir($this->projectDir);
+
+        $result = HaoCode::query('Export all users to a file', new HaoCodeConfig(
+            tools: [$dbTool],
+        ));
+
+        $this->assertStringContainsString('2 users', $result->text);
+        $this->assertFileExists($this->projectDir . '/users.json');
+
+        $users = json_decode(file_get_contents($this->projectDir . '/users.json'), true);
+        $this->assertCount(2, $users);
+        $this->assertSame('Alice', $users[0]['name']);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 26: Stream with multi-turn tool use collects all events
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_stream_multi_turn_collects_all_event_types(): void
+    {
+        $this->bootWithMock([
+            MockAnthropicSse::toolUseResponse('toolu_g1', 'Glob', [
+                'pattern' => '*.txt',
+            ]),
+            function (array $payload): MockResponse {
+                return MockAnthropicSse::toolUseResponse('toolu_b1', 'Bash', [
+                    'command' => 'echo "found files"',
+                    'description' => 'List results',
+                ]);
+            },
+            function (array $payload): MockResponse {
+                return MockAnthropicSse::textResponse('Found files and listed them.');
+            },
+        ]);
+
+        chdir($this->projectDir);
+
+        $typeCounter = [];
+        foreach (HaoCode::stream('Find all text files') as $msg) {
+            $typeCounter[$msg->type] = ($typeCounter[$msg->type] ?? 0) + 1;
+        }
+
+        // Should have tool_start (2x), tool_result (2x), text (1x), result (1x)
+        $this->assertArrayHasKey('tool_start', $typeCounter);
+        $this->assertArrayHasKey('tool_result', $typeCounter);
+        $this->assertArrayHasKey('text', $typeCounter);
+        $this->assertArrayHasKey('result', $typeCounter);
+        $this->assertSame(2, $typeCounter['tool_start']);
+        $this->assertSame(2, $typeCounter['tool_result']);
+        $this->assertSame(1, $typeCounter['result']);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 27: Conversation with custom tool across turns
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_conversation_custom_tool_persists_across_turns(): void
+    {
+        $statefulTool = new class extends SdkTool {
+            private array $items = [];
+
+            public function name(): string { return 'CartAdd'; }
+            public function description(): string { return 'Add item to cart.'; }
+            public function parameters(): array {
+                return ['item' => ['type' => 'string', 'required' => true]];
+            }
+            public function handle(array $input): string {
+                $this->items[] = $input['item'];
+                return 'Cart: ' . implode(', ', $this->items) . ' (' . count($this->items) . ' items)';
+            }
+            // Stateful tools must NOT be read-only, otherwise they get
+            // fork-executed and state changes are lost in the child process.
+            public function isReadOnly(array $input): bool { return false; }
+        };
+
+        $this->bootWithMock([
+            // Turn 1: Add apple
+            MockAnthropicSse::toolUseResponse('toolu_c1', 'CartAdd', ['item' => 'apple']),
+            function (array $payload): MockResponse {
+                $toolResult = MockAnthropicSse::lastToolResultText($payload);
+                $this->assertStringContainsString('apple', $toolResult);
+                $this->assertStringContainsString('1 items', $toolResult);
+                return MockAnthropicSse::textResponse('Added apple to cart.');
+            },
+            // Turn 2: Add banana — tool should remember apple from turn 1
+            MockAnthropicSse::toolUseResponse('toolu_c2', 'CartAdd', ['item' => 'banana']),
+            function (array $payload): MockResponse {
+                $toolResult = MockAnthropicSse::lastToolResultText($payload);
+                $this->assertStringContainsString('apple', $toolResult);
+                $this->assertStringContainsString('banana', $toolResult);
+                $this->assertStringContainsString('2 items', $toolResult);
+                return MockAnthropicSse::textResponse('Cart now has apple and banana.');
+            },
+        ]);
+
+        chdir($this->projectDir);
+
+        $conv = HaoCode::conversation(new HaoCodeConfig(
+            tools: [$statefulTool],
+        ));
+
+        $r1 = $conv->send('Add apple to my cart');
+        $this->assertStringContainsString('apple', $r1->text);
+
+        $r2 = $conv->send('Now add banana');
+        $this->assertStringContainsString('banana', $r2->text);
+        $this->assertSame(2, $conv->getTurnCount());
+
+        $conv->close();
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 28: QueryResult is Stringable in string contexts
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_query_result_works_in_string_operations(): void
+    {
+        $this->bootWithMock([
+            MockAnthropicSse::textResponse('The answer is 42.'),
+        ]);
+
+        chdir($this->projectDir);
+
+        $result = HaoCode::query('What is the answer?');
+
+        // String concatenation
+        $this->assertSame('Result: The answer is 42.', 'Result: ' . $result);
+
+        // str_contains
+        $this->assertTrue(str_contains((string) $result, '42'));
+
+        // strlen
+        $this->assertSame(strlen('The answer is 42.'), strlen((string) $result));
+
+        // json_encode wraps in quotes
+        $this->assertStringContainsString('42', json_encode($result->text));
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 29: Multiple SdkTools registered at once
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_multiple_sdk_tools_registered_simultaneously(): void
+    {
+        $toolA = new class extends SdkTool {
+            public function name(): string { return 'ToolAlpha'; }
+            public function description(): string { return 'First tool.'; }
+            public function parameters(): array { return []; }
+            public function handle(array $input): string { return 'alpha-result'; }
+        };
+
+        $toolB = new class extends SdkTool {
+            public function name(): string { return 'ToolBeta'; }
+            public function description(): string { return 'Second tool.'; }
+            public function parameters(): array { return []; }
+            public function handle(array $input): string { return 'beta-result'; }
+        };
+
+        $this->bootWithMock([
+            MockAnthropicSse::toolUseResponse('toolu_a', 'ToolAlpha', []),
+            function (array $payload): MockResponse {
+                $toolResult = MockAnthropicSse::lastToolResultText($payload);
+                $this->assertStringContainsString('alpha-result', $toolResult);
+
+                return MockAnthropicSse::toolUseResponse('toolu_b', 'ToolBeta', []);
+            },
+            function (array $payload): MockResponse {
+                $toolResult = MockAnthropicSse::lastToolResultText($payload);
+                $this->assertStringContainsString('beta-result', $toolResult);
+
+                return MockAnthropicSse::textResponse('Both tools executed.');
+            },
+        ]);
+
+        chdir($this->projectDir);
+
+        $result = HaoCode::query('Use both tools', new HaoCodeConfig(
+            tools: [$toolA, $toolB],
+        ));
+
+        $this->assertStringContainsString('Both tools', $result->text);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 30: Conversation getCost() and getSessionId()
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_conversation_exposes_cost_and_session_id(): void
+    {
+        $this->bootWithMock([
+            MockAnthropicSse::textResponse('Turn one.'),
+            MockAnthropicSse::textResponse('Turn two.'),
+        ]);
+
+        chdir($this->projectDir);
+
+        $conv = HaoCode::conversation();
+
+        $conv->send('First');
+        $this->assertIsFloat($conv->getCost());
+        $this->assertNotNull($conv->getSessionId());
+
+        $conv->send('Second');
+        $this->assertSame(2, $conv->getTurnCount());
+
+        $conv->close();
+    }
+
     // ══════════════════════════════════════════════════════════════
     //  Infrastructure
     // ══════════════════════════════════════════════════════════════
