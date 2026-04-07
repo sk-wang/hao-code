@@ -16,13 +16,17 @@ class AgentLoopFactory
     ) {}
 
     /**
-     * Create an isolated AgentLoop for sub-agents.
+     * Create an isolated AgentLoop for sub-agents or SDK usage.
      *
      * @param callable|null $toolFilter If provided, only tools where $toolFilter(toolName) returns true are included
      * @param string|null $workingDirectory Override working directory (e.g., for worktree isolation)
+     * @param array<int, \App\Contracts\ToolInterface> $additionalTools Extra tools to register (e.g., SDK custom tools)
      */
-    public function createIsolated(?callable $toolFilter = null, ?string $workingDirectory = null): AgentLoop
-    {
+    public function createIsolated(
+        ?callable $toolFilter = null,
+        ?string $workingDirectory = null,
+        array $additionalTools = [],
+    ): AgentLoop {
         $queryEngine = $this->container->make(QueryEngine::class);
         $contextBuilder = $this->container->make(ContextBuilder::class);
         $permissionChecker = $this->container->make(\App\Services\Permissions\PermissionChecker::class);
@@ -31,6 +35,11 @@ class AgentLoopFactory
         // Build tool registry with optional filtering
         $parentRegistry = $this->container->make(ToolRegistry::class);
         $toolRegistry = $this->buildToolRegistry($parentRegistry, $toolFilter);
+
+        // Register additional tools (SDK custom tools)
+        foreach ($additionalTools as $tool) {
+            $toolRegistry->register($tool);
+        }
 
         $toolOrchestrator = new ToolOrchestrator(
             toolRegistry: $toolRegistry,

@@ -92,6 +92,27 @@ class HaoCodeConfig
 
         /** Disable session persistence (ephemeral query). */
         public readonly bool $ephemeral = false,
+
+        /**
+         * Custom tools to register (instances of SdkTool).
+         * @var SdkTool[]
+         */
+        public readonly array $tools = [],
+
+        /** AbortController for cancellation from external code. */
+        public readonly ?AbortController $abortController = null,
+
+        /** Session ID to resume a previous conversation. */
+        public readonly ?string $sessionId = null,
+
+        /** Continue the most recent session in the working directory. */
+        public readonly bool $continueSession = false,
+
+        /**
+         * JSON schema for structured output (used with HaoCode::structured()).
+         * @var array<string, mixed>|null
+         */
+        public readonly ?array $responseSchema = null,
     ) {}
 
     /**

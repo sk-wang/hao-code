@@ -4,87 +4,71 @@ namespace App\Sdk;
 
 use App\Services\Agent\AgentLoop;
 use App\Services\Agent\AgentLoopFactory;
+use App\Services\Session\SessionManager;
 
 /**
  * HaoCode SDK — programmatic access to the agent's capabilities.
  *
- * Inspired by Claude Agent SDK's `query()` function. Provides three
- * levels of abstraction:
+ * Six entry points covering the full spectrum from simple to advanced:
  *
- *   // 1. One-shot query (simplest)
+ *   // 1. One-shot query
  *   $result = HaoCode::query('Explain this codebase');
+ *   echo $result;        // Stringable
+ *   echo $result->cost;  // plus metadata
  *
- *   // 2. Query with streaming messages
- *   foreach (HaoCode::stream('Build a REST API') as $msg) {
- *       if ($msg->type === 'text') echo $msg->text;
- *   }
+ *   // 2. Streaming messages
+ *   foreach (HaoCode::stream('Build a REST API') as $msg) { ... }
  *
  *   // 3. Multi-turn conversation
  *   $conv = HaoCode::conversation();
  *   $conv->send('Create a User model');
- *   $conv->send('Add email validation');
  *
- * All methods accept an optional HaoCodeConfig for customization.
+ *   // 4. Resume a previous session
+ *   $conv = HaoCode::resume('20260407_abc123');
+ *
+ *   // 5. Structured output
+ *   $data = HaoCode::structured('Classify this ticket', $schema);
+ *   echo $data->category;
+ *
+ *   // 6. Custom tools
+ *   HaoCode::query('Look up order #123', new HaoCodeConfig(
+ *       tools: [new LookupOrderTool()],
+ *   ));
  */
 class HaoCode
 {
     /**
-     * Execute a one-shot query and return the final response text.
+     * Execute a one-shot query and return a QueryResult.
      *
-     * This is the simplest entry point — equivalent to `--print` mode.
-     *
-     * @param  string  $prompt  The task or question for the agent.
-     * @param  HaoCodeConfig|null  $config  Optional configuration.
-     * @return string  The agent's final response.
-     *
-     * @throws \Throwable  If the agent encounters an unrecoverable error.
-     *
-     * @example
-     *   $response = HaoCode::query('What files are in this directory?');
-     *
-     * @example
-     *   $response = HaoCode::query('Fix the bug in auth.php', new HaoCodeConfig(
-     *       allowedTools: ['Read', 'Edit', 'Bash'],
-     *       maxTurns: 10,
-     *   ));
+     * QueryResult implements Stringable, so `echo HaoCode::query(...)` works.
+     * But it also carries usage, cost, sessionId, and turnsUsed metadata.
      */
-    public static function query(string $prompt, ?HaoCodeConfig $config = null): string
+    public static function query(string $prompt, ?HaoCodeConfig $config = null): QueryResult
     {
         $config ??= new HaoCodeConfig();
         $loop = self::createLoop($config);
 
-        return $loop->run(
+        $startTime = hrtime(true);
+        $response = $loop->run(
             userInput: $prompt,
             onTextDelta: $config->onText,
             onToolStart: $config->onToolStart,
             onToolComplete: $config->onToolComplete,
             onTurnStart: $config->onTurnStart,
         );
+
+        return new QueryResult(
+            text: $response,
+            usage: self::extractUsage($loop),
+            cost: $loop->getEstimatedCost(),
+            sessionId: $loop->getSessionManager()->getSessionId(),
+        );
     }
 
     /**
      * Execute a query and yield streaming Message objects.
      *
-     * Returns a Generator of typed Message objects as they arrive:
-     * - Message::text($delta)       — streaming text chunk
-     * - Message::toolStart(...)     — tool execution began
-     * - Message::toolResult(...)    — tool execution completed
-     * - Message::result(...)        — final result with usage/cost
-     * - Message::error(...)         — an error occurred
-     *
-     * @param  string  $prompt  The task or question.
-     * @param  HaoCodeConfig|null  $config  Optional configuration.
      * @return \Generator<int, Message>
-     *
-     * @example
-     *   foreach (HaoCode::stream('Build a REST API') as $msg) {
-     *       match ($msg->type) {
-     *           'text' => print($msg->text),
-     *           'tool_start' => print("Running {$msg->toolName}..."),
-     *           'result' => print("\nCost: \${$msg->cost}"),
-     *           default => null,
-     *       };
-     *   }
      */
     public static function stream(string $prompt, ?HaoCodeConfig $config = null): \Generator
     {
@@ -129,12 +113,7 @@ class HaoCode
 
             yield Message::result(
                 text: $response,
-                usage: [
-                    'input_tokens' => $loop->getTotalInputTokens(),
-                    'output_tokens' => $loop->getTotalOutputTokens(),
-                    'cache_creation_tokens' => $loop->getCacheCreationTokens(),
-                    'cache_read_tokens' => $loop->getCacheReadTokens(),
-                ],
+                usage: self::extractUsage($loop),
                 cost: $loop->getEstimatedCost(),
                 sessionId: $loop->getSessionManager()->getSessionId(),
             );
@@ -145,21 +124,6 @@ class HaoCode
 
     /**
      * Create a multi-turn conversation.
-     *
-     * Returns a Conversation object that maintains persistent context
-     * across multiple send() calls — like Python's ClaudeSDKClient.
-     *
-     * @param  HaoCodeConfig|null  $config  Optional configuration.
-     * @return Conversation
-     *
-     * @example
-     *   $conv = HaoCode::conversation(new HaoCodeConfig(
-     *       allowedTools: ['Read', 'Write', 'Edit', 'Bash'],
-     *   ));
-     *   $conv->send('Create a User model with name and email');
-     *   $conv->send('Add password hashing to the model');
-     *   $conv->send('Write a test for the User model');
-     *   $conv->close();
      */
     public static function conversation(?HaoCodeConfig $config = null): Conversation
     {
@@ -172,7 +136,100 @@ class HaoCode
     }
 
     /**
-     * Create a configured AgentLoop for one-shot usage.
+     * Resume a previous session by ID.
+     *
+     * Returns a Conversation pre-loaded with the session's message history.
+     *
+     * @example
+     *   $conv = HaoCode::resume('20260407_143022_a1b2c3d4');
+     *   $conv->send('Continue where we left off');
+     */
+    public static function resume(string $sessionId, ?HaoCodeConfig $config = null): Conversation
+    {
+        $config ??= new HaoCodeConfig();
+
+        /** @var AgentLoopFactory $factory */
+        $factory = app(AgentLoopFactory::class);
+
+        $conv = new Conversation($config, $factory);
+        $conv->loadSession($sessionId);
+
+        return $conv;
+    }
+
+    /**
+     * Continue the most recent session in the working directory.
+     *
+     * @example
+     *   $conv = HaoCode::continueLatest();
+     *   $conv->send('What were we working on?');
+     */
+    public static function continueLatest(?string $cwd = null, ?HaoCodeConfig $config = null): Conversation
+    {
+        $cwd ??= getcwd() ?: '/';
+
+        /** @var SessionManager $sessionManager */
+        $sessionManager = app(SessionManager::class);
+        $sessionId = $sessionManager->findMostRecentSessionId($cwd);
+
+        if ($sessionId === null) {
+            throw new \RuntimeException("No previous session found in {$cwd}");
+        }
+
+        return self::resume($sessionId, $config);
+    }
+
+    /**
+     * Execute a query and return structured (JSON) output.
+     *
+     * The agent is instructed to respond with JSON matching the given schema.
+     * The result is parsed and wrapped in a StructuredResult with property/array access.
+     *
+     * @param  string  $prompt  The task or question.
+     * @param  array  $jsonSchema  JSON schema defining the expected output structure.
+     * @param  HaoCodeConfig|null  $config  Optional configuration.
+     *
+     * @example
+     *   $result = HaoCode::structured('Classify this ticket: "My order is late"', [
+     *       'type' => 'object',
+     *       'properties' => [
+     *           'category' => ['type' => 'string', 'enum' => ['billing', 'shipping', 'technical']],
+     *           'priority' => ['type' => 'string', 'enum' => ['low', 'medium', 'high']],
+     *       ],
+     *       'required' => ['category', 'priority'],
+     *   ]);
+     *   echo $result->category; // 'shipping'
+     */
+    public static function structured(string $prompt, array $jsonSchema, ?HaoCodeConfig $config = null): StructuredResult
+    {
+        $schemaJson = json_encode($jsonSchema, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+
+        $structuredPrompt = $prompt . "\n\n" .
+            "IMPORTANT: You MUST respond with ONLY a valid JSON object matching this schema. " .
+            "No markdown fences, no explanation, no extra text — just the raw JSON.\n\n" .
+            "Schema:\n" . $schemaJson;
+
+        $queryResult = self::query($structuredPrompt, $config);
+        $text = trim($queryResult->text);
+
+        // Strip markdown code fences if present
+        if (str_starts_with($text, '```')) {
+            $text = preg_replace('/^```(?:json)?\s*\n?/', '', $text);
+            $text = preg_replace('/\n?```\s*$/', '', $text);
+        }
+
+        $decoded = json_decode($text, true);
+        if (!is_array($decoded)) {
+            throw new \RuntimeException(
+                "Failed to parse structured response as JSON.\nRaw response: " . mb_substr($text, 0, 500)
+            );
+        }
+
+        return new StructuredResult($decoded, $queryResult->text, $queryResult);
+    }
+
+    /**
+     * Create a configured AgentLoop from config.
      */
     private static function createLoop(HaoCodeConfig $config): AgentLoop
     {
@@ -182,11 +239,27 @@ class HaoCode
         $loop = $factory->createIsolated(
             toolFilter: $config->toolFilter(),
             workingDirectory: $config->cwd,
+            additionalTools: $config->tools,
         );
 
         $loop->setPermissionPromptHandler(fn () => true);
         $loop->setMaxTurns($config->maxTurns);
 
+        // Wire abort controller
+        if ($config->abortController !== null) {
+            $config->abortController->onAbort(fn () => $loop->abort());
+        }
+
         return $loop;
+    }
+
+    private static function extractUsage(AgentLoop $loop): array
+    {
+        return [
+            'input_tokens' => $loop->getTotalInputTokens(),
+            'output_tokens' => $loop->getTotalOutputTokens(),
+            'cache_creation_tokens' => $loop->getCacheCreationTokens(),
+            'cache_read_tokens' => $loop->getCacheReadTokens(),
+        ];
     }
 }
