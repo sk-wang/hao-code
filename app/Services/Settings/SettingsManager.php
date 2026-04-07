@@ -3,8 +3,6 @@
 namespace App\Services\Settings;
 
 use App\Services\Permissions\PermissionMode;
-use App\Support\Config\Config;
-use App\Support\Config\PathHelper;
 
 class SettingsManager
 {
@@ -33,7 +31,7 @@ class SettingsManager
         $providerConfig = $this->getProviderConfig();
         $apiKey = $providerConfig['api_key']
             ?? $settings['api_key']
-            ?? Config::get('api_key')
+            ?? config('haocode.api_key')
             ?: getenv('ANTHROPIC_API_KEY')
             ?: '';
 
@@ -50,7 +48,7 @@ class SettingsManager
         $model = $runtimeModel
             ?? $providerConfig['model']
             ?? $settingsModel
-            ?? Config::get('model', self::DEFAULT_MODEL);
+            ?? config('haocode.model', self::DEFAULT_MODEL);
 
         if (! is_string($model) || trim($model) === '') {
             $model = self::DEFAULT_MODEL;
@@ -70,7 +68,7 @@ class SettingsManager
         $baseUrl = $this->runtimeOverrides['api_base_url']
             ?? $this->getProviderConfig()['api_base_url']
             ?? $settings['api_base_url']
-            ?? Config::get('api_base_url', self::DEFAULT_BASE_URL);
+            ?? config('haocode.api_base_url', self::DEFAULT_BASE_URL);
 
         return is_string($baseUrl) && trim($baseUrl) !== ''
             ? $baseUrl
@@ -83,7 +81,7 @@ class SettingsManager
         $maxTokens = $this->runtimeOverrides['max_tokens']
             ?? $this->getProviderConfig()['max_tokens']
             ?? $settings['max_tokens']
-            ?? Config::get('max_tokens', self::DEFAULT_MAX_TOKENS);
+            ?? config('haocode.max_tokens', self::DEFAULT_MAX_TOKENS);
 
         return is_numeric($maxTokens) ? (int) $maxTokens : self::DEFAULT_MAX_TOKENS;
     }
@@ -180,14 +178,14 @@ class SettingsManager
             );
         }
 
-        if (Config::get('approval_policy') !== null || Config::get('sandbox_mode') !== null) {
+        if (config('haocode.approval_policy') !== null || config('haocode.sandbox_mode') !== null) {
             return $this->permissionModeFromModernConfig(
-                Config::get('approval_policy'),
-                Config::get('sandbox_mode'),
+                config('haocode.approval_policy'),
+                config('haocode.sandbox_mode'),
             );
         }
 
-        return $this->normalizePermissionModeValue(Config::get('permission_mode', PermissionMode::Default->value));
+        return $this->normalizePermissionModeValue(config('haocode.permission_mode', PermissionMode::Default->value));
     }
 
     public function getApprovalPolicy(): string
@@ -217,7 +215,7 @@ class SettingsManager
             return $this->approvalPolicyFromPermissionMode($this->getPermissionMode());
         }
 
-        $configApprovalPolicy = $this->normalizeApprovalPolicy(Config::get('approval_policy'));
+        $configApprovalPolicy = $this->normalizeApprovalPolicy(config('haocode.approval_policy'));
         if ($configApprovalPolicy !== null) {
             return $configApprovalPolicy;
         }
@@ -252,7 +250,7 @@ class SettingsManager
             return $this->sandboxModeFromPermissionMode($this->getPermissionMode());
         }
 
-        $configSandboxMode = $this->normalizeSandboxMode(Config::get('sandbox_mode'));
+        $configSandboxMode = $this->normalizeSandboxMode(config('haocode.sandbox_mode'));
         if ($configSandboxMode !== null) {
             return $configSandboxMode;
         }
@@ -295,7 +293,7 @@ class SettingsManager
 
     public function getSessionPath(): string
     {
-        return Config::get('session_path', PathHelper::storagePath('app/haocode/sessions'));
+        return config('haocode.session_path', storage_path('app/haocode/sessions'));
     }
 
     public function getOutputStyle(): ?string
@@ -336,12 +334,12 @@ class SettingsManager
             return $this->streamModeFromLegacyToggle($settings['stream_output']);
         }
 
-        $configStreamMode = $this->normalizeStreamMode(Config::get('stream_mode'));
+        $configStreamMode = $this->normalizeStreamMode(config('haocode.stream_mode'));
         if ($configStreamMode !== null) {
             return $configStreamMode;
         }
 
-        return $this->streamModeFromLegacyToggle(Config::get('stream_output', false));
+        return $this->streamModeFromLegacyToggle(config('haocode.stream_output', false));
     }
 
     public function getTheme(): string
@@ -692,7 +690,7 @@ class SettingsManager
             return $this->cachedSettings;
         }
 
-        $globalPath = Config::get('global_settings_path')
+        $globalPath = config('haocode.global_settings_path')
             ?? ($_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir()) . '/.haocode/settings.json';
         $projectPath = getcwd() . '/.haocode/settings.json';
         $global = $this->loadSettingsFile($globalPath);
@@ -760,8 +758,8 @@ class SettingsManager
             $settingsProvider = $this->normalizeProviderName(
                 $settings['model_provider']
                     ?? $settings['active_provider']
-                    ?? Config::get('model_provider')
-                    ?? Config::get('active_provider')
+                    ?? config('haocode.model_provider')
+                    ?? config('haocode.active_provider')
                     ?? null,
             );
             if ($settingsProvider !== null && array_key_exists($settingsProvider, $providers)) {

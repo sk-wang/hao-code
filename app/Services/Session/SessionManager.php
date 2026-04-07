@@ -2,9 +2,6 @@
 
 namespace App\Services\Session;
 
-use App\Support\Config\Config;
-use App\Support\Config\PathHelper;
-
 class SessionManager
 {
     private string $sessionId;
@@ -14,7 +11,7 @@ class SessionManager
     public function __construct()
     {
         $this->sessionId = $this->generateSessionId();
-        $this->sessionPath = Config::get('session_path', PathHelper::storagePath('app/haocode/sessions'));
+        $this->sessionPath = config('haocode.session_path', storage_path('app/haocode/sessions'));
     }
 
     public function getSessionId(): string

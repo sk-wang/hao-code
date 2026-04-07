@@ -51,9 +51,7 @@ return [
     | Session Storage Path
     |--------------------------------------------------------------------------
     */
-    'session_path' => env('HAOCODE_SESSION_PATH',
-        (getenv('LARAVEL_STORAGE_PATH') ?: dirname(__DIR__) . '/storage') . '/app/haocode/sessions'
-    ),
+    'session_path' => env('HAOCODE_SESSION_PATH', storage_path('app/haocode/sessions')),
 
     /*
     |--------------------------------------------------------------------------

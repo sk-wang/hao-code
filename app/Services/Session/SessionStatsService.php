@@ -2,9 +2,6 @@
 
 namespace App\Services\Session;
 
-use App\Support\Config\Config;
-use App\Support\Config\PathHelper;
-
 final class SessionStatsService
 {
     /**
@@ -31,7 +28,7 @@ final class SessionStatsService
      */
     public function getOverview(?string $currentSessionId = null): array
     {
-        $sessionPath = Config::get('session_path', PathHelper::storagePath('app/haocode/sessions'));
+        $sessionPath = config('haocode.session_path', storage_path('app/haocode/sessions'));
         $today = date('Y-m-d');
 
         if (! is_dir($sessionPath)) {
