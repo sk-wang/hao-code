@@ -227,59 +227,51 @@ TeamList(name: "research")
 
 ## PHP SDK
 
-Use hao-code as a library in any PHP/Laravel application:
+Use hao-code as a library in any PHP/Laravel application. **[Full SDK Documentation →](docs/SDK.md)**
 
 ```bash
 composer require sk-wang/hao-code
 ```
 
-### One-shot query
-
 ```php
-use App\Sdk\HaoCode;
+use App\Sdk\{HaoCode, HaoCodeConfig, SdkTool, SdkSkill};
 
-$response = HaoCode::query('Explain what this codebase does');
-```
+// One-shot query
+$result = HaoCode::query('Explain this codebase');
+echo $result;           // Stringable
+echo $result->cost;     // $0.03
 
-### With configuration
+// Streaming
+foreach (HaoCode::stream('Build a REST API') as $msg) {
+    if ($msg->type === 'text') echo $msg->text;
+}
 
-```php
-use App\Sdk\{HaoCode, HaoCodeConfig};
+// Multi-turn conversation
+$conv = HaoCode::conversation();
+$conv->send('Create a User model');
+$conv->send('Add email validation');
+$conv->close();
 
-$response = HaoCode::query('Fix the bug in auth.php', new HaoCodeConfig(
-    allowedTools: ['Read', 'Edit', 'Bash'],
-    maxTurns: 10,
-    onText: fn(string $delta) => print($delta),
+// Resume session
+$conv = HaoCode::resume($sessionId);
+$conv = HaoCode::continueLatest();
+
+// Structured output
+$data = HaoCode::structured('Classify this ticket', $jsonSchema);
+echo $data->category;  // 'shipping'
+
+// Custom tools (executable PHP code)
+HaoCode::query('Find order #123', new HaoCodeConfig(
+    tools: [new LookupOrderTool()],
+));
+
+// Custom skills (prompt templates)
+HaoCode::query('Review auth.php', new HaoCodeConfig(
+    skills: [new SdkSkill(name: 'security-review', description: '...', prompt: '...')],
 ));
 ```
 
-### Streaming messages
-
-```php
-use App\Sdk\HaoCode;
-
-foreach (HaoCode::stream('Build a REST API') as $msg) {
-    match ($msg->type) {
-        'text'        => print($msg->text),
-        'tool_start'  => print("Running {$msg->toolName}...\n"),
-        'tool_result' => print("  Done.\n"),
-        'result'      => print("\nCost: \${$msg->cost}\n"),
-        default       => null,
-    };
-}
-```
-
-### Multi-turn conversation
-
-```php
-use App\Sdk\HaoCode;
-
-$conv = HaoCode::conversation();
-$conv->send('Create a User model with name and email');
-$conv->send('Add password hashing');
-$conv->send('Write a test for the User model');
-$conv->close();
-```
+See [docs/SDK.md](docs/SDK.md) for custom tool definitions, skill templates, abort control, cost tracking, and testing.
 
 ---
 
