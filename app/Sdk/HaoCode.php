@@ -4,6 +4,7 @@ namespace App\Sdk;
 
 use App\Services\Agent\AgentLoop;
 use App\Services\Agent\AgentLoopFactory;
+use App\Services\Api\StreamingClient;
 use App\Services\Session\SessionManager;
 
 /**
@@ -132,7 +133,7 @@ class HaoCode
         /** @var AgentLoopFactory $factory */
         $factory = app(AgentLoopFactory::class);
 
-        return new Conversation($config, $factory);
+        return new Conversation($config, $factory, self::buildStreamingClient($config));
     }
 
     /**
@@ -151,7 +152,7 @@ class HaoCode
         /** @var AgentLoopFactory $factory */
         $factory = app(AgentLoopFactory::class);
 
-        $conv = new Conversation($config, $factory);
+        $conv = new Conversation($config, $factory, self::buildStreamingClient($config));
         $conv->loadSession($sessionId);
 
         return $conv;
@@ -236,10 +237,14 @@ class HaoCode
         /** @var AgentLoopFactory $factory */
         $factory = app(AgentLoopFactory::class);
 
+        // Build a custom StreamingClient when SDK config overrides API settings
+        $customClient = self::buildStreamingClient($config);
+
         $loop = $factory->createIsolated(
             toolFilter: $config->toolFilter(),
             workingDirectory: $config->cwd,
             additionalTools: $config->tools,
+            streamingClient: $customClient,
         );
 
         $loop->setPermissionPromptHandler(fn () => true);
@@ -251,6 +256,33 @@ class HaoCode
         }
 
         return $loop;
+    }
+
+    /**
+     * Build a standalone StreamingClient when SDK config overrides API settings.
+     *
+     * Returns null if no overrides are present (use container default).
+     */
+    private static function buildStreamingClient(HaoCodeConfig $config): ?StreamingClient
+    {
+        if ($config->apiKey === null
+            && $config->baseUrl === null
+            && $config->model === null
+            && $config->maxTokens === null) {
+            return null;
+        }
+
+        return new StreamingClient(
+            apiKey: $config->apiKey ?? config('haocode.api_key', ''),
+            model: $config->model ?? config('haocode.model', 'claude-sonnet-4-20250514'),
+            baseUrl: $config->baseUrl ?? config('haocode.api_base_url', 'https://api.anthropic.com'),
+            maxTokens: $config->maxTokens ?? (int) config('haocode.max_tokens', 16384),
+            thinkingEnabled: $config->thinkingEnabled,
+            thinkingBudget: $config->thinkingBudget,
+            settingsManager: null, // SDK controls config, bypass SettingsManager
+            idleTimeoutSeconds: (int) config('haocode.api_stream_idle_timeout', 60),
+            streamPollTimeoutSeconds: (float) config('haocode.api_stream_poll_timeout', 1.0),
+        );
     }
 
     private static function extractUsage(AgentLoop $loop): array

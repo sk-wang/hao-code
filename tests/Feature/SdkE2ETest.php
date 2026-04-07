@@ -596,6 +596,58 @@ class SdkE2ETest extends TestCase
         $conv->close();
     }
 
+    // ──────────────────────────────────────────────────────────────
+    //  Test 19: SDK config overrides reach StreamingClient
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_sdk_config_overrides_create_custom_streaming_client(): void
+    {
+        // Use reflection to test the private buildStreamingClient method
+        $method = new \ReflectionMethod(HaoCode::class, 'buildStreamingClient');
+
+        // No overrides → returns null (use container default)
+        $defaultConfig = new HaoCodeConfig();
+        $this->assertNull($method->invoke(null, $defaultConfig));
+
+        // With apiKey override → returns custom StreamingClient
+        $config = new HaoCodeConfig(apiKey: 'sk-custom-key-123');
+        $client = $method->invoke(null, $config);
+        $this->assertInstanceOf(StreamingClient::class, $client);
+
+        // With model override → returns custom StreamingClient
+        $config2 = new HaoCodeConfig(model: 'claude-opus-4-20250514');
+        $client2 = $method->invoke(null, $config2);
+        $this->assertInstanceOf(StreamingClient::class, $client2);
+
+        // With baseUrl override → returns custom StreamingClient
+        $config3 = new HaoCodeConfig(baseUrl: 'https://my-proxy.example.com');
+        $client3 = $method->invoke(null, $config3);
+        $this->assertInstanceOf(StreamingClient::class, $client3);
+
+        // With maxTokens override → returns custom StreamingClient
+        $config4 = new HaoCodeConfig(maxTokens: 8192);
+        $client4 = $method->invoke(null, $config4);
+        $this->assertInstanceOf(StreamingClient::class, $client4);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 20: SDK query works with default config (no overrides)
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_sdk_query_with_default_config_uses_container_client(): void
+    {
+        $this->bootWithMock([
+            MockAnthropicSse::textResponse('Default client response.'),
+        ]);
+
+        chdir($this->projectDir);
+
+        // Default config (no apiKey/baseUrl/model overrides) → uses container singleton
+        $result = HaoCode::query('Hello', new HaoCodeConfig());
+
+        $this->assertStringContainsString('Default client response', $result->text);
+    }
+
     // ══════════════════════════════════════════════════════════════
     //  Infrastructure
     // ══════════════════════════════════════════════════════════════

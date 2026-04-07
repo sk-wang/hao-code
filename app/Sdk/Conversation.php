@@ -4,6 +4,7 @@ namespace App\Sdk;
 
 use App\Services\Agent\AgentLoop;
 use App\Services\Agent\AgentLoopFactory;
+use App\Services\Api\StreamingClient;
 use App\Services\Session\SessionManager;
 
 /**
@@ -23,11 +24,13 @@ class Conversation
     public function __construct(
         private readonly HaoCodeConfig $config,
         AgentLoopFactory $factory,
+        ?StreamingClient $streamingClient = null,
     ) {
         $this->loop = $factory->createIsolated(
             toolFilter: $config->toolFilter(),
             workingDirectory: $config->cwd,
             additionalTools: $config->tools,
+            streamingClient: $streamingClient,
         );
 
         $this->loop->setPermissionPromptHandler(fn () => true);

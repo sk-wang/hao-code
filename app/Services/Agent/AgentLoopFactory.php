@@ -2,6 +2,7 @@
 
 namespace App\Services\Agent;
 
+use App\Services\Api\StreamingClient;
 use App\Services\Compact\ContextCompactor;
 use App\Services\Cost\CostTracker;
 use App\Services\Hooks\HookExecutor;
@@ -21,13 +22,14 @@ class AgentLoopFactory
      * @param callable|null $toolFilter If provided, only tools where $toolFilter(toolName) returns true are included
      * @param string|null $workingDirectory Override working directory (e.g., for worktree isolation)
      * @param array<int, \App\Contracts\ToolInterface> $additionalTools Extra tools to register (e.g., SDK custom tools)
+     * @param StreamingClient|null $streamingClient Custom API client (e.g., SDK config overrides)
      */
     public function createIsolated(
         ?callable $toolFilter = null,
         ?string $workingDirectory = null,
         array $additionalTools = [],
+        ?StreamingClient $streamingClient = null,
     ): AgentLoop {
-        $queryEngine = $this->container->make(QueryEngine::class);
         $contextBuilder = $this->container->make(ContextBuilder::class);
         $permissionChecker = $this->container->make(\App\Services\Permissions\PermissionChecker::class);
         $hookExecutor = $this->container->make(HookExecutor::class);
@@ -35,6 +37,13 @@ class AgentLoopFactory
         // Build tool registry with optional filtering
         $parentRegistry = $this->container->make(ToolRegistry::class);
         $toolRegistry = $this->buildToolRegistry($parentRegistry, $toolFilter);
+
+        // Use custom StreamingClient if provided, otherwise resolve from container
+        if ($streamingClient !== null) {
+            $queryEngine = new QueryEngine($streamingClient, $toolRegistry);
+        } else {
+            $queryEngine = $this->container->make(QueryEngine::class);
+        }
 
         // Register additional tools (SDK custom tools)
         foreach ($additionalTools as $tool) {
