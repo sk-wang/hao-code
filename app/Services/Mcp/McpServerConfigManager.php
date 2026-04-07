@@ -2,6 +2,8 @@
 
 namespace App\Services\Mcp;
 
+use App\Support\Config\Config;
+
 class McpServerConfigManager
 {
     /**
@@ -12,7 +14,7 @@ class McpServerConfigManager
         $home = $_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir();
 
         return [
-            'global' => config('haocode.global_settings_path') ?: $home.'/.haocode/settings.json',
+            'global' => Config::get('global_settings_path') ?: $home.'/.haocode/settings.json',
             'project' => getcwd().'/.haocode/settings.json',
         ];
     }

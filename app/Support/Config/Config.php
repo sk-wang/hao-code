@@ -45,34 +45,45 @@ class Config
         self::$instance = new self($packageRoot);
     }
 
-    public static function getInstance(): self
+    public static function getInstance(): ?self
     {
-        if (self::$instance === null) {
-            throw new \RuntimeException('Config not initialized. Call Config::init($packageRoot) first.');
-        }
-
         return self::$instance;
     }
 
     /**
-     * Get a config value. Supports dot-less keys (flat haocode.php array).
+     * Check if Config has been initialized (vs falling back to Laravel).
+     */
+    public static function isInitialized(): bool
+    {
+        return self::$instance !== null;
+    }
+
+    /**
+     * Get a config value.
      *
-     * Strips 'haocode.' prefix for backward compatibility with config('haocode.foo').
+     * When initialized: reads from the loaded config array.
+     * When NOT initialized: falls back to Laravel's config() if available.
      */
     public static function get(string $key, mixed $default = null): mixed
     {
-        $instance = self::getInstance();
+        // Normalize key
+        $bareKey = str_starts_with($key, 'haocode.') ? substr($key, 8) : $key;
 
-        // Strip 'haocode.' prefix for backward compat
-        if (str_starts_with($key, 'haocode.')) {
-            $key = substr($key, 8);
+        // If initialized, use our own config
+        if (self::$instance !== null) {
+            if (array_key_exists($bareKey, self::$instance->overrides)) {
+                return self::$instance->overrides[$bareKey];
+            }
+
+            return self::$instance->values[$bareKey] ?? $default;
         }
 
-        if (array_key_exists($key, $instance->overrides)) {
-            return $instance->overrides[$key];
+        // Fall back to Laravel's config() during coexistence
+        if (function_exists('config')) {
+            return config('haocode.' . $bareKey, $default);
         }
 
-        return $instance->values[$key] ?? $default;
+        return $default;
     }
 
     /**
@@ -80,13 +91,16 @@ class Config
      */
     public static function set(string $key, mixed $value): void
     {
-        $instance = self::getInstance();
+        $bareKey = str_starts_with($key, 'haocode.') ? substr($key, 8) : $key;
 
-        if (str_starts_with($key, 'haocode.')) {
-            $key = substr($key, 8);
+        if (self::$instance !== null) {
+            self::$instance->overrides[$bareKey] = $value;
         }
 
-        $instance->overrides[$key] = $value;
+        // Also set in Laravel config if available (for coexistence)
+        if (function_exists('config')) {
+            config(['haocode.' . $bareKey => $value]);
+        }
     }
 
     /**
@@ -96,9 +110,11 @@ class Config
      */
     public static function all(): array
     {
-        $instance = self::getInstance();
+        if (self::$instance === null) {
+            return [];
+        }
 
-        return array_merge($instance->values, $instance->overrides);
+        return array_merge(self::$instance->values, self::$instance->overrides);
     }
 
     /**

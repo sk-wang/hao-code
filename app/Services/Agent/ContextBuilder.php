@@ -7,6 +7,7 @@ use App\Services\Git\GitContext;
 use App\Services\Memory\SessionMemory;
 use App\Services\OutputStyle\OutputStyleLoader;
 use App\Services\Settings\SettingsManager;
+use App\Support\Config\PathHelper;
 use App\Tools\Skill\SkillLoader;
 use App\Tools\ToolRegistry;
 
@@ -19,6 +20,7 @@ class ContextBuilder
         private readonly SkillLoader $skillLoader,
         private readonly GitContext $gitContext,
         private readonly ?OutputStyleLoader $outputStyleLoader = null,
+        private readonly ?BuddyManager $buddyManager = null,
     ) {}
 
     public function buildSystemPrompt(): array
@@ -53,8 +55,8 @@ class ContextBuilder
         $prompt .= $this->getHaoCodeConventions();
 
         // Inject companion intro if hatched
-        $buddy = app(BuddyManager::class);
-        $companionIntro = $buddy->getCompanionIntroText();
+        $buddy = $this->buddyManager;
+        $companionIntro = $buddy?->getCompanionIntroText();
         if ($companionIntro) {
             $prompt .= "\n\n# Companion\n\n" . $companionIntro;
         }
@@ -84,7 +86,7 @@ class ContextBuilder
             return $override;
         }
 
-        $path = resource_path('prompts/system.md');
+        $path = PathHelper::resourcePath('prompts/system.md');
         if (file_exists($path)) {
             return file_get_contents($path);
         }

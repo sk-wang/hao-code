@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace App\Services\Memory;
 
+use App\Support\Config\Config;
+use App\Support\Config\PathHelper;
+
 /**
  * Manual memory consolidation (/dream command).
  * Reviews session transcripts and organizes persistent memories.
@@ -149,12 +152,8 @@ PROMPT;
 
     private function configuredSessionPath(): ?string
     {
-        if (! function_exists('config')) {
-            return null;
-        }
-
         try {
-            $path = config('haocode.session_path');
+            $path = Config::get('session_path');
         } catch (\Throwable) {
             return null;
         }
@@ -164,12 +163,8 @@ PROMPT;
 
     private function storageSessionPath(): ?string
     {
-        if (! function_exists('storage_path')) {
-            return null;
-        }
-
         try {
-            $path = storage_path('app/haocode/sessions');
+            $path = PathHelper::storagePath('app/haocode/sessions');
         } catch (\Throwable) {
             return null;
         }
