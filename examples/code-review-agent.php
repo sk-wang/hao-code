@@ -22,7 +22,23 @@
  *   - ANTHROPIC_API_KEY set in .env or ~/.haocode/settings.json
  */
 
-require_once __DIR__ . '/../vendor/autoload.php';
+// Bootstrap Laravel application
+$packageRoot = dirname(__DIR__);
+require_once $packageRoot . '/vendor/autoload.php';
+
+$pathResolver = new \App\Support\Runtime\StoragePathResolver;
+$storagePath = $pathResolver->resolve(packageRoot: $packageRoot, autoloadPath: $packageRoot . '/vendor/autoload.php');
+if ($storagePath) {
+    if (!is_dir($storagePath)) mkdir($storagePath, 0755, true);
+    putenv("LARAVEL_STORAGE_PATH={$storagePath}");
+    $_ENV['LARAVEL_STORAGE_PATH'] = $storagePath;
+    $_SERVER['LARAVEL_STORAGE_PATH'] = $storagePath;
+}
+
+$app = require $packageRoot . '/bootstrap/app.php';
+if ($storagePath) $app->useStoragePath($storagePath);
+$kernel = $app->make(\Illuminate\Contracts\Console\Kernel::class);
+$kernel->bootstrap();
 
 use App\Sdk\HaoCode;
 use App\Sdk\HaoCodeConfig;
@@ -229,28 +245,33 @@ $conv->close();
 // Example 4: Structured output
 echo "\n── Example 4: Structured review score ──\n\n";
 
-$score = HaoCode::structured(
-    'Rate this code snippet on quality: function getData() { return DB::select("SELECT * FROM users WHERE id = " . $_GET["id"]); }',
-    [
-        'type' => 'object',
-        'properties' => [
-            'score'    => ['type' => 'integer', 'description' => 'Quality score 1-10'],
-            'severity' => ['type' => 'string', 'enum' => ['critical', 'warning', 'info', 'good']],
-            'issues'   => ['type' => 'array', 'items' => ['type' => 'string']],
-            'fix'      => ['type' => 'string', 'description' => 'Suggested fix'],
+try {
+    $score = HaoCode::structured(
+        'Rate this PHP code on quality (1-10). The code has a SQL injection vulnerability: it concatenates user input directly into a SQL query instead of using parameter binding.',
+        [
+            'type' => 'object',
+            'properties' => [
+                'score'    => ['type' => 'integer', 'description' => 'Quality score 1-10'],
+                'severity' => ['type' => 'string', 'enum' => ['critical', 'warning', 'info', 'good']],
+                'issues'   => ['type' => 'array', 'items' => ['type' => 'string']],
+                'fix'      => ['type' => 'string', 'description' => 'One-line suggested fix'],
+            ],
+            'required' => ['score', 'severity', 'issues'],
         ],
-        'required' => ['score', 'severity', 'issues'],
-    ],
-);
+        new HaoCodeConfig(maxTurns: 3),
+    );
 
-echo "Score: {$score->score}/10\n";
-echo "Severity: {$score->severity}\n";
-echo "Issues:\n";
-foreach ($score->issues ?? [] as $issue) {
-    echo "  - {$issue}\n";
-}
-if ($score->fix) {
-    echo "Fix: {$score->fix}\n";
+    echo "Score: {$score->score}/10\n";
+    echo "Severity: {$score->severity}\n";
+    echo "Issues:\n";
+    foreach ($score->issues ?? [] as $issue) {
+        echo "  - {$issue}\n";
+    }
+    if ($score->fix) {
+        echo "Fix: {$score->fix}\n";
+    }
+} catch (\Throwable $e) {
+    echo "Structured output failed (model didn't return pure JSON): " . $e->getMessage() . "\n";
 }
 
 echo "\n✅ Demo complete.\n";
