@@ -47,9 +47,19 @@ class HaoCode
     public static function query(string $prompt, ?HaoCodeConfig $config = null): QueryResult
     {
         $config ??= new HaoCodeConfig();
+
+        // Redirect to resume/continue if configured
+        if ($config->sessionId !== null) {
+            $conv = self::resume($config->sessionId, $config);
+            return $conv->send($prompt);
+        }
+        if ($config->continueSession) {
+            $conv = self::continueLatest($config->cwd, $config);
+            return $conv->send($prompt);
+        }
+
         $loop = self::createLoop($config);
 
-        $startTime = hrtime(true);
         $response = $loop->run(
             userInput: $prompt,
             onTextDelta: $config->onText,
@@ -74,6 +84,15 @@ class HaoCode
     public static function stream(string $prompt, ?HaoCodeConfig $config = null): \Generator
     {
         $config ??= new HaoCodeConfig();
+
+        // Redirect to conversation stream if resuming
+        if ($config->sessionId !== null) {
+            return self::resume($config->sessionId, $config)->stream($prompt);
+        }
+        if ($config->continueSession) {
+            return self::continueLatest($config->cwd, $config)->stream($prompt);
+        }
+
         $loop = self::createLoop($config);
 
         $messages = [];
@@ -234,6 +253,10 @@ class HaoCode
      */
     private static function createLoop(HaoCodeConfig $config): AgentLoop
     {
+        // Apply system prompt / permission mode overrides to SettingsManager
+        // before the factory creates ContextBuilder and PermissionChecker
+        self::applySettingsOverrides($config);
+
         /** @var AgentLoopFactory $factory */
         $factory = app(AgentLoopFactory::class);
 
@@ -250,12 +273,41 @@ class HaoCode
         $loop->setPermissionPromptHandler(fn () => true);
         $loop->setMaxTurns($config->maxTurns);
 
+        // Wire cost budget
+        if ($config->maxBudgetUsd !== null) {
+            $loop->getCostTracker()->setThresholds(
+                warn: $config->maxBudgetUsd * 0.8,
+                stop: $config->maxBudgetUsd,
+            );
+        }
+
         // Wire abort controller
         if ($config->abortController !== null) {
             $config->abortController->onAbort(fn () => $loop->abort());
         }
 
         return $loop;
+    }
+
+    /**
+     * Push SDK config overrides into SettingsManager so that
+     * ContextBuilder and PermissionChecker pick them up.
+     */
+    private static function applySettingsOverrides(HaoCodeConfig $config): void
+    {
+        $settings = app(\App\Services\Settings\SettingsManager::class);
+
+        if ($config->systemPrompt !== null) {
+            $settings->set('system_prompt', $config->systemPrompt);
+        }
+
+        if ($config->appendSystemPrompt !== null) {
+            $settings->set('append_system_prompt', $config->appendSystemPrompt);
+        }
+
+        if ($config->permissionMode !== 'bypass_permissions') {
+            $settings->set('permission_mode', $config->permissionMode);
+        }
     }
 
     /**

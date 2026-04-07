@@ -12,7 +12,7 @@ use Illuminate\Support\ServiceProvider;
  *
  * Usage in external app:
  *   // config/haocode.php is auto-published
- *   // .env: ANTHROPIC_API_KEY=sk-ant-...
+ *   // .env: ANTHROPIC_API_KEY=your-api-key
  *
  *   use App\Sdk\HaoCode;
  *   $result = HaoCode::query('Explain this codebase');

@@ -40,7 +40,7 @@ Configure API key:
 mkdir -p ~/.haocode
 cat > ~/.haocode/settings.json <<'JSON'
 {
-  "api_key": "sk-ant-your-key-here"
+  "api_key": "your-api-key-here"
 }
 JSON
 ```
@@ -58,7 +58,7 @@ git clone https://github.com/sk-wang/hao-code.git
 cd hao-code
 composer install
 cp .env.example .env && php artisan key:generate
-echo "ANTHROPIC_API_KEY=sk-ant-your-key-here" >> .env
+echo "ANTHROPIC_API_KEY=your-api-key-here" >> .env
 php artisan hao-code
 ```
 

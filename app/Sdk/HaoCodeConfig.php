@@ -90,7 +90,10 @@ class HaoCodeConfig
          */
         public readonly mixed $onTurnStart = null,
 
-        /** Disable session persistence (ephemeral query). */
+        /**
+         * Reserved for future use. Session persistence cannot currently be disabled.
+         * @internal
+         */
         public readonly bool $ephemeral = false,
 
         /**

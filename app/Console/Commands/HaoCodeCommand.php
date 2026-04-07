@@ -6234,15 +6234,15 @@ PROMPT;
         $this->line('<fg=cyan;bold>Set API Key</>');
         $this->line('');
         $this->line('<fg=white>Option 1:</> Set via environment variable');
-        $this->line('<fg=green>  export ANTHROPIC_API_KEY=sk-ant-...</>');
+        $this->line('<fg=green>  export ANTHROPIC_API_KEY=your-api-key</>');
         $this->line('');
         $this->line('<fg=white>Option 2:</> Set in global settings');
 
         $globalPath = ($_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir()).'/.haocode/settings.json';
-        $this->line("<fg=green>  echo '{\"api_key\": \"sk-ant-...\"}' > {$globalPath}</>");
+        $this->line("<fg=green>  echo '{\"api_key\": \"your-api-key\"}' > {$globalPath}</>");
         $this->line('');
         $this->line('<fg=white>Option 3:</> Set in project settings');
-        $this->line('<fg=green>  echo \'{"api_key": "sk-ant-..."}\' > .haocode/settings.json</>');
+        $this->line('<fg=green>  echo \'{"api_key": "your-api-key"}\' > .haocode/settings.json</>');
         $this->line('');
         $this->line('<fg=gray>Get your API key at: https://console.anthropic.com/settings/keys</>');
         $this->line('');
