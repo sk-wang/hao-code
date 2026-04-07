@@ -6,7 +6,7 @@ An interactive CLI coding agent built with Laravel for Anthropic-compatible endp
 [![Laravel](https://img.shields.io/badge/Laravel-12-FF2D20?style=flat-square&logo=laravel&logoColor=white)](https://laravel.com)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 
-`REPL` · `Streaming` · `Sub-agents` · `Tasks` · `Hooks` · `Skills` · `Session HUD`
+`REPL` · `Streaming` · `Sub-agents` · `Teams` · `Tasks` · `Hooks` · `Skills` · `Session HUD`
 
 ## Preview
 
@@ -17,6 +17,7 @@ An interactive CLI coding agent built with Laravel for Anthropic-compatible endp
 - **Interactive REPL** — history, multiline input, transcript browsing, slash-command autocomplete
 - **30+ built-in tools** — shell, files, search, LSP, web, cron, tasks, worktrees, notebooks
 - **Agent system** — background agents, parallel read-only tools via `pcntl_fork`, plan mode
+- **Team coordination** — create named teams of specialized agents, broadcast messaging, full lifecycle management
 - **Safety controls** — permission modes, hook system, cost tracking with warning/hard-stop thresholds
 - **Session management** — restore, branch, fork, context compaction
 - **Extensible** — custom skills, multi-provider config, project/global settings
@@ -150,6 +151,7 @@ Auto-loaded project files: `HAOCODE.md`, `CLAUDE.md`, `.haocode/rules/*.md`, `.h
 | --- | --- |
 | **Shell & Files** | Bash, Read, Edit, Write, Glob, Grep |
 | **Agents & Planning** | Agent, SendMessage, TodoWrite, EnterPlanMode, ExitPlanMode |
+| **Teams** | TeamCreate, TeamList, TeamDelete |
 | **Tasks & Automation** | TaskCreate/Get/List/Update/Stop, CronCreate/Delete/List, Sleep |
 | **Code Intelligence** | LspTool, NotebookEdit, EnterWorktree, ExitWorktree |
 | **Web & Interaction** | WebSearch, WebFetch, AskUserQuestion, ToolSearch, Skill, Config |
@@ -189,6 +191,36 @@ Create custom skills in `.haocode/skills/` or `~/.haocode/skills/`:
 ```
 
 Supports `$ARGUMENTS` substitution, session variables, `allowedTools`, model overrides, and inline shell interpolation. Use `/skills` to inspect.
+
+---
+
+## Teams
+
+Create a group of specialized background agents that collaborate on a shared objective:
+
+```
+TeamCreate  →  spawn multiple agents with roles (e.g., architect, reviewer, coder)
+TeamList    →  inspect team status and member activity
+TeamDelete  →  stop all members and clean up
+SendMessage →  "team:<name>" broadcasts to all running members
+```
+
+Each team member gets injected context about their teammates and the team objective. Members communicate via `SendMessage` using deterministic agent IDs (`{teamName}_{role}`).
+
+```
+# Example: AI creates a research team
+TeamCreate(name: "research", task: "Write a conflict analysis", members: [
+  {role: "historian", prompt: "Research historical context"},
+  {role: "analyst",   prompt: "Analyze military posture"},
+  {role: "editor",    prompt: "Compile the final report"}
+])
+
+# Broadcast to all members
+SendMessage(to: "team:research", message: "All sections done, begin compilation")
+
+# Check status
+TeamList(name: "research")
+```
 
 ---
 

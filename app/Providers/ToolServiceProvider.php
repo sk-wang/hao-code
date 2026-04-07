@@ -34,6 +34,9 @@ use App\Tools\Task\TaskStopTool;
 use App\Tools\Mcp\ListMcpResourcesTool;
 use App\Tools\Mcp\ReadMcpResourceTool;
 use App\Tools\Sleep\SleepTool;
+use App\Tools\Team\TeamCreateTool;
+use App\Tools\Team\TeamDeleteTool;
+use App\Tools\Team\TeamListTool;
 use App\Tools\ToolSearch\ToolSearchTool;
 use Illuminate\Support\ServiceProvider;
 
@@ -91,6 +94,11 @@ class ToolServiceProvider extends ServiceProvider
             $registry->register($app->make(TaskListTool::class));
             $registry->register($app->make(TaskUpdateTool::class));
             $registry->register($app->make(TaskStopTool::class));
+
+            // Team tools
+            $registry->register($app->make(TeamCreateTool::class));
+            $registry->register($app->make(TeamListTool::class));
+            $registry->register($app->make(TeamDeleteTool::class));
 
             // Tool search
             $registry->register($app->make(ToolSearchTool::class));
