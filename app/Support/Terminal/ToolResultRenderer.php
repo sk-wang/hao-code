@@ -179,18 +179,25 @@ class ToolResultRenderer
     private function renderGlob(array $input, string $output): string
     {
         $pattern = $input['pattern'] ?? '*';
-        $lines = explode("\n", trim($output));
+        $trimmedOutput = trim($output);
         $fileCount = 0;
 
-        // Count actual file lines (skip header/metadata)
-        foreach ($lines as $l) {
-            if (trim($l) !== '' && !str_starts_with($l, 'Found') && !str_starts_with($l, '[')) {
-                $fileCount++;
+        if (str_starts_with($trimmedOutput, 'No files matched pattern:')) {
+            $fileCount = 0;
+        } elseif (preg_match('/Found\s+(\d+)\s+file\(s\)/', $trimmedOutput, $matches)) {
+            $fileCount = (int) $matches[1];
+        } else {
+            $lines = explode("\n", $trimmedOutput);
+            foreach ($lines as $lineText) {
+                $lineText = trim($lineText);
+                if ($lineText !== '' && !str_starts_with($lineText, '[')) {
+                    $fileCount++;
+                }
             }
         }
 
         // Check for truncation
-        $truncated = str_contains($output, 'Showing first 100');
+        $truncated = str_contains(strtolower($output), 'showing first');
 
         $line = $this->green("  ✓ ") . $this->dim("Glob ") . $this->white($pattern);
         $line .= $this->dim(" ({$fileCount} files" . ($truncated ? ', truncated' : '') . ")");
@@ -304,7 +311,7 @@ class ToolResultRenderer
     {
         $text = str_replace(["\n", "\r"], [' ', ''], $text);
         if (mb_strlen($text) > $max) {
-            return mb_substr($text, 0, $max - 1) . '��';
+            return mb_substr($text, 0, $max - 1) . '…';
         }
 
         return $text;

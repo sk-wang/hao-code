@@ -57,7 +57,7 @@ class ReplFormatter
 
     public function helpHint(): string
     {
-        return "  <fg=gray>/help commands · Tab/↑↓ autocomplete · Ctrl+O transcript · Ctrl+R history · Ctrl+C interrupt · Ctrl+D exit · \\ multiline</>";
+        return "  <fg=gray>/help commands · Tab autocomplete · ↑/↓ suggestions, history, multiline · Ctrl+O transcript · Ctrl+R history · Ctrl+C interrupt · Ctrl+D exit · \\ multiline</>";
     }
 
     public function buddyDockLine(string $line): string
@@ -567,7 +567,8 @@ class ReplFormatter
     public function reverseSearchStatus(string $query, string $match, int $current, int $total): string
     {
         $label = $query === '' ? '(type to search)' : $query;
-        $display = $match === '' ? '(no match)' : $this->truncate($match, 120);
+        $normalizedMatch = preg_replace('/\s+/', ' ', trim($match)) ?? '';
+        $display = $normalizedMatch === '' ? '(no match)' : $this->truncate($normalizedMatch, 120);
         $suffix = $total > 0 ? " {$current}/{$total}" : '';
 
         return '<fg=yellow>(reverse-i-search)</> <fg=gray>`' . $this->escape($label) . '`:</>' .

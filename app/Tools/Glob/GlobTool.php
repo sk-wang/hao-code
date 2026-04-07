@@ -106,12 +106,18 @@ DESC;
             \RecursiveIteratorIterator::LEAVES_ONLY
         );
 
-        $regexPattern = $this->globToRegex($pattern);
+        $regexPatterns = array_map(
+            fn (string $expandedPattern): string => $this->globToRegex($expandedPattern),
+            $this->expandBracePatterns($pattern),
+        );
 
         foreach ($iterator as $file) {
             $relativePath = str_replace($dir . '/', '', $file->getPathname());
-            if (preg_match($regexPattern, $relativePath)) {
-                $matches[] = $file->getPathname();
+            foreach ($regexPatterns as $regexPattern) {
+                if (preg_match($regexPattern, $relativePath)) {
+                    $matches[] = $file->getPathname();
+                    break;
+                }
             }
         }
     }
@@ -135,6 +141,31 @@ DESC;
         $regex = str_replace('\*', '[^/]*', $regex);
         $regex = str_replace('\?', '.', $regex);
         return '#^' . $regex . '$#';
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function expandBracePatterns(string $pattern): array
+    {
+        if (! preg_match('/\{([^{}]+)\}/', $pattern, $matches, PREG_OFFSET_CAPTURE)) {
+            return [$pattern];
+        }
+
+        $brace = $matches[0][0];
+        $braceOffset = $matches[0][1];
+        $options = explode(',', $matches[1][0]);
+        $prefix = substr($pattern, 0, $braceOffset);
+        $suffix = substr($pattern, $braceOffset + strlen($brace));
+
+        $expanded = [];
+        foreach ($options as $option) {
+            foreach ($this->expandBracePatterns($prefix . $option . $suffix) as $variant) {
+                $expanded[] = $variant;
+            }
+        }
+
+        return array_values(array_unique($expanded));
     }
 
     public function isReadOnly(array $input): bool

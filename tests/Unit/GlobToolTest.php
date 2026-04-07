@@ -157,6 +157,23 @@ class GlobToolTest extends TestCase
         $this->assertStringContainsString('main.go', $result->output);
     }
 
+    public function test_it_supports_brace_expansion_for_multiple_extensions(): void
+    {
+        $this->touch('src/App.jsx', 'export default function App() {}');
+        $this->touch('src/main.js', 'console.log("ok")');
+        $this->touch('backend/package.json', '{}');
+        $this->touch('frontend/index.html', '<div id="root"></div>');
+        $this->touch('notes.txt', 'skip');
+
+        $result = $this->call(['pattern' => '**/*.{js,jsx,json,md}']);
+
+        $this->assertFalse($result->isError);
+        $this->assertStringContainsString('App.jsx', $result->output);
+        $this->assertStringContainsString('main.js', $result->output);
+        $this->assertStringContainsString('backend/package.json', $result->output);
+        $this->assertStringNotContainsString('notes.txt', $result->output);
+    }
+
     public function test_is_read_only(): void
     {
         $this->assertTrue($this->tool->isReadOnly([]));

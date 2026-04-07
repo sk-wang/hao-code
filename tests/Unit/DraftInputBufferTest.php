@@ -53,6 +53,49 @@ class DraftInputBufferTest extends TestCase
         $this->assertSame(4, $buffer->cursorPosition());
     }
 
+    public function test_it_moves_between_lines_and_edits_a_multiline_draft(): void
+    {
+        $buffer = new DraftInputBuffer("first line\nsecond line");
+
+        $this->assertTrue($buffer->moveUp());
+        $this->assertSame(0, $buffer->currentLineIndex());
+        $this->assertSame('first line', $buffer->currentLine());
+        $this->assertSame(10, $buffer->cursorPosition());
+
+        $buffer->insert('!');
+        $this->assertSame("first line!\nsecond line", $buffer->text());
+
+        $this->assertTrue($buffer->moveDown());
+        $this->assertSame(1, $buffer->currentLineIndex());
+        $this->assertSame('second line', $buffer->currentLine());
+
+        $buffer->moveHome();
+        $buffer->insert('> ');
+
+        $this->assertSame("first line!\n> second line", $buffer->text());
+        $this->assertSame(['first line!', '> second line'], $buffer->visibleLines());
+    }
+
+    public function test_backspace_and_delete_can_join_adjacent_lines(): void
+    {
+        $backspaceBuffer = new DraftInputBuffer("alpha\nbeta");
+        $backspaceBuffer->moveHome();
+
+        $this->assertTrue($backspaceBuffer->backspace());
+        $this->assertSame('alphabeta', $backspaceBuffer->text());
+        $this->assertSame(0, $backspaceBuffer->currentLineIndex());
+        $this->assertSame(5, $backspaceBuffer->cursorPosition());
+
+        $deleteBuffer = new DraftInputBuffer("alpha\nbeta");
+        $deleteBuffer->moveUp();
+        $deleteBuffer->moveEnd();
+
+        $this->assertTrue($deleteBuffer->delete());
+        $this->assertSame('alphabeta', $deleteBuffer->text());
+        $this->assertSame(0, $deleteBuffer->currentLineIndex());
+        $this->assertSame(5, $deleteBuffer->cursorPosition());
+    }
+
     public function test_it_commits_a_trailing_backslash_as_a_continuation_line(): void
     {
         $buffer = new DraftInputBuffer('first \\');

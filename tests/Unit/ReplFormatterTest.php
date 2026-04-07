@@ -55,7 +55,7 @@ class ReplFormatterTest extends TestCase
         $formatter = new ReplFormatter;
 
         $this->assertSame(
-            "  <fg=gray>/help commands · Tab/↑↓ autocomplete · Ctrl+O transcript · Ctrl+R history · Ctrl+C interrupt · Ctrl+D exit · \\ multiline</>",
+            "  <fg=gray>/help commands · Tab autocomplete · ↑/↓ suggestions, history, multiline · Ctrl+O transcript · Ctrl+R history · Ctrl+C interrupt · Ctrl+D exit · \\ multiline</>",
             $formatter->helpHint(),
         );
     }
@@ -446,6 +446,16 @@ class ReplFormatterTest extends TestCase
         $this->assertSame(
             '<fg=yellow>(reverse-i-search)</> <fg=gray>`git`:</> <fg=white>git diff --stat</><fg=gray> 1/2</>',
             $formatter->reverseSearchStatus('git', 'git diff --stat', 1, 2),
+        );
+    }
+
+    public function test_reverse_search_status_flattens_multiline_matches_to_one_line(): void
+    {
+        $formatter = new ReplFormatter;
+
+        $this->assertSame(
+            '<fg=yellow>(reverse-i-search)</> <fg=gray>`Reply`:</> <fg=white>Reply with OK only No extra text</><fg=gray> 1/2</>',
+            $formatter->reverseSearchStatus('Reply', "Reply with OK only\nNo extra text", 1, 2),
         );
     }
 

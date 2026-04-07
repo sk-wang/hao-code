@@ -105,6 +105,20 @@ class ToolResultRendererTest extends TestCase
         $this->assertStringContainsString('more lines', $result);
     }
 
+    public function test_bash_truncation_uses_utf8_safe_ellipsis_instead_of_replacement_characters(): void
+    {
+        $renderer = new ToolResultRenderer(20);
+        $output = str_repeat('你好世界', 8);
+
+        $result = $renderer->render('Bash', [
+            'command' => 'echo "' . $output . '"',
+        ], $output, false);
+
+        $this->assertNotNull($result);
+        $this->assertStringContainsString('…', $result);
+        $this->assertStringNotContainsString('��', $result);
+    }
+
     // ─── Read tool ──────────────────────────────────────────────────────
 
     public function test_read_shows_file_info(): void
@@ -129,6 +143,16 @@ class ToolResultRendererTest extends TestCase
         $this->assertNotNull($result);
         $this->assertStringContainsString('**/*.php', $result);
         $this->assertStringContainsString('3 files', $result);
+    }
+
+    public function test_glob_no_match_message_does_not_count_as_a_file(): void
+    {
+        $result = $this->renderer->render('Glob', [
+            'pattern' => '**/*.{js,jsx,json,html,md}',
+        ], 'No files matched pattern: **/*.{js,jsx,json,html,md}', false);
+
+        $this->assertNotNull($result);
+        $this->assertStringContainsString('0 files', $result);
     }
 
     // ─── Grep tool ──────────────────────────────────────────────────────

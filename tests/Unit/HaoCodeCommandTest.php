@@ -3,6 +3,7 @@
 namespace Tests\Unit;
 
 use App\Console\Commands\HaoCodeCommand;
+use App\Support\Terminal\DraftInputBuffer;
 use App\Support\Terminal\DockedPromptScreen;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Console\Output\BufferedOutput;
@@ -130,6 +131,71 @@ class HaoCodeCommandTest extends TestCase
         ], '', 'third');
 
         $this->assertSame(['second', 'first'], $matches);
+    }
+
+    public function test_navigate_input_history_restores_the_saved_draft_after_returning_from_history(): void
+    {
+        $command = new HaoCodeCommand;
+        $draft = new DraftInputBuffer('draft');
+        $history = ['first', 'second'];
+        $state = $this->invoke($command, 'navigateInputHistory', $draft, $history, count($history), null, -1);
+
+        $this->assertTrue($state['changed']);
+        $this->assertSame(1, $state['historyPtr']);
+        $this->assertSame('second', $draft->text());
+        $this->assertSame('draft', $state['historyDraftSnapshot']);
+
+        $state = $this->invoke($command, 'navigateInputHistory', $draft, $history, $state['historyPtr'], $state['historyDraftSnapshot'], 1);
+
+        $this->assertTrue($state['changed']);
+        $this->assertSame(2, $state['historyPtr']);
+        $this->assertSame('draft', $draft->text());
+        $this->assertNull($state['historyDraftSnapshot']);
+    }
+
+    public function test_navigate_input_history_restores_a_multiline_draft_after_returning_from_history(): void
+    {
+        $command = new HaoCodeCommand;
+        $draft = new DraftInputBuffer("first line\nsecond line");
+        $history = ['first', 'second'];
+        $state = $this->invoke($command, 'navigateInputHistory', $draft, $history, count($history), null, -1);
+
+        $this->assertTrue($state['changed']);
+        $this->assertSame("first line\nsecond line", $state['historyDraftSnapshot']);
+
+        $state = $this->invoke($command, 'navigateInputHistory', $draft, $history, $state['historyPtr'], $state['historyDraftSnapshot'], 1);
+
+        $this->assertTrue($state['changed']);
+        $this->assertSame("first line\nsecond line", $draft->text());
+        $this->assertSame(['first line', 'second line'], $draft->visibleLines());
+        $this->assertNull($state['historyDraftSnapshot']);
+    }
+
+    public function test_should_handle_slash_command_rejects_multiline_input(): void
+    {
+        $command = new HaoCodeCommand;
+
+        $this->assertFalse($this->invoke($command, 'shouldHandleSlashCommand', "/help\nsecond line"));
+    }
+
+    public function test_should_handle_slash_command_accepts_single_line_input(): void
+    {
+        $command = new HaoCodeCommand;
+
+        $this->assertTrue($this->invoke($command, 'shouldHandleSlashCommand', '/help'));
+    }
+
+    public function test_submit_does_not_auto_accept_the_selected_live_suggestion(): void
+    {
+        $command = new HaoCodeCommand;
+        $draft = new DraftInputBuffer('/st');
+
+        $this->assertFalse($this->invoke(
+            $command,
+            'shouldApplySelectedSuggestionOnSubmit',
+            $draft,
+            ['label' => '/stats', 'type' => 'command'],
+        ));
     }
 
     public function test_build_permission_rule_uses_the_observable_tool_input(): void

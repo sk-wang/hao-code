@@ -7,9 +7,9 @@ namespace App\Support\Terminal;
 class DraftInputBuffer
 {
     /** @var array<int, string> */
-    private array $committedLines = [];
+    private array $lines = [''];
 
-    private string $currentLine = '';
+    private int $currentLineIndex = 0;
 
     private int $cursorPosition = 0;
 
@@ -21,11 +21,13 @@ class DraftInputBuffer
     public function replaceWith(string $text): void
     {
         $normalized = str_replace(["\r\n", "\r"], "\n", $text);
-        $parts = explode("\n", $normalized);
+        $this->lines = explode("\n", $normalized);
+        if ($this->lines === []) {
+            $this->lines = [''];
+        }
 
-        $this->currentLine = array_pop($parts) ?? '';
-        $this->committedLines = $parts;
-        $this->cursorPosition = $this->length($this->currentLine);
+        $this->currentLineIndex = count($this->lines) - 1;
+        $this->cursorPosition = $this->length($this->currentLine());
     }
 
     public function text(): string
@@ -38,17 +40,17 @@ class DraftInputBuffer
      */
     public function committedLines(): array
     {
-        return $this->committedLines;
+        return array_slice($this->lines, 0, $this->currentLineIndex);
     }
 
     public function currentLine(): string
     {
-        return $this->currentLine;
+        return $this->lines[$this->currentLineIndex] ?? '';
     }
 
     public function replaceCurrentLine(string $text): void
     {
-        $this->currentLine = $text;
+        $this->lines[$this->currentLineIndex] = $text;
         $this->cursorPosition = $this->length($text);
     }
 
@@ -57,12 +59,12 @@ class DraftInputBuffer
      */
     public function visibleLines(): array
     {
-        return [...$this->committedLines, $this->currentLine];
+        return $this->lines;
     }
 
     public function currentLineIndex(): int
     {
-        return count($this->committedLines);
+        return $this->currentLineIndex;
     }
 
     public function cursorPosition(): int
@@ -72,22 +74,60 @@ class DraftInputBuffer
 
     public function moveLeft(): bool
     {
-        if ($this->cursorPosition <= 0) {
+        if ($this->cursorPosition > 0) {
+            $this->cursorPosition--;
+
+            return true;
+        }
+
+        if ($this->currentLineIndex <= 0) {
             return false;
         }
 
-        $this->cursorPosition--;
+        $this->currentLineIndex--;
+        $this->cursorPosition = $this->length($this->currentLine());
 
         return true;
     }
 
     public function moveRight(): bool
     {
-        if ($this->cursorPosition >= $this->length($this->currentLine)) {
+        if ($this->cursorPosition < $this->length($this->currentLine())) {
+            $this->cursorPosition++;
+
+            return true;
+        }
+
+        if ($this->currentLineIndex >= count($this->lines) - 1) {
             return false;
         }
 
-        $this->cursorPosition++;
+        $this->currentLineIndex++;
+        $this->cursorPosition = 0;
+
+        return true;
+    }
+
+    public function moveUp(): bool
+    {
+        if ($this->currentLineIndex <= 0) {
+            return false;
+        }
+
+        $this->currentLineIndex--;
+        $this->cursorPosition = min($this->cursorPosition, $this->length($this->currentLine()));
+
+        return true;
+    }
+
+    public function moveDown(): bool
+    {
+        if ($this->currentLineIndex >= count($this->lines) - 1) {
+            return false;
+        }
+
+        $this->currentLineIndex++;
+        $this->cursorPosition = min($this->cursorPosition, $this->length($this->currentLine()));
 
         return true;
     }
@@ -99,12 +139,13 @@ class DraftInputBuffer
 
     public function moveEnd(): void
     {
-        $this->cursorPosition = $this->length($this->currentLine);
+        $this->cursorPosition = $this->length($this->currentLine());
     }
 
     public function isCursorAtEnd(): bool
     {
-        return $this->cursorPosition >= $this->length($this->currentLine);
+        return $this->currentLineIndex === count($this->lines) - 1
+            && $this->cursorPosition >= $this->length($this->currentLine());
     }
 
     public function insert(string $text): void
@@ -113,31 +154,49 @@ class DraftInputBuffer
             return;
         }
 
-        $this->currentLine = $this->beforeCursor() . $text . $this->afterCursor();
+        $this->lines[$this->currentLineIndex] = $this->beforeCursor() . $text . $this->afterCursor();
         $this->cursorPosition += $this->length($text);
     }
 
     public function backspace(): bool
     {
-        if ($this->cursorPosition <= 0) {
+        if ($this->cursorPosition > 0) {
+            $this->lines[$this->currentLineIndex] = $this->substring($this->currentLine(), 0, $this->cursorPosition - 1)
+                . $this->afterCursor();
+            $this->cursorPosition--;
+
+            return true;
+        }
+
+        if ($this->currentLineIndex <= 0) {
             return false;
         }
 
-        $this->currentLine = $this->substring($this->currentLine, 0, $this->cursorPosition - 1)
-            . $this->afterCursor();
-        $this->cursorPosition--;
+        $previousIndex = $this->currentLineIndex - 1;
+        $previousLine = $this->lines[$previousIndex];
+        $this->lines[$previousIndex] .= $this->currentLine();
+        array_splice($this->lines, $this->currentLineIndex, 1);
+        $this->currentLineIndex = $previousIndex;
+        $this->cursorPosition = $this->length($previousLine);
 
         return true;
     }
 
     public function delete(): bool
     {
-        if ($this->cursorPosition >= $this->length($this->currentLine)) {
+        if ($this->cursorPosition < $this->length($this->currentLine())) {
+            $this->lines[$this->currentLineIndex] = $this->beforeCursor()
+                . $this->substring($this->currentLine(), $this->cursorPosition + 1);
+
+            return true;
+        }
+
+        if ($this->currentLineIndex >= count($this->lines) - 1) {
             return false;
         }
 
-        $this->currentLine = $this->beforeCursor()
-            . $this->substring($this->currentLine, $this->cursorPosition + 1);
+        $this->lines[$this->currentLineIndex] .= $this->lines[$this->currentLineIndex + 1];
+        array_splice($this->lines, $this->currentLineIndex + 1, 1);
 
         return true;
     }
@@ -160,13 +219,10 @@ class DraftInputBuffer
         $parts = explode("\n", $normalized);
         $firstLine = $before . array_shift($parts);
         $lastFragment = array_pop($parts) ?? '';
+        $replacement = [$firstLine, ...$parts, $lastFragment . $after];
 
-        $this->committedLines[] = $firstLine;
-        foreach ($parts as $line) {
-            $this->committedLines[] = $line;
-        }
-
-        $this->currentLine = $lastFragment . $after;
+        array_splice($this->lines, $this->currentLineIndex, 1, $replacement);
+        $this->currentLineIndex += count($replacement) - 1;
         $this->cursorPosition = $this->length($lastFragment);
     }
 
@@ -176,12 +232,13 @@ class DraftInputBuffer
             return false;
         }
 
-        if (! str_ends_with(rtrim($this->currentLine), '\\')) {
+        if (! str_ends_with(rtrim($this->currentLine()), '\\')) {
             return false;
         }
 
-        $this->committedLines[] = rtrim($this->currentLine, ' \\');
-        $this->currentLine = '';
+        $this->lines[$this->currentLineIndex] = rtrim($this->currentLine(), ' \\');
+        array_splice($this->lines, $this->currentLineIndex + 1, 0, ['']);
+        $this->currentLineIndex++;
         $this->cursorPosition = 0;
 
         return true;
@@ -189,12 +246,12 @@ class DraftInputBuffer
 
     public function beforeCursor(): string
     {
-        return $this->substring($this->currentLine, 0, $this->cursorPosition);
+        return $this->substring($this->currentLine(), 0, $this->cursorPosition);
     }
 
     public function afterCursor(): string
     {
-        return $this->substring($this->currentLine, $this->cursorPosition);
+        return $this->substring($this->currentLine(), $this->cursorPosition);
     }
 
     private function length(string $text): int

@@ -233,7 +233,7 @@ class HaoCodeCommand extends Command
             }
 
             // Handle slash commands
-            if (str_starts_with($input, '/')) {
+            if ($this->shouldHandleSlashCommand($input)) {
                 $this->handleSlashCommand($input, $agent);
 
                 continue;
@@ -248,6 +248,12 @@ class HaoCodeCommand extends Command
         app(McpConnectionManager::class)->disconnectAll();
 
         return 0;
+    }
+
+    private function shouldHandleSlashCommand(string $input): bool
+    {
+        return ! str_contains($input, "\n")
+            && str_starts_with($input, '/');
     }
 
     /**
@@ -567,6 +573,7 @@ class HaoCodeCommand extends Command
         $draft = new DraftInputBuffer;
         $liveSuggestions = [];
         $selectedSuggestionIndex = 0;
+        $historyDraftSnapshot = null;
         $bracketedPasteEnabled = $sttyMode !== '';
 
         if ($bracketedPasteEnabled) {
@@ -592,7 +599,9 @@ class HaoCodeCommand extends Command
 
                 if ($char === "\r" || $char === "\n") {
                     $selectedSuggestion = $liveSuggestions[$selectedSuggestionIndex] ?? null;
-                    if ($selectedSuggestion !== null && $this->applySelectedSuggestion($autocomplete, $draft, $selectedSuggestion['label'])) {
+                    if ($selectedSuggestion !== null
+                        && $this->shouldApplySelectedSuggestionOnSubmit($draft, $selectedSuggestion)
+                        && $this->applySelectedSuggestion($autocomplete, $draft, $selectedSuggestion['label'])) {
                         [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
                         $this->redrawActiveRawInput(
                             agent: $agent,
@@ -718,6 +727,26 @@ class HaoCodeCommand extends Command
                     }
 
                     if ($seq === '[A') { // Up arrow
+                        if ($historyPtr < count($history)) {
+                            $state = $this->navigateInputHistory($draft, $history, $historyPtr, $historyDraftSnapshot, -1);
+                            $historyPtr = $state['historyPtr'];
+                            $historyDraftSnapshot = $state['historyDraftSnapshot'];
+                            if ($state['changed']) {
+                                [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
+                                $this->redrawActiveRawInput(
+                                    agent: $agent,
+                                    useDockedHud: $useDockedHud,
+                                    cwd: $cwd,
+                                    draft: $draft,
+                                    autocomplete: $autocomplete,
+                                    suggestions: $liveSuggestions,
+                                    selectedSuggestionIndex: $selectedSuggestionIndex,
+                                );
+                            }
+
+                            continue;
+                        }
+
                         if ($liveSuggestions !== []) {
                             $selectedSuggestionIndex = $this->wrapSuggestionIndex($selectedSuggestionIndex - 1, count($liveSuggestions));
                             $this->redrawActiveRawInput(
@@ -733,9 +762,25 @@ class HaoCodeCommand extends Command
                             continue;
                         }
 
-                        if ($draft->committedLines() === [] && $historyPtr > 0) {
-                            $historyPtr--;
-                            $draft->replaceWith($history[$historyPtr]);
+                        if ($draft->moveUp()) {
+                            [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft, $selectedSuggestionIndex);
+                            $this->redrawActiveRawInput(
+                                agent: $agent,
+                                useDockedHud: $useDockedHud,
+                                cwd: $cwd,
+                                draft: $draft,
+                                autocomplete: $autocomplete,
+                                suggestions: $liveSuggestions,
+                                selectedSuggestionIndex: $selectedSuggestionIndex,
+                            );
+
+                            continue;
+                        }
+
+                        $state = $this->navigateInputHistory($draft, $history, $historyPtr, $historyDraftSnapshot, -1);
+                        $historyPtr = $state['historyPtr'];
+                        $historyDraftSnapshot = $state['historyDraftSnapshot'];
+                        if ($state['changed']) {
                             [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
                             $this->redrawActiveRawInput(
                                 agent: $agent,
@@ -751,6 +796,26 @@ class HaoCodeCommand extends Command
                         continue;
                     }
                     if ($seq === '[B') { // Down arrow
+                        if ($historyPtr < count($history)) {
+                            $state = $this->navigateInputHistory($draft, $history, $historyPtr, $historyDraftSnapshot, 1);
+                            $historyPtr = $state['historyPtr'];
+                            $historyDraftSnapshot = $state['historyDraftSnapshot'];
+                            if ($state['changed']) {
+                                [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
+                                $this->redrawActiveRawInput(
+                                    agent: $agent,
+                                    useDockedHud: $useDockedHud,
+                                    cwd: $cwd,
+                                    draft: $draft,
+                                    autocomplete: $autocomplete,
+                                    suggestions: $liveSuggestions,
+                                    selectedSuggestionIndex: $selectedSuggestionIndex,
+                                );
+                            }
+
+                            continue;
+                        }
+
                         if ($liveSuggestions !== []) {
                             $selectedSuggestionIndex = $this->wrapSuggestionIndex($selectedSuggestionIndex + 1, count($liveSuggestions));
                             $this->redrawActiveRawInput(
@@ -766,9 +831,25 @@ class HaoCodeCommand extends Command
                             continue;
                         }
 
-                        if ($draft->committedLines() === [] && $historyPtr < count($history) - 1) {
-                            $historyPtr++;
-                            $draft->replaceWith($history[$historyPtr]);
+                        if ($draft->moveDown()) {
+                            [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft, $selectedSuggestionIndex);
+                            $this->redrawActiveRawInput(
+                                agent: $agent,
+                                useDockedHud: $useDockedHud,
+                                cwd: $cwd,
+                                draft: $draft,
+                                autocomplete: $autocomplete,
+                                suggestions: $liveSuggestions,
+                                selectedSuggestionIndex: $selectedSuggestionIndex,
+                            );
+
+                            continue;
+                        }
+
+                        $state = $this->navigateInputHistory($draft, $history, $historyPtr, $historyDraftSnapshot, 1);
+                        $historyPtr = $state['historyPtr'];
+                        $historyDraftSnapshot = $state['historyDraftSnapshot'];
+                        if ($state['changed']) {
                             [$liveSuggestions, $selectedSuggestionIndex] = $this->refreshLiveSuggestions($autocomplete, $draft);
                             $this->redrawActiveRawInput(
                                 agent: $agent,
@@ -1149,7 +1230,7 @@ class HaoCodeCommand extends Command
         );
 
         $lines[] = '';
-        $lines[] = '<fg=gray>Keybindings:</>  Ctrl+C = cancel  Ctrl+D = exit  ↑/↓ = history  Tab = autocomplete';
+        $lines[] = '<fg=gray>Keybindings:</>  Ctrl+C = cancel  Ctrl+D = exit  ↑/↓ = suggestions/history/multiline  Tab = autocomplete';
         $lines[] = '<fg=gray>Docs:</>         https://github.com/sk-wang/hao-code';
 
         $this->renderPanel('Available commands', $lines);
@@ -5190,8 +5271,6 @@ PROMPT;
             $char = $this->readRawCharacter($handle);
             if ($char === false || $char === '') {
                 $this->writeRaw("\r\033[2K");
-                $this->output->write($this->formatter()->prompt($cwd));
-                $this->writeRaw($original);
 
                 return $original;
             }
@@ -5199,16 +5278,12 @@ PROMPT;
             if ($char === "\r" || $char === "\n") {
                 $accepted = $matches[$selectedIndex] ?? $original;
                 $this->writeRaw("\r\033[2K");
-                $this->output->write($this->formatter()->prompt($cwd));
-                $this->writeRaw($accepted);
 
                 return $accepted;
             }
 
             if ($char === "\x03" || $char === "\x1b") {
                 $this->writeRaw("\r\033[2K");
-                $this->output->write($this->formatter()->prompt($cwd));
-                $this->writeRaw($original);
 
                 return $original;
             }
@@ -5254,6 +5329,78 @@ PROMPT;
             $candidates,
             static fn (string $candidate): bool => mb_stripos($candidate, $query) !== false,
         ));
+    }
+
+    /**
+     * @param array<int, string> $history
+     * @return array{changed: bool, historyPtr: int, historyDraftSnapshot: ?string}
+     */
+    private function navigateInputHistory(
+        DraftInputBuffer $draft,
+        array $history,
+        int $historyPtr,
+        ?string $historyDraftSnapshot,
+        int $direction,
+    ): array {
+        $historyCount = count($history);
+        if ($historyCount === 0 || ! in_array($direction, [-1, 1], true)) {
+            return [
+                'changed' => false,
+                'historyPtr' => $historyPtr,
+                'historyDraftSnapshot' => $historyDraftSnapshot,
+            ];
+        }
+
+        if ($direction < 0) {
+            if ($historyPtr >= $historyCount) {
+                $historyDraftSnapshot = $draft->text();
+                $historyPtr = $historyCount - 1;
+            } elseif ($historyPtr > 0) {
+                $historyPtr--;
+            } else {
+                return [
+                    'changed' => false,
+                    'historyPtr' => $historyPtr,
+                    'historyDraftSnapshot' => $historyDraftSnapshot,
+                ];
+            }
+
+            $draft->replaceWith($history[$historyPtr]);
+
+            return [
+                'changed' => true,
+                'historyPtr' => $historyPtr,
+                'historyDraftSnapshot' => $historyDraftSnapshot,
+            ];
+        }
+
+        if ($historyPtr >= $historyCount) {
+            return [
+                'changed' => false,
+                'historyPtr' => $historyPtr,
+                'historyDraftSnapshot' => $historyDraftSnapshot,
+            ];
+        }
+
+        if ($historyPtr < $historyCount - 1) {
+            $historyPtr++;
+            $draft->replaceWith($history[$historyPtr]);
+
+            return [
+                'changed' => true,
+                'historyPtr' => $historyPtr,
+                'historyDraftSnapshot' => $historyDraftSnapshot,
+            ];
+        }
+
+        $historyPtr = $historyCount;
+        $draft->replaceWith($historyDraftSnapshot ?? '');
+
+        return [
+            'changed' => true,
+            'historyPtr' => $historyPtr,
+            'historyDraftSnapshot' => null,
+        ];
     }
 
     private function writeRaw(string $text): void
@@ -5394,6 +5541,16 @@ PROMPT;
         }
 
         return [$suggestions, min(max(0, $selectedSuggestionIndex), count($suggestions) - 1)];
+    }
+
+    /**
+     * Enter submits the current draft; live suggestions are accepted explicitly via Tab.
+     *
+     * @param array{label?: string, type?: string}|null $selectedSuggestion
+     */
+    private function shouldApplySelectedSuggestionOnSubmit(DraftInputBuffer $draft, ?array $selectedSuggestion): bool
+    {
+        return false;
     }
 
     private function wrapSuggestionIndex(int $index, int $count): int
