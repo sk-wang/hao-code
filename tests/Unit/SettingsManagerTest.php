@@ -7,6 +7,16 @@ use Tests\TestCase;
 
 class SettingsManagerTest extends TestCase
 {
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        // Isolate tests from real global/project settings
+        config([
+            'haocode.global_settings_path' => sys_get_temp_dir() . '/haocode_test_nonexistent_' . uniqid() . '/settings.json',
+        ]);
+    }
+
     public function test_it_maps_claude_models_to_kimi_for_kimi_coding_endpoint(): void
     {
         config([
@@ -156,12 +166,12 @@ class SettingsManagerTest extends TestCase
         file_put_contents($tmpDir . '/.haocode/settings.json', json_encode([
             'provider' => [
                 'anthropic' => [
-                    'api_key' => 'sk-ant-123',
+                    'api_key' => 'fake-ant-test-key',
                     'api_base_url' => 'https://api.anthropic.com',
                     'model' => 'claude-sonnet-4-20250514',
                 ],
                 'zai' => [
-                    'api_key' => 'sk-zai-123',
+                    'api_key' => 'fake-zai-test-key',
                     'api_base_url' => 'https://api.z.ai/api/anthropic',
                     'model' => 'glm-5.1',
                 ],
