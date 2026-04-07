@@ -174,6 +174,21 @@ class GlobToolTest extends TestCase
         $this->assertStringNotContainsString('notes.txt', $result->output);
     }
 
+    public function test_double_star_star_matches_root_and_nested_files(): void
+    {
+        $this->touch('README.md', '# notes');
+        $this->touch('server.js', 'console.log("ok")');
+        $this->touch('frontend/index.html', '<div></div>');
+
+        $result = $this->call(['pattern' => '**/*']);
+
+        $this->assertFalse($result->isError);
+        $this->assertStringContainsString('README.md', $result->output);
+        $this->assertStringContainsString('server.js', $result->output);
+        $this->assertStringContainsString('frontend/index.html', $result->output);
+        $this->assertStringContainsString('3 file(s)', $result->output);
+    }
+
     public function test_is_read_only(): void
     {
         $this->assertTrue($this->tool->isReadOnly([]));
@@ -199,11 +214,10 @@ class GlobToolTest extends TestCase
     public function test_glob_to_regex_converts_double_star_to_any(): void
     {
         $regex = $this->globToRegex('**/*.php');
-        // ** matches one-or-more path segments
+        // **/ matches zero-or-more path segments
         $this->assertMatchesRegularExpression($regex, 'src/Controllers/FooController.php');
         $this->assertMatchesRegularExpression($regex, 'a/b.php');
-        // Root-level files don't match **/*.php (use *.php instead)
-        $this->assertDoesNotMatchRegularExpression($regex, 'foo.php');
+        $this->assertMatchesRegularExpression($regex, 'foo.php');
     }
 
     public function test_glob_to_regex_converts_question_mark(): void

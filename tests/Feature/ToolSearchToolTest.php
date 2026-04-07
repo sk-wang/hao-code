@@ -186,4 +186,34 @@ class ToolSearchToolTest extends TestCase
         // Description capped at 120 chars
         $this->assertStringNotContainsString(str_repeat('x', 121), $result->output);
     }
+
+    public function test_query_write_file_prefers_write_tool_over_bash(): void
+    {
+        $registry = $this->makeRegistry([
+            $this->makeTool('Bash', "Executes a given bash command.\nWrite a clear description.\nFiles may be created."),
+            $this->makeTool('Write', "Writes a file to the local filesystem.\nUse for file creation."),
+        ]);
+        $this->app->instance(ToolRegistry::class, $registry);
+
+        $result = (new ToolSearchTool)->call(['query' => 'write file'], $this->context);
+
+        $posWrite = strpos($result->output, 'Write:');
+        $posBash = strpos($result->output, 'Bash:');
+        $this->assertNotFalse($posWrite);
+        $this->assertNotFalse($posBash);
+        $this->assertLessThan($posBash, $posWrite);
+    }
+
+    public function test_output_flattens_multiline_descriptions(): void
+    {
+        $registry = $this->makeRegistry([
+            $this->makeTool('Write', "Writes a file to the local filesystem.\n\nUsage:\n- Create files safely."),
+        ]);
+        $this->app->instance(ToolRegistry::class, $registry);
+
+        $result = (new ToolSearchTool)->call(['query' => 'write'], $this->context);
+
+        $this->assertStringContainsString('Write: Writes a file to the local filesystem. Usage: - Create files safely.', $result->output);
+        $this->assertStringNotContainsString("filesystem.\n\nUsage", $result->output);
+    }
 }

@@ -2,28 +2,30 @@
 
 namespace Tests\Unit;
 
-use App\Services\Memory\DreamConsolidator;
 use App\Services\Memory\ConsolidationLock;
+use App\Services\Memory\DreamConsolidator;
 use App\Services\Memory\SessionMemory;
 use PHPUnit\Framework\TestCase;
 
 class DreamConsolidatorTest extends TestCase
 {
     private string $tmpDir;
+
     private string $originalHome = '';
+
     private DreamConsolidator $consolidator;
 
     protected function setUp(): void
     {
-        $this->tmpDir = sys_get_temp_dir() . '/dream_consolidator_test_' . getmypid();
-        mkdir($this->tmpDir . '/.haocode', 0755, true);
+        $this->tmpDir = sys_get_temp_dir().'/dream_consolidator_test_'.getmypid();
+        mkdir($this->tmpDir.'/.haocode', 0755, true);
 
         $this->originalHome = $_SERVER['HOME'] ?? '';
         $_SERVER['HOME'] = $this->tmpDir;
 
-        $memory = new SessionMemory();
-        $lock = new ConsolidationLock();
-        $this->consolidator = new DreamConsolidator($memory, $lock, $this->tmpDir . '/sessions');
+        $memory = new SessionMemory;
+        $lock = new ConsolidationLock;
+        $this->consolidator = new DreamConsolidator($memory, $lock, $this->tmpDir.'/sessions');
     }
 
     protected function tearDown(): void
@@ -35,16 +37,16 @@ class DreamConsolidatorTest extends TestCase
         }
 
         $files = [
-            $this->tmpDir . '/.haocode/.consolidate-lock',
-            $this->tmpDir . '/.haocode/memory.json',
+            $this->tmpDir.'/.haocode/.consolidate-lock',
+            $this->tmpDir.'/.haocode/memory.json',
         ];
         foreach ($files as $file) {
             if (file_exists($file)) {
                 unlink($file);
             }
         }
-        if (is_dir($this->tmpDir . '/.haocode')) {
-            rmdir($this->tmpDir . '/.haocode');
+        if (is_dir($this->tmpDir.'/.haocode')) {
+            rmdir($this->tmpDir.'/.haocode');
         }
         if (is_dir($this->tmpDir)) {
             rmdir($this->tmpDir);
@@ -73,7 +75,19 @@ class DreamConsolidatorTest extends TestCase
         $prompt = $this->consolidator->buildConsolidationPrompt('/my/mem/dir', '/my/transcripts');
 
         $this->assertStringContainsString('/my/mem/dir', $prompt);
+        $this->assertStringContainsString('/my/mem/dir/memory.json', $prompt);
         $this->assertStringContainsString('/my/transcripts', $prompt);
+    }
+
+    public function test_build_consolidation_prompt_limits_memory_access_to_memory_file(): void
+    {
+        $prompt = $this->consolidator->buildConsolidationPrompt('/mem', '/transcripts');
+
+        $this->assertStringContainsString('Persistent memory file: `/mem/memory.json`', $prompt);
+        $this->assertStringContainsString('Do not list the parent directory', $prompt);
+        $this->assertStringContainsString('settings.json', $prompt);
+        $this->assertStringNotContainsString('Memory root:', $prompt);
+        $this->assertStringNotContainsString('List what already exists in the memory directory', $prompt);
     }
 
     public function test_build_consolidation_prompt_mentions_memory_operations(): void
@@ -121,11 +135,11 @@ class DreamConsolidatorTest extends TestCase
     {
         // Use SessionMemory directly to set some memories
         $_SERVER['HOME'] = $this->tmpDir;
-        $memory = new SessionMemory();
+        $memory = new SessionMemory;
         $memory->set('key1', 'value1');
         $memory->set('key2', 'a longer value here');
 
-        $lock = new ConsolidationLock();
+        $lock = new ConsolidationLock;
         $consolidator = new DreamConsolidator($memory, $lock);
 
         $stats = $consolidator->getMemoryStats();

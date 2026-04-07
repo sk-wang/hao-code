@@ -137,9 +137,14 @@ DESC;
     {
         // Use '#' as delimiter so '/' can appear unescaped inside character classes
         $regex = preg_quote($pattern, '#');
-        $regex = str_replace('\*\*', '.*', $regex);
+
+        $regex = str_replace('\*\*/', '__DOUBLE_STAR_SLASH__', $regex);
+        $regex = str_replace('\*\*', '__DOUBLE_STAR__', $regex);
         $regex = str_replace('\*', '[^/]*', $regex);
-        $regex = str_replace('\?', '.', $regex);
+        $regex = str_replace('\?', '[^/]', $regex);
+        $regex = str_replace('__DOUBLE_STAR_SLASH__', '(?:.*/)?', $regex);
+        $regex = str_replace('__DOUBLE_STAR__', '.*', $regex);
+
         return '#^' . $regex . '$#';
     }
 

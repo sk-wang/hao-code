@@ -3897,8 +3897,12 @@ class HaoCodeCommand extends Command
         if ($handle === false) {
             return false;
         }
-        $answer = strtolower(trim(fgets($handle)));
-        fclose($handle);
+
+        try {
+            $answer = $this->readInteractivePermissionPromptAnswer($handle);
+        } finally {
+            fclose($handle);
+        }
 
         if (in_array($answer, ['a', 'always'], true)) {
             $rule = $this->buildPermissionRule($toolName, $input);
@@ -3930,7 +3934,7 @@ class HaoCodeCommand extends Command
                     $lines[] = $this->formatter()->keyValue('Action', $desc, 'gray', 'white');
                 }
                 // Show command preview (truncated, colored)
-                $cmdPreview = $this->truncate($cmd, 120);
+                $cmdPreview = $this->truncate(str_replace("\n", '\\n', $cmd), 120);
                 $lines[] = '<fg=gray>Command:</> <fg=yellow>' . OutputFormatter::escape($cmdPreview) . '</>';
                 break;
 
@@ -3981,6 +3985,59 @@ class HaoCodeCommand extends Command
         $lines[] = '<fg=green>[y]</> allow once  <fg=green>[a]</> always allow  <fg=red>[n]</> deny';
 
         return $lines;
+    }
+
+    private function readInteractivePermissionPromptAnswer($handle): string
+    {
+        if (! stream_isatty(STDIN) || ! function_exists('shell_exec')) {
+            return $this->readPermissionPromptAnswer($handle, false);
+        }
+
+        $sttyMode = trim((string) shell_exec('stty -g 2>/dev/null'));
+        if ($sttyMode === '') {
+            return $this->readPermissionPromptAnswer($handle, false);
+        }
+
+        shell_exec('stty raw -echo 2>/dev/null');
+
+        try {
+            $answer = $this->readPermissionPromptAnswer($handle, true);
+        } finally {
+            shell_exec("stty {$sttyMode} 2>/dev/null");
+        }
+
+        $this->writeRaw(($answer === '' ? '' : $answer) . "\r\n");
+
+        return $answer;
+    }
+
+    private function readPermissionPromptAnswer($handle, bool $rawMode): string
+    {
+        if (! $rawMode) {
+            $answer = fgets($handle);
+
+            return $answer === false ? '' : strtolower(trim($answer));
+        }
+
+        $answer = $this->readRawCharacter($handle);
+        if ($answer === false || $answer === '') {
+            return '';
+        }
+
+        if ($answer === "\x1b") {
+            $sequence = $this->readEscapeSequence($handle);
+            $answer = $sequence === false ? '' : $answer . $sequence;
+        }
+
+        if ($answer === "\r" || $answer === "\n") {
+            return '';
+        }
+
+        if ($answer === "\x03") {
+            return 'n';
+        }
+
+        return strtolower(trim($answer));
     }
 
     private function buildPermissionRule(string $toolName, array $input): ?string
@@ -5008,6 +5065,7 @@ PROMPT;
     {
         $autocomplete ??= app(AutocompleteEngine::class);
         $ghostText = $this->draftGhostText($autocomplete, $draft);
+        $layout = $this->buildDraftPromptLayout($cwd, $draft, $ghostText);
 
         $suggestionLines = [];
         if ($suggestions !== []) {
@@ -5021,9 +5079,9 @@ PROMPT;
         $this->renderDockedPromptScreen(
             $this->ensureDockedPromptScreen(),
             $suggestionLines,
-            $this->draftPromptLines($cwd, $draft, $ghostText),
-            $draft->currentLineIndex(),
-            $this->rawPromptWidth($cwd, $draft->currentLineIndex() > 0) + $this->displayWidth($draft->beforeCursor()),
+            $layout['lines'],
+            $layout['cursorLineIndex'],
+            $layout['cursorColumn'],
             $this->currentPromptFooterLines($agent),
         );
     }
@@ -5461,7 +5519,8 @@ PROMPT;
     {
         $autocomplete ??= app(AutocompleteEngine::class);
         $ghostText = $this->draftGhostText($autocomplete, $draft);
-        $promptLines = $this->draftPromptLines($cwd, $draft, $ghostText);
+        $layout = $this->buildDraftPromptLayout($cwd, $draft, $ghostText);
+        $promptLines = $layout['lines'];
 
         $this->writeRaw("\033[H\033[2J");
         foreach ($promptLines as $index => $promptLine) {
@@ -5484,13 +5543,12 @@ PROMPT;
             $this->writeRaw(sprintf("\033[%dA", count($promptLines) - 1));
         }
 
-        if ($draft->currentLineIndex() > 0) {
-            $this->writeRaw(sprintf("\033[%dB", $draft->currentLineIndex()));
+        if ($layout['cursorLineIndex'] > 0) {
+            $this->writeRaw(sprintf("\033[%dB", $layout['cursorLineIndex']));
         }
-        $cursorWidth = $this->rawPromptWidth($cwd, $draft->currentLineIndex() > 0) + $this->displayWidth($draft->beforeCursor());
         $this->writeRaw("\r");
-        if ($cursorWidth > 0) {
-            $this->writeRaw(sprintf("\033[%dC", $cursorWidth));
+        if ($layout['cursorColumn'] > 0) {
+            $this->writeRaw(sprintf("\033[%dC", $layout['cursorColumn']));
         }
     }
 
@@ -5499,20 +5557,134 @@ PROMPT;
      */
     private function draftPromptLines(string $cwd, DraftInputBuffer $draft, ?string $ghostText = null): array
     {
-        $lines = $draft->visibleLines();
+        return $this->buildDraftPromptLayout($cwd, $draft, $ghostText)['lines'];
+    }
 
-        return array_map(function (string $line, int $index) use ($cwd, $lines, $ghostText): string {
-            $prefix = $index === 0
-                ? $this->formatter()->prompt($cwd)
-                : $this->formatter()->continuationPrompt();
+    /**
+     * @return array{lines: array<int, string>, cursorLineIndex: int, cursorColumn: int}
+     */
+    private function buildDraftPromptLayout(
+        string $cwd,
+        DraftInputBuffer $draft,
+        ?string $ghostText = null,
+        ?int $terminalWidth = null,
+    ): array {
+        $terminalWidth ??= $this->terminalWidth();
+        $promptPrefix = $this->formatter()->prompt($cwd);
+        $continuationPrefix = $this->formatter()->continuationPrompt();
+        $promptPrefixWidth = $this->rawPromptWidth($cwd, false);
+        $continuationPrefixWidth = $this->rawPromptWidth($cwd, true);
+        $logicalLines = $draft->visibleLines();
 
-            $content = OutputFormatter::escape($line);
-            if ($ghostText !== null && $ghostText !== '' && $index === count($lines) - 1) {
-                $content .= $ghostText;
+        $lines = [];
+        $cursorLineIndex = 0;
+        $cursorColumn = $promptPrefixWidth;
+
+        foreach ($logicalLines as $logicalIndex => $lineText) {
+            $firstPrefix = $logicalIndex === 0 ? $promptPrefix : $continuationPrefix;
+            $firstPrefixWidth = $logicalIndex === 0 ? $promptPrefixWidth : $continuationPrefixWidth;
+            $segments = $this->wrapPromptText(
+                $lineText,
+                $terminalWidth,
+                $firstPrefixWidth,
+                $continuationPrefixWidth,
+            );
+
+            if ($logicalIndex === $draft->currentLineIndex()) {
+                $cursorSegments = $this->wrapPromptText(
+                    $draft->beforeCursor(),
+                    $terminalWidth,
+                    $firstPrefixWidth,
+                    $continuationPrefixWidth,
+                );
+                $cursorLineIndex = count($lines) + count($cursorSegments) - 1;
+                $cursorPrefixWidth = count($cursorSegments) === 1 ? $firstPrefixWidth : $continuationPrefixWidth;
+                $cursorColumn = $cursorPrefixWidth + $this->displayWidth($cursorSegments[array_key_last($cursorSegments)]);
             }
 
-            return $prefix . $content;
-        }, $lines, array_keys($lines));
+            foreach ($segments as $segmentIndex => $segment) {
+                $prefix = $segmentIndex === 0 ? $firstPrefix : $continuationPrefix;
+                $content = OutputFormatter::escape($segment);
+
+                if ($ghostText !== null
+                    && $ghostText !== ''
+                    && $logicalIndex === count($logicalLines) - 1
+                    && $segmentIndex === count($segments) - 1
+                    && count($segments) === 1) {
+                    $content .= $ghostText;
+                }
+
+                $lines[] = $prefix . $content;
+            }
+        }
+
+        return [
+            'lines' => $lines,
+            'cursorLineIndex' => $cursorLineIndex,
+            'cursorColumn' => $cursorColumn,
+        ];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function wrapPromptText(
+        string $text,
+        int $terminalWidth,
+        int $firstPrefixWidth,
+        int $continuationPrefixWidth,
+    ): array {
+        $segments = [];
+        $remaining = $text;
+        $firstSegment = true;
+
+        do {
+            $prefixWidth = $firstSegment ? $firstPrefixWidth : $continuationPrefixWidth;
+            [$segment, $remaining] = $this->takeTextByDisplayWidth(
+                $remaining,
+                max(1, $terminalWidth - $prefixWidth),
+            );
+            $segments[] = $segment;
+            $firstSegment = false;
+        } while ($remaining !== '');
+
+        return $segments;
+    }
+
+    /**
+     * @return array{0: string, 1: string}
+     */
+    private function takeTextByDisplayWidth(string $text, int $maxWidth): array
+    {
+        if ($text === '') {
+            return ['', ''];
+        }
+
+        $characters = $this->textCharacters($text);
+        $segment = '';
+        $width = 0;
+
+        foreach ($characters as $index => $character) {
+            $characterWidth = max(1, $this->displayWidth($character));
+            if ($segment !== '' && $width + $characterWidth > $maxWidth) {
+                return [$segment, implode('', array_slice($characters, $index))];
+            }
+
+            $segment .= $character;
+            $width += $characterWidth;
+        }
+
+        return [$segment, ''];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function textCharacters(string $text): array
+    {
+        $characters = preg_split('//u', $text, -1, PREG_SPLIT_NO_EMPTY);
+
+        return $characters === false ? str_split($text) : $characters;
     }
 
     private function draftGhostText(AutocompleteEngine $autocomplete, DraftInputBuffer $draft): ?string
@@ -5696,6 +5868,11 @@ PROMPT;
     private function rawPromptWidth(string $cwd, bool $continuationPrompt): int
     {
         return $this->displayWidth($continuationPrompt ? '… ' : "{$cwd} ❯ ");
+    }
+
+    private function terminalWidth(): int
+    {
+        return max(10, (new Terminal)->getWidth());
     }
 
     private function displayWidth(string $text): int

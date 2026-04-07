@@ -4,9 +4,6 @@ declare(strict_types=1);
 
 namespace App\Services\Memory;
 
-use App\Services\Agent\AgentLoop;
-use App\Services\Agent\MessageHistory;
-
 /**
  * Manual memory consolidation (/dream command).
  * Reviews session transcripts and organizes persistent memories.
@@ -24,6 +21,8 @@ class DreamConsolidator
      */
     public function buildConsolidationPrompt(string $memoryRoot, string $transcriptDir): string
     {
+        $memoryFile = $this->memoryFilePath($memoryRoot);
+
         return <<<PROMPT
 # Dream: Memory Consolidation
 
@@ -31,16 +30,16 @@ You are performing a dream — a reflective pass over your memory files.
 Synthesize what you've learned recently into durable, well-organized memories
 so that future sessions can orient quickly.
 
-Memory directory: `{$memoryRoot}`
+Persistent memory file: `{$memoryFile}`
 Session transcripts: `{$transcriptDir}` (JSONL files — grep narrowly, don't read whole files)
 
 ---
 
 ## Phase 1 — Orient
 
-- List what already exists in the memory directory
-- Read existing memories to understand what's stored
-- If memory.json exists, review its structure
+- Read only the persistent memory file to understand what's stored
+- Do not list the parent directory or read sibling files such as settings.json; they may contain secrets
+- If memory.json does not exist, continue with empty memory context
 
 ## Phase 2 — Gather recent signal
 
@@ -92,9 +91,7 @@ PROMPT;
             return $this->transcriptDir;
         }
 
-        $home = $_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir();
-
-        return "{$home}/.haocode/sessions";
+        return $this->defaultTranscriptDir();
     }
 
     /**
@@ -121,5 +118,62 @@ PROMPT;
             'total_chars' => $totalChars,
             'last_consolidated' => $this->lock->readLastConsolidatedAt(),
         ];
+    }
+
+    private function memoryFilePath(string $memoryRoot): string
+    {
+        return rtrim($memoryRoot, '/\\').'/memory.json';
+    }
+
+    private function defaultTranscriptDir(): string
+    {
+        $configuredPath = $this->configuredSessionPath();
+        if ($configuredPath !== null) {
+            return $configuredPath;
+        }
+
+        $storagePath = $this->storageSessionPath();
+        if ($storagePath !== null) {
+            return $storagePath;
+        }
+
+        $storagePath = $_SERVER['LARAVEL_STORAGE_PATH'] ?? getenv('LARAVEL_STORAGE_PATH') ?: null;
+        if (is_string($storagePath) && $storagePath !== '') {
+            return rtrim($storagePath, '/\\').'/app/haocode/sessions';
+        }
+
+        $home = $_SERVER['HOME'] ?? getenv('HOME') ?: sys_get_temp_dir();
+
+        return rtrim($home, '/\\').'/.haocode/storage/app/haocode/sessions';
+    }
+
+    private function configuredSessionPath(): ?string
+    {
+        if (! function_exists('config')) {
+            return null;
+        }
+
+        try {
+            $path = config('haocode.session_path');
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return is_string($path) && $path !== '' ? $path : null;
+    }
+
+    private function storageSessionPath(): ?string
+    {
+        if (! function_exists('storage_path')) {
+            return null;
+        }
+
+        try {
+            $path = storage_path('app/haocode/sessions');
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return is_string($path) && $path !== '' ? $path : null;
     }
 }

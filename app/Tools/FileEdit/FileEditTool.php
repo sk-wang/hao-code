@@ -34,7 +34,7 @@ DESC;
             'properties' => [
                 'file_path' => [
                     'type' => 'string',
-                    'description' => 'The absolute path to the file to modify',
+                    'description' => 'The file path to modify. Relative paths are resolved against the current working directory.',
                 ],
                 'old_string' => [
                     'type' => 'string',

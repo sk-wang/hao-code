@@ -20,7 +20,7 @@ class FileReadTool extends BaseTool
 Reads a file from the local filesystem. You can access any file directly by using this tool.
 
 Usage:
-- The file_path parameter must be an absolute path, not a relative path.
+- The file_path parameter may be absolute or relative. Relative paths are resolved against the current working directory.
 - By default, it reads up to 2000 lines starting from the beginning of the file.
 - You can optionally specify a line offset and limit.
 - Results are returned with line numbers starting at 1.
@@ -36,7 +36,7 @@ DESC;
             'properties' => [
                 'file_path' => [
                     'type' => 'string',
-                    'description' => 'The absolute path to the file to read',
+                    'description' => 'The file path to read. Relative paths are resolved against the current working directory.',
                 ],
                 'offset' => [
                     'type' => 'integer',

@@ -274,6 +274,26 @@ class BashToolTest extends TestCase
         $this->assertTrue($this->tool->isReadOnlyCommand('echo hello world'));
     }
 
+    public function test_echo_with_output_redirection_is_not_read_only(): void
+    {
+        $this->assertFalse($this->tool->isReadOnlyCommand('echo hello > note.txt'));
+    }
+
+    public function test_printf_with_output_redirection_is_not_read_only(): void
+    {
+        $this->assertFalse($this->tool->isReadOnlyCommand("printf 'hello' > note.txt"));
+    }
+
+    public function test_tee_with_file_target_is_not_read_only(): void
+    {
+        $this->assertFalse($this->tool->isReadOnlyCommand('tee -a note.txt'));
+    }
+
+    public function test_printf_piped_to_read_command_stays_read_only(): void
+    {
+        $this->assertTrue($this->tool->isReadOnlyCommand("printf 'hello' | wc -c"));
+    }
+
     public function test_rm_is_not_read_only(): void
     {
         $this->assertFalse($this->tool->isReadOnlyCommand('rm -rf /tmp/dir'));

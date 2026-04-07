@@ -198,6 +198,77 @@ class HaoCodeCommandTest extends TestCase
         ));
     }
 
+    public function test_read_permission_prompt_answer_reads_a_single_key_in_raw_mode(): void
+    {
+        $command = new HaoCodeCommand;
+        $handle = fopen('php://temp', 'r+');
+        fwrite($handle, 'a');
+        rewind($handle);
+
+        $answer = $this->invoke($command, 'readPermissionPromptAnswer', $handle, true);
+
+        fclose($handle);
+
+        $this->assertSame('a', $answer);
+    }
+
+    public function test_read_permission_prompt_answer_treats_enter_as_allow_once_default(): void
+    {
+        $command = new HaoCodeCommand;
+        $handle = fopen('php://temp', 'r+');
+        fwrite($handle, "\r");
+        rewind($handle);
+
+        $answer = $this->invoke($command, 'readPermissionPromptAnswer', $handle, true);
+
+        fclose($handle);
+
+        $this->assertSame('', $answer);
+    }
+
+    public function test_build_permission_preview_flattens_multiline_bash_commands(): void
+    {
+        $command = new HaoCodeCommand;
+
+        $lines = $this->invoke($command, 'buildPermissionPreview', 'Bash', [
+            'command' => "cat > note.txt << 'EOF'\nhello\nEOF",
+        ]);
+
+        $this->assertStringContainsString('\\nhello\\nEOF', $lines[1]);
+        $this->assertStringNotContainsString("\n", $lines[1]);
+    }
+
+    public function test_build_draft_prompt_layout_wraps_long_lines_to_the_terminal_width(): void
+    {
+        $command = new HaoCodeCommand;
+        $draft = new DraftInputBuffer('abcdefghij');
+
+        $layout = $this->invoke($command, 'buildDraftPromptLayout', 'demo', $draft, null, 10);
+
+        $this->assertSame([
+            '<fg=green>demo</> <fg=cyan>❯</> abc',
+            '<fg=gray>…</> defghij',
+        ], $layout['lines']);
+        $this->assertSame(1, $layout['cursorLineIndex']);
+        $this->assertSame(9, $layout['cursorColumn']);
+    }
+
+    public function test_build_draft_prompt_layout_tracks_cursor_inside_wrapped_line(): void
+    {
+        $command = new HaoCodeCommand;
+        $draft = new DraftInputBuffer('abcdefghij');
+
+        $draft->moveHome();
+        for ($i = 0; $i < 4; $i++) {
+            $draft->moveRight();
+        }
+
+        $layout = $this->invoke($command, 'buildDraftPromptLayout', 'demo', $draft, null, 10);
+
+        $this->assertSame(1, $layout['cursorLineIndex']);
+        $this->assertSame(3, $layout['cursorColumn']);
+    }
+
     public function test_build_permission_rule_uses_the_observable_tool_input(): void
     {
         $command = new HaoCodeCommand;

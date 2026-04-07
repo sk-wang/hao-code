@@ -23,6 +23,7 @@ Writes a file to the local filesystem.
 
 Usage:
 - This tool will overwrite the existing file if there is one at the provided path.
+- You may provide an absolute path or a path relative to the current working directory.
 - If this is an existing file, you MUST use the Read tool first to read the file's contents.
 - Only use emojis if the user explicitly requests it.
 - NEVER create documentation files (*.md) or README files unless explicitly requested.
@@ -37,7 +38,7 @@ DESC;
             'properties' => [
                 'file_path' => [
                     'type' => 'string',
-                    'description' => 'The absolute path to the file to write (must be absolute, not relative)',
+                    'description' => 'The file path to write. Absolute paths are preferred; relative paths are resolved against the current working directory.',
                 ],
                 'content' => [
                     'type' => 'string',

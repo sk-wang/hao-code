@@ -524,6 +524,10 @@ DESC;
      */
     public function isReadOnlyCommand(string $command): bool
     {
+        if ($this->hasWriteSideEffects($command)) {
+            return false;
+        }
+
         $readOnlyPatterns = [
             '/^\s*(cat|head|tail|less|more|wc|sort|uniq|cut|tr|tee)\b/',
             '/^\s*(ls|find|locate|which|whereis|file|stat|du|df)\b/',
@@ -543,6 +547,51 @@ DESC;
             if (preg_match($pattern . 'i', $command)) {
                 return true;
             }
+        }
+
+        return false;
+    }
+
+    private function hasWriteSideEffects(string $command): bool
+    {
+        $trimmed = trim($command);
+        if ($trimmed === '') {
+            return false;
+        }
+
+        // Treat output redirection as a write so commands like
+        // `printf foo > file.txt` still require approval.
+        if (preg_match('/(?:^|[\s;&(])(?:\d+)?>>?(?![&(])\s*\S+/i', $trimmed) === 1) {
+            return true;
+        }
+
+        if (preg_match('/^\s*tee\b/i', $trimmed) === 1) {
+            $parts = preg_split('/\s+/', $trimmed) ?: [];
+            array_shift($parts);
+
+            $expectingLiteralTargets = false;
+            foreach ($parts as $part) {
+                if ($part === '') {
+                    continue;
+                }
+
+                if ($expectingLiteralTargets) {
+                    return true;
+                }
+
+                if ($part === '--') {
+                    $expectingLiteralTargets = true;
+                    continue;
+                }
+
+                if (str_starts_with($part, '-')) {
+                    continue;
+                }
+
+                return true;
+            }
+
+            return false;
         }
 
         return false;
