@@ -36,6 +36,14 @@ class AgentServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
+        // Register Validator (not included by default in Laravel Zero)
+        if (!$this->app->bound('validator')) {
+            $this->app->singleton('validator', fn ($app) => new \Illuminate\Validation\Factory(
+                new \Illuminate\Translation\Translator(new \Illuminate\Translation\ArrayLoader, 'en'),
+                $app,
+            ));
+        }
+
         $this->app->singleton(SettingsManager::class);
         $this->app->singleton(SessionManager::class);
 

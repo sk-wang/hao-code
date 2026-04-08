@@ -293,4 +293,4 @@ php vendor/bin/phpunit
 
 ---
 
-**[MIT License](LICENSE)** · Built with Laravel 12 · Powered by Anthropic-compatible APIs
+**[MIT License](LICENSE)** · Built with Laravel Zero · Powered by Anthropic-compatible APIs
