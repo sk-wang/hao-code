@@ -13,10 +13,8 @@ use App\Sdk\QueryResult;
 use App\Sdk\SdkSkill;
 use App\Sdk\SdkTool;
 use App\Sdk\StructuredResult;
-use App\Services\Agent\AgentLoopFactory;
 use App\Services\Api\StreamingClient;
 use App\Services\Settings\SettingsManager;
-use Illuminate\Contracts\Console\Kernel;
 use Symfony\Component\HttpClient\Response\MockResponse;
 use Tests\Support\MockAnthropicSse;
 use Tests\TestCase;
@@ -394,7 +392,7 @@ class SdkE2ETest extends TestCase
 
     public function test_abort_controller_signals_abort(): void
     {
-        $abort = new AbortController();
+        $abort = new AbortController;
         $this->assertFalse($abort->isAborted());
 
         $callbackFired = false;
@@ -423,7 +421,8 @@ class SdkE2ETest extends TestCase
 
     public function test_sdk_tool_custom_tool_registers_and_works(): void
     {
-        $customTool = new class extends SdkTool {
+        $customTool = new class extends SdkTool
+        {
             public function name(): string
             {
                 return 'GetWeather';
@@ -477,7 +476,8 @@ class SdkE2ETest extends TestCase
 
     public function test_sdk_tool_generates_correct_input_schema(): void
     {
-        $tool = new class extends SdkTool {
+        $tool = new class extends SdkTool
+        {
             public function name(): string
             {
                 return 'TestTool';
@@ -550,12 +550,28 @@ class SdkE2ETest extends TestCase
 
     public function test_config_accepts_new_sdk_options(): void
     {
-        $abort = new AbortController();
-        $tool = new class extends SdkTool {
-            public function name(): string { return 'Noop'; }
-            public function description(): string { return 'No-op.'; }
-            public function parameters(): array { return []; }
-            public function handle(array $input): string { return 'ok'; }
+        $abort = new AbortController;
+        $tool = new class extends SdkTool
+        {
+            public function name(): string
+            {
+                return 'Noop';
+            }
+
+            public function description(): string
+            {
+                return 'No-op.';
+            }
+
+            public function parameters(): array
+            {
+                return [];
+            }
+
+            public function handle(array $input): string
+            {
+                return 'ok';
+            }
         };
 
         $config = new HaoCodeConfig(
@@ -607,7 +623,7 @@ class SdkE2ETest extends TestCase
         $method = new \ReflectionMethod(HaoCode::class, 'buildStreamingClient');
 
         // No overrides → returns null (use container default)
-        $defaultConfig = new HaoCodeConfig();
+        $defaultConfig = new HaoCodeConfig;
         $this->assertNull($method->invoke(null, $defaultConfig));
 
         // With apiKey override → returns custom StreamingClient
@@ -644,7 +660,7 @@ class SdkE2ETest extends TestCase
         chdir($this->projectDir);
 
         // Default config (no apiKey/baseUrl/model overrides) → uses container singleton
-        $result = HaoCode::query('Hello', new HaoCodeConfig());
+        $result = HaoCode::query('Hello', new HaoCodeConfig);
 
         $this->assertStringContainsString('Default client response', $result->text);
     }
@@ -688,7 +704,7 @@ class SdkE2ETest extends TestCase
         ));
 
         // Verify the system prompt was set in SettingsManager
-        $settings = app(\App\Services\Settings\SettingsManager::class);
+        $settings = app(SettingsManager::class);
         $this->assertSame('You are a pirate. Always say "Arrr!".', $settings->getSystemPrompt());
     }
 
@@ -708,7 +724,7 @@ class SdkE2ETest extends TestCase
             appendSystemPrompt: 'Always respond in JSON format.',
         ));
 
-        $settings = app(\App\Services\Settings\SettingsManager::class);
+        $settings = app(SettingsManager::class);
         $this->assertSame('Always respond in JSON format.', $settings->getAppendSystemPrompt());
     }
 
@@ -718,13 +734,25 @@ class SdkE2ETest extends TestCase
 
     public function test_sdk_tool_error_is_returned_to_model(): void
     {
-        $failingTool = new class extends SdkTool {
-            public function name(): string { return 'FailTool'; }
-            public function description(): string { return 'A tool that always fails.'; }
-            public function parameters(): array {
+        $failingTool = new class extends SdkTool
+        {
+            public function name(): string
+            {
+                return 'FailTool';
+            }
+
+            public function description(): string
+            {
+                return 'A tool that always fails.';
+            }
+
+            public function parameters(): array
+            {
                 return ['input' => ['type' => 'string', 'required' => true]];
             }
-            public function handle(array $input): string {
+
+            public function handle(array $input): string
+            {
                 throw new \RuntimeException('Database connection refused');
             }
         };
@@ -756,13 +784,25 @@ class SdkE2ETest extends TestCase
 
     public function test_custom_and_builtin_tools_work_together(): void
     {
-        $dbTool = new class extends SdkTool {
-            public function name(): string { return 'QueryDB'; }
-            public function description(): string { return 'Query the database.'; }
-            public function parameters(): array {
+        $dbTool = new class extends SdkTool
+        {
+            public function name(): string
+            {
+                return 'QueryDB';
+            }
+
+            public function description(): string
+            {
+                return 'Query the database.';
+            }
+
+            public function parameters(): array
+            {
                 return ['sql' => ['type' => 'string', 'required' => true]];
             }
-            public function handle(array $input): string {
+
+            public function handle(array $input): string
+            {
                 return json_encode([
                     ['id' => 1, 'name' => 'Alice', 'role' => 'admin'],
                     ['id' => 2, 'name' => 'Bob', 'role' => 'user'],
@@ -799,9 +839,9 @@ class SdkE2ETest extends TestCase
         ));
 
         $this->assertStringContainsString('2 users', $result->text);
-        $this->assertFileExists($this->projectDir . '/users.json');
+        $this->assertFileExists($this->projectDir.'/users.json');
 
-        $users = json_decode(file_get_contents($this->projectDir . '/users.json'), true);
+        $users = json_decode(file_get_contents($this->projectDir.'/users.json'), true);
         $this->assertCount(2, $users);
         $this->assertSame('Alice', $users[0]['name']);
     }
@@ -850,21 +890,38 @@ class SdkE2ETest extends TestCase
 
     public function test_conversation_custom_tool_persists_across_turns(): void
     {
-        $statefulTool = new class extends SdkTool {
+        $statefulTool = new class extends SdkTool
+        {
             private array $items = [];
 
-            public function name(): string { return 'CartAdd'; }
-            public function description(): string { return 'Add item to cart.'; }
-            public function parameters(): array {
+            public function name(): string
+            {
+                return 'CartAdd';
+            }
+
+            public function description(): string
+            {
+                return 'Add item to cart.';
+            }
+
+            public function parameters(): array
+            {
                 return ['item' => ['type' => 'string', 'required' => true]];
             }
-            public function handle(array $input): string {
+
+            public function handle(array $input): string
+            {
                 $this->items[] = $input['item'];
-                return 'Cart: ' . implode(', ', $this->items) . ' (' . count($this->items) . ' items)';
+
+                return 'Cart: '.implode(', ', $this->items).' ('.count($this->items).' items)';
             }
+
             // Stateful tools must NOT be read-only, otherwise they get
             // fork-executed and state changes are lost in the child process.
-            public function isReadOnly(array $input): bool { return false; }
+            public function isReadOnly(array $input): bool
+            {
+                return false;
+            }
         };
 
         $this->bootWithMock([
@@ -874,6 +931,7 @@ class SdkE2ETest extends TestCase
                 $toolResult = MockAnthropicSse::lastToolResultText($payload);
                 $this->assertStringContainsString('apple', $toolResult);
                 $this->assertStringContainsString('1 items', $toolResult);
+
                 return MockAnthropicSse::textResponse('Added apple to cart.');
             },
             // Turn 2: Add banana — tool should remember apple from turn 1
@@ -883,6 +941,7 @@ class SdkE2ETest extends TestCase
                 $this->assertStringContainsString('apple', $toolResult);
                 $this->assertStringContainsString('banana', $toolResult);
                 $this->assertStringContainsString('2 items', $toolResult);
+
                 return MockAnthropicSse::textResponse('Cart now has apple and banana.');
             },
         ]);
@@ -918,7 +977,7 @@ class SdkE2ETest extends TestCase
         $result = HaoCode::query('What is the answer?');
 
         // String concatenation
-        $this->assertSame('Result: The answer is 42.', 'Result: ' . $result);
+        $this->assertSame('Result: The answer is 42.', 'Result: '.$result);
 
         // str_contains
         $this->assertTrue(str_contains((string) $result, '42'));
@@ -936,18 +995,50 @@ class SdkE2ETest extends TestCase
 
     public function test_multiple_sdk_tools_registered_simultaneously(): void
     {
-        $toolA = new class extends SdkTool {
-            public function name(): string { return 'ToolAlpha'; }
-            public function description(): string { return 'First tool.'; }
-            public function parameters(): array { return []; }
-            public function handle(array $input): string { return 'alpha-result'; }
+        $toolA = new class extends SdkTool
+        {
+            public function name(): string
+            {
+                return 'ToolAlpha';
+            }
+
+            public function description(): string
+            {
+                return 'First tool.';
+            }
+
+            public function parameters(): array
+            {
+                return [];
+            }
+
+            public function handle(array $input): string
+            {
+                return 'alpha-result';
+            }
         };
 
-        $toolB = new class extends SdkTool {
-            public function name(): string { return 'ToolBeta'; }
-            public function description(): string { return 'Second tool.'; }
-            public function parameters(): array { return []; }
-            public function handle(array $input): string { return 'beta-result'; }
+        $toolB = new class extends SdkTool
+        {
+            public function name(): string
+            {
+                return 'ToolBeta';
+            }
+
+            public function description(): string
+            {
+                return 'Second tool.';
+            }
+
+            public function parameters(): array
+            {
+                return [];
+            }
+
+            public function handle(array $input): string
+            {
+                return 'beta-result';
+            }
         };
 
         $this->bootWithMock([
@@ -1106,11 +1197,27 @@ class SdkE2ETest extends TestCase
 
     public function test_sdk_skills_and_tools_work_together(): void
     {
-        $dbTool = new class extends SdkTool {
-            public function name(): string { return 'CheckDB'; }
-            public function description(): string { return 'Check database status.'; }
-            public function parameters(): array { return []; }
-            public function handle(array $input): string { return 'DB: 3 tables, 150 rows, healthy'; }
+        $dbTool = new class extends SdkTool
+        {
+            public function name(): string
+            {
+                return 'CheckDB';
+            }
+
+            public function description(): string
+            {
+                return 'Check database status.';
+            }
+
+            public function parameters(): array
+            {
+                return [];
+            }
+
+            public function handle(array $input): string
+            {
+                return 'DB: 3 tables, 150 rows, healthy';
+            }
         };
 
         $this->bootWithMock([
@@ -1148,6 +1255,201 @@ class SdkE2ETest extends TestCase
         ));
 
         $this->assertStringContainsString('Health check passed', $result->text);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 35: Conversation path applies system prompt overrides
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_conversation_applies_system_prompt_override_before_send(): void
+    {
+        $this->bootWithMock([
+            MockAnthropicSse::textResponse('Conversation prompt response.'),
+        ]);
+
+        chdir($this->projectDir);
+
+        $conv = HaoCode::conversation(new HaoCodeConfig(
+            systemPrompt: 'You are a release manager. Always think about rollback safety.',
+        ));
+
+        $result = $conv->send('Give me a deployment recommendation.');
+
+        $this->assertStringContainsString('Conversation prompt response', $result->text);
+        $settings = app(SettingsManager::class);
+        $this->assertSame(
+            'You are a release manager. Always think about rollback safety.',
+            $settings->getSystemPrompt(),
+        );
+
+        $conv->close();
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 36: Conversation path registers SDK skills
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_conversation_registers_sdk_skills_before_send(): void
+    {
+        $this->bootWithMock([
+            MockAnthropicSse::toolUseResponse('toolu_skill_conv', 'Skill', [
+                'skill' => 'release-guard',
+                'args' => 'billing.php',
+            ]),
+            function (array $payload): MockResponse {
+                $toolResult = MockAnthropicSse::lastToolResultText($payload);
+                $this->assertNotNull($toolResult);
+                $this->assertStringContainsString('Validate release readiness', $toolResult);
+                $this->assertStringContainsString('billing.php', $toolResult);
+                $this->assertStringContainsString('rollback checklist', $toolResult);
+
+                return MockAnthropicSse::textResponse('Release guard review complete.');
+            },
+        ]);
+
+        chdir($this->projectDir);
+
+        $conv = HaoCode::conversation(new HaoCodeConfig(
+            skills: [
+                new SdkSkill(
+                    name: 'release-guard',
+                    description: 'Validate release readiness before deployment',
+                    prompt: 'Validate release readiness for $ARGUMENTS and include a rollback checklist.',
+                ),
+            ],
+        ));
+
+        $result = $conv->send('Review billing.php before deployment.');
+
+        $this->assertStringContainsString('Release guard review complete', $result->text);
+
+        $conv->close();
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 37: HaoCode::structured() parses fenced JSON
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_structured_parses_markdown_fenced_json_response(): void
+    {
+        $this->bootWithMock([
+            MockAnthropicSse::textResponse(<<<'JSON'
+```json
+{"category":"shipping","priority":"high","score":95}
+```
+JSON),
+        ]);
+
+        chdir($this->projectDir);
+
+        $result = HaoCode::structured('Classify this support ticket.', [
+            'type' => 'object',
+            'properties' => [
+                'category' => ['type' => 'string'],
+                'priority' => ['type' => 'string'],
+                'score' => ['type' => 'integer'],
+            ],
+            'required' => ['category', 'priority', 'score'],
+        ]);
+
+        $this->assertSame('shipping', $result->category);
+        $this->assertSame('high', $result['priority']);
+        $this->assertSame(95, $result->score);
+        $this->assertInstanceOf(QueryResult::class, $result->queryResult);
+        $this->assertStringContainsString('```json', $result->rawText);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 38: HaoCode::resume() restores prior session context
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_resume_restores_previous_session_history(): void
+    {
+        $this->bootWithMock([
+            MockAnthropicSse::textResponse('The project codename is ORBIT.'),
+        ]);
+
+        chdir($this->projectDir);
+
+        $seedResult = HaoCode::query('Remember that the project codename is ORBIT.');
+        $this->assertNotNull($seedResult->sessionId);
+        $this->assertFileExists($this->sessionDir.'/'.$seedResult->sessionId.'.jsonl');
+
+        $this->bootWithMock([
+            function (array $payload): MockResponse {
+                $this->assertSame(3, MockAnthropicSse::messageCount($payload));
+                $this->assertSame('What is the project codename?', MockAnthropicSse::lastUserText($payload));
+                $this->assertSame(
+                    'Remember that the project codename is ORBIT.',
+                    $payload['messages'][0]['content'] ?? null,
+                );
+                $this->assertSame('assistant', $payload['messages'][1]['role'] ?? null);
+
+                return MockAnthropicSse::textResponse('The codename is ORBIT.');
+            },
+        ]);
+
+        chdir($this->projectDir);
+
+        $conv = HaoCode::resume($seedResult->sessionId);
+        $result = $conv->send('What is the project codename?');
+
+        $this->assertStringContainsString('ORBIT', $result->text);
+        $this->assertSame(1, $result->turnsUsed);
+
+        $conv->close();
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Test 39: continueSession prefers the matching working directory
+    // ──────────────────────────────────────────────────────────────
+
+    public function test_query_continue_session_prefers_latest_session_in_same_working_directory(): void
+    {
+        $otherProjectDir = $this->tempRoot.'/other-project';
+        mkdir($otherProjectDir, 0755, true);
+
+        $this->bootWithMock([
+            MockAnthropicSse::textResponse('Workspace alpha remembered.'),
+        ]);
+
+        chdir($this->tempRoot);
+        HaoCode::query('Remember that this workspace is alpha.', new HaoCodeConfig(
+            cwd: $this->projectDir,
+        ));
+
+        sleep(1);
+
+        $this->bootWithMock([
+            MockAnthropicSse::textResponse('Workspace beta remembered.'),
+        ]);
+
+        chdir($this->tempRoot);
+        HaoCode::query('Remember that this workspace is beta.', new HaoCodeConfig(
+            cwd: $otherProjectDir,
+        ));
+
+        $this->bootWithMock([
+            function (array $payload): MockResponse {
+                $this->assertSame(3, MockAnthropicSse::messageCount($payload));
+                $this->assertSame('Which workspace am I in?', MockAnthropicSse::lastUserText($payload));
+                $this->assertSame(
+                    'Remember that this workspace is alpha.',
+                    $payload['messages'][0]['content'] ?? null,
+                );
+
+                return MockAnthropicSse::textResponse('You are in workspace alpha.');
+            },
+        ]);
+
+        chdir($this->projectDir);
+
+        $result = HaoCode::query('Which workspace am I in?', new HaoCodeConfig(
+            continueSession: true,
+            cwd: $this->projectDir,
+        ));
+
+        $this->assertStringContainsString('workspace alpha', $result->text);
     }
 
     // ══════════════════════════════════════════════════════════════

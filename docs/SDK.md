@@ -48,6 +48,11 @@ $result = HaoCode::query('What files are in this directory?');
 echo $result;
 ```
 
+Runnable examples:
+
+- `examples/code-review-agent.php` — compact review-focused demo
+- `examples/support-ops-agent.php` — end-to-end support-operations agent using query, stream, conversation, resume, continue, structured output, custom tools, skills, callbacks, and abort wiring
+
 ---
 
 ## HaoCode API Reference

@@ -5574,7 +5574,11 @@ PROMPT;
         $continuationPrefix = $this->formatter()->continuationPrompt();
         $promptPrefixWidth = $this->rawPromptWidth($cwd, false);
         $continuationPrefixWidth = $this->rawPromptWidth($cwd, true);
-        $logicalLines = $draft->visibleLines();
+        $renderState = $this->draftRenderState($draft);
+        $logicalLines = $renderState['logical_lines'];
+        $cursorLogicalLines = $renderState['cursor_lines'];
+        $cursorLogicalIndex = max(0, count($cursorLogicalLines) - 1);
+        $cursorLogicalText = $cursorLogicalLines[$cursorLogicalIndex] ?? '';
 
         $lines = [];
         $cursorLineIndex = 0;
@@ -5590,9 +5594,9 @@ PROMPT;
                 $continuationPrefixWidth,
             );
 
-            if ($logicalIndex === $draft->currentLineIndex()) {
+            if ($logicalIndex === $cursorLogicalIndex) {
                 $cursorSegments = $this->wrapPromptText(
-                    $draft->beforeCursor(),
+                    $cursorLogicalText,
                     $terminalWidth,
                     $firstPrefixWidth,
                     $continuationPrefixWidth,
@@ -5652,6 +5656,95 @@ PROMPT;
     }
 
     /**
+     * @return array{
+     *   logical_lines: array<int, string>,
+     *   cursor_lines: array<int, string>
+     * }
+     */
+    private function draftRenderState(DraftInputBuffer $draft): array
+    {
+        $preview = $draft->collapsedPastePreview();
+        if ($preview === null) {
+            return [
+                'logical_lines' => $draft->visibleLines(),
+                'cursor_lines' => [...$draft->committedLines(), $draft->beforeCursor()],
+            ];
+        }
+
+        return [
+            'logical_lines' => [$this->renderCollapsedPastePreview($preview, includeSuffix: true)],
+            'cursor_lines' => [$this->renderCollapsedPastePreview($preview, includeSuffix: false)],
+        ];
+    }
+
+    /**
+     * @param array{
+     *   prefix: string,
+     *   suffix: string,
+     *   char_count: int,
+     *   line_count: int,
+     *   byte_count: int
+     * } $preview
+     */
+    private function renderCollapsedPastePreview(array $preview, bool $includeSuffix): string
+    {
+        $leadingContext = $this->collapsedPasteContextSnippet($preview['prefix'], 24, fromEnd: true);
+        $trailingContext = $includeSuffix
+            ? $this->collapsedPasteContextSnippet($preview['suffix'], 24, fromEnd: false)
+            : '';
+
+        $placeholder = '[Pasted text';
+        $placeholder .= ' · ' . $this->formatCollapsedPasteSize((int) ($preview['byte_count'] ?? 0));
+        if (($preview['line_count'] ?? 0) > 0) {
+            $placeholder .= ' · +' . $preview['line_count'] . ' lines';
+        }
+        $placeholder .= ']';
+
+        return trim(implode(' ', array_filter([
+            $leadingContext,
+            $placeholder,
+            $trailingContext,
+        ], static fn (?string $part): bool => $part !== null && $part !== '')));
+    }
+
+    private function collapsedPasteContextSnippet(string $text, int $maxWidth, bool $fromEnd): string
+    {
+        $normalized = preg_replace('/\s+/', ' ', trim($text)) ?? '';
+        if ($normalized === '') {
+            return '';
+        }
+
+        if ($this->displayWidth($normalized) <= $maxWidth) {
+            return $normalized;
+        }
+
+        if ($fromEnd) {
+            $suffix = $this->takeTextFromEndByDisplayWidth($normalized, max(1, $maxWidth - 1));
+
+            return '…' . $suffix;
+        }
+
+        return $this->takeTextByDisplayWidth($normalized, max(1, $maxWidth - 1))[0] . '…';
+    }
+
+    private function formatCollapsedPasteSize(int $bytes): string
+    {
+        if ($bytes < 1024) {
+            return $bytes . ' B';
+        }
+
+        if ($bytes < 1024 * 1024) {
+            $value = round($bytes / 1024, 1);
+
+            return rtrim(rtrim(sprintf('%.1f', $value), '0'), '.') . ' KB';
+        }
+
+        $value = round($bytes / (1024 * 1024), 1);
+
+        return rtrim(rtrim(sprintf('%.1f', $value), '0'), '.') . ' MB';
+    }
+
+    /**
      * @return array{0: string, 1: string}
      */
     private function takeTextByDisplayWidth(string $text, int $maxWidth): array
@@ -5675,6 +5768,29 @@ PROMPT;
         }
 
         return [$segment, ''];
+    }
+
+    private function takeTextFromEndByDisplayWidth(string $text, int $maxWidth): string
+    {
+        if ($text === '') {
+            return '';
+        }
+
+        $characters = array_reverse($this->textCharacters($text));
+        $segment = '';
+        $width = 0;
+
+        foreach ($characters as $character) {
+            $characterWidth = max(1, $this->displayWidth($character));
+            if ($segment !== '' && $width + $characterWidth > $maxWidth) {
+                break;
+            }
+
+            $segment = $character . $segment;
+            $width += $characterWidth;
+        }
+
+        return $segment;
     }
 
     /**

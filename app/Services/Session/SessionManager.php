@@ -5,8 +5,12 @@ namespace App\Services\Session;
 class SessionManager
 {
     private string $sessionId;
+
     private string $sessionPath;
+
     private ?string $title = null;
+
+    private ?string $currentWorkingDirectory = null;
 
     public function __construct()
     {
@@ -34,6 +38,11 @@ class SessionManager
     {
         $this->sessionId = $sessionId;
         $this->title = $title;
+    }
+
+    public function setCurrentWorkingDirectory(?string $cwd): void
+    {
+        $this->currentWorkingDirectory = $cwd;
     }
 
     /**
@@ -97,6 +106,7 @@ class SessionManager
                 return $entry['title'] ?? null;
             }
         }
+
         return null;
     }
 
@@ -105,17 +115,21 @@ class SessionManager
      */
     public function recordEntry(array $entry): void
     {
-        if (!is_dir($this->sessionPath)) {
+        if (! is_dir($this->sessionPath)) {
             mkdir($this->sessionPath, 0755, true);
         }
 
         $line = json_encode(
             array_merge(
-                ['timestamp' => date('c'), 'session_id' => $this->sessionId, 'cwd' => getcwd() ?: null],
+                [
+                    'timestamp' => date('c'),
+                    'session_id' => $this->sessionId,
+                    'cwd' => $this->currentWorkingDirectory ?? (getcwd() ?: null),
+                ],
                 $entry
             ),
             JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
-        ) . "\n";
+        )."\n";
 
         file_put_contents($this->getFilePath(), $line, FILE_APPEND);
     }
@@ -146,12 +160,12 @@ class SessionManager
     public function loadSession(string $sessionId): array
     {
         // Try exact match first (file format: {sessionId}.jsonl)
-        $exactPath = $this->sessionPath . '/' . $sessionId . '.jsonl';
+        $exactPath = $this->sessionPath.'/'.$sessionId.'.jsonl';
         $files = file_exists($exactPath) ? [$exactPath] : [];
 
         // Fallback to glob for partial ID matching
         if (empty($files)) {
-            $pattern = $this->sessionPath . '/' . $sessionId . '*.jsonl';
+            $pattern = $this->sessionPath.'/'.$sessionId.'*.jsonl';
             $files = glob($pattern);
         }
 
@@ -179,7 +193,7 @@ class SessionManager
 
     private function getFilePath(): string
     {
-        return $this->sessionPath . '/' . $this->sessionId . '.jsonl';
+        return $this->sessionPath.'/'.$this->sessionId.'.jsonl';
     }
 
     public function findMostRecentSessionId(?string $cwd = null): ?string
@@ -229,11 +243,11 @@ class SessionManager
 
     private function generateSessionId(): string
     {
-        return date('Y-m-d_His') . '_' . bin2hex(random_bytes(4));
+        return date('Y-m-d_His').'_'.bin2hex(random_bytes(4));
     }
 
     /**
-     * @param array<int, array<string, mixed>> $entries
+     * @param  array<int, array<string, mixed>>  $entries
      */
     private function deriveBranchTitleBase(array $entries): string
     {
@@ -295,7 +309,7 @@ class SessionManager
     }
 
     /**
-     * @param array<int, array<string, mixed>> $entries
+     * @param  array<int, array<string, mixed>>  $entries
      */
     private function writeSessionEntries(string $sessionId, array $entries): void
     {

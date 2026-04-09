@@ -6,6 +6,7 @@ use App\Services\Agent\AgentLoop;
 use App\Services\Agent\AgentLoopFactory;
 use App\Services\Api\StreamingClient;
 use App\Services\Session\SessionManager;
+use App\Services\Settings\SettingsManager;
 use App\Tools\Skill\SkillLoader;
 
 /**
@@ -47,15 +48,17 @@ class HaoCode
      */
     public static function query(string $prompt, ?HaoCodeConfig $config = null): QueryResult
     {
-        $config ??= new HaoCodeConfig();
+        $config ??= new HaoCodeConfig;
 
         // Redirect to resume/continue if configured
         if ($config->sessionId !== null) {
             $conv = self::resume($config->sessionId, $config);
+
             return $conv->send($prompt);
         }
         if ($config->continueSession) {
             $conv = self::continueLatest($config->cwd, $config);
+
             return $conv->send($prompt);
         }
 
@@ -84,7 +87,7 @@ class HaoCode
      */
     public static function stream(string $prompt, ?HaoCodeConfig $config = null): \Generator
     {
-        $config ??= new HaoCodeConfig();
+        $config ??= new HaoCodeConfig;
 
         // Redirect to conversation stream if resuming
         if ($config->sessionId !== null) {
@@ -148,7 +151,8 @@ class HaoCode
      */
     public static function conversation(?HaoCodeConfig $config = null): Conversation
     {
-        $config ??= new HaoCodeConfig();
+        $config ??= new HaoCodeConfig;
+        self::prepareSdkEnvironment($config);
 
         /** @var AgentLoopFactory $factory */
         $factory = app(AgentLoopFactory::class);
@@ -167,7 +171,8 @@ class HaoCode
      */
     public static function resume(string $sessionId, ?HaoCodeConfig $config = null): Conversation
     {
-        $config ??= new HaoCodeConfig();
+        $config ??= new HaoCodeConfig;
+        self::prepareSdkEnvironment($config);
 
         /** @var AgentLoopFactory $factory */
         $factory = app(AgentLoopFactory::class);
@@ -225,10 +230,10 @@ class HaoCode
     {
         $schemaJson = json_encode($jsonSchema, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
 
-        $structuredPrompt = $prompt . "\n\n" .
-            "IMPORTANT: You MUST respond with ONLY a valid JSON object matching this schema. " .
-            "No markdown fences, no explanation, no extra text — just the raw JSON.\n\n" .
-            "Schema:\n" . $schemaJson;
+        $structuredPrompt = $prompt."\n\n".
+            'IMPORTANT: You MUST respond with ONLY a valid JSON object matching this schema. '.
+            "No markdown fences, no explanation, no extra text — just the raw JSON.\n\n".
+            "Schema:\n".$schemaJson;
 
         $queryResult = self::query($structuredPrompt, $config);
         $text = trim($queryResult->text);
@@ -240,9 +245,9 @@ class HaoCode
         }
 
         $decoded = json_decode($text, true);
-        if (!is_array($decoded)) {
+        if (! is_array($decoded)) {
             throw new \RuntimeException(
-                "Failed to parse structured response as JSON.\nRaw response: " . mb_substr($text, 0, 500)
+                "Failed to parse structured response as JSON.\nRaw response: ".mb_substr($text, 0, 500)
             );
         }
 
@@ -254,12 +259,7 @@ class HaoCode
      */
     private static function createLoop(HaoCodeConfig $config): AgentLoop
     {
-        // Apply system prompt / permission mode overrides to SettingsManager
-        // before the factory creates ContextBuilder and PermissionChecker
-        self::applySettingsOverrides($config);
-
-        // Register SDK skills into SkillLoader so they appear in system prompt
-        self::registerSdkSkills($config);
+        self::prepareSdkEnvironment($config);
 
         /** @var AgentLoopFactory $factory */
         $factory = app(AgentLoopFactory::class);
@@ -294,12 +294,25 @@ class HaoCode
     }
 
     /**
+     * Apply config-derived SDK state that must be available before loop creation.
+     */
+    private static function prepareSdkEnvironment(HaoCodeConfig $config): void
+    {
+        // Apply system prompt / permission mode overrides to SettingsManager
+        // before ContextBuilder and PermissionChecker are resolved.
+        self::applySettingsOverrides($config);
+
+        // Register SDK skills so they are visible to the Skill tool and system prompt.
+        self::registerSdkSkills($config);
+    }
+
+    /**
      * Push SDK config overrides into SettingsManager so that
      * ContextBuilder and PermissionChecker pick them up.
      */
     private static function applySettingsOverrides(HaoCodeConfig $config): void
     {
-        $settings = app(\App\Services\Settings\SettingsManager::class);
+        $settings = app(SettingsManager::class);
 
         if ($config->systemPrompt !== null) {
             $settings->set('system_prompt', $config->systemPrompt);

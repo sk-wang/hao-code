@@ -36,6 +36,13 @@ class Conversation
         $this->loop->setPermissionPromptHandler(fn () => true);
         $this->loop->setMaxTurns($config->maxTurns);
 
+        if ($config->maxBudgetUsd !== null) {
+            $this->loop->getCostTracker()->setThresholds(
+                warn: $config->maxBudgetUsd * 0.8,
+                stop: $config->maxBudgetUsd,
+            );
+        }
+
         if ($config->abortController !== null) {
             $config->abortController->onAbort(fn () => $this->loop->abort());
         }
@@ -161,7 +168,7 @@ class Conversation
                 $history->addUserMessage($entry['content'] ?? '');
             } elseif ($type === 'assistant_turn' && isset($entry['message'])) {
                 $history->addAssistantMessage($entry['message']);
-                if (!empty($entry['tool_results'])) {
+                if (! empty($entry['tool_results'])) {
                     $history->addToolResultMessage($entry['tool_results']);
                 }
             }

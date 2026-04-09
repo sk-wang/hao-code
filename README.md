@@ -229,6 +229,10 @@ TeamList(name: "research")
 
 Use hao-code as a library in any PHP/Laravel application. **[Full SDK Documentation →](docs/SDK.md)**
 
+Examples:
+- `examples/code-review-agent.php` — focused review workflow
+- `examples/support-ops-agent.php` — fuller workflow covering query, stream, conversation, resume, continue, and structured handoff
+
 ```bash
 composer require sk-wang/hao-code
 ```

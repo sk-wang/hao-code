@@ -269,6 +269,21 @@ class HaoCodeCommandTest extends TestCase
         $this->assertSame(3, $layout['cursorColumn']);
     }
 
+    public function test_build_draft_prompt_layout_collapses_large_pastes_into_a_placeholder(): void
+    {
+        $command = new HaoCodeCommand;
+        $draft = new DraftInputBuffer('Explain: ');
+        $draft->paste(str_repeat('x', 900));
+
+        $layout = $this->invoke($command, 'buildDraftPromptLayout', 'demo', $draft, null, 120);
+
+        $this->assertSame([
+            '<fg=green>demo</> <fg=cyan>❯</> Explain: [Pasted text · 900 B]',
+        ], $layout['lines']);
+        $this->assertSame(0, $layout['cursorLineIndex']);
+        $this->assertGreaterThan(0, $layout['cursorColumn']);
+    }
+
     public function test_build_permission_rule_uses_the_observable_tool_input(): void
     {
         $command = new HaoCodeCommand;

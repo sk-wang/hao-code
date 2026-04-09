@@ -6,12 +6,25 @@ namespace App\Support\Terminal;
 
 class DraftInputBuffer
 {
+    private const COLLAPSED_PASTE_THRESHOLD = 800;
+
     /** @var array<int, string> */
     private array $lines = [''];
 
     private int $currentLineIndex = 0;
 
     private int $cursorPosition = 0;
+
+    /**
+     * @var array{
+     *   prefix: string,
+     *   suffix: string,
+     *   char_count: int,
+     *   line_count: int,
+     *   byte_count: int
+     * }|null
+     */
+    private ?array $collapsedPastePreview = null;
 
     public function __construct(string $text = '')
     {
@@ -20,6 +33,8 @@ class DraftInputBuffer
 
     public function replaceWith(string $text): void
     {
+        $this->clearCollapsedPastePreview();
+
         $normalized = str_replace(["\r\n", "\r"], "\n", $text);
         $this->lines = explode("\n", $normalized);
         if ($this->lines === []) {
@@ -50,6 +65,7 @@ class DraftInputBuffer
 
     public function replaceCurrentLine(string $text): void
     {
+        $this->clearCollapsedPastePreview();
         $this->lines[$this->currentLineIndex] = $text;
         $this->cursorPosition = $this->length($text);
     }
@@ -72,8 +88,29 @@ class DraftInputBuffer
         return $this->cursorPosition;
     }
 
+    /**
+     * @return array{
+     *   prefix: string,
+     *   suffix: string,
+     *   char_count: int,
+     *   line_count: int,
+     *   byte_count: int
+     * }|null
+     */
+    public function collapsedPastePreview(): ?array
+    {
+        return $this->collapsedPastePreview;
+    }
+
+    public function clearCollapsedPastePreview(): void
+    {
+        $this->collapsedPastePreview = null;
+    }
+
     public function moveLeft(): bool
     {
+        $this->clearCollapsedPastePreview();
+
         if ($this->cursorPosition > 0) {
             $this->cursorPosition--;
 
@@ -92,6 +129,8 @@ class DraftInputBuffer
 
     public function moveRight(): bool
     {
+        $this->clearCollapsedPastePreview();
+
         if ($this->cursorPosition < $this->length($this->currentLine())) {
             $this->cursorPosition++;
 
@@ -110,6 +149,8 @@ class DraftInputBuffer
 
     public function moveUp(): bool
     {
+        $this->clearCollapsedPastePreview();
+
         if ($this->currentLineIndex <= 0) {
             return false;
         }
@@ -122,6 +163,8 @@ class DraftInputBuffer
 
     public function moveDown(): bool
     {
+        $this->clearCollapsedPastePreview();
+
         if ($this->currentLineIndex >= count($this->lines) - 1) {
             return false;
         }
@@ -134,11 +177,13 @@ class DraftInputBuffer
 
     public function moveHome(): void
     {
+        $this->clearCollapsedPastePreview();
         $this->cursorPosition = 0;
     }
 
     public function moveEnd(): void
     {
+        $this->clearCollapsedPastePreview();
         $this->cursorPosition = $this->length($this->currentLine());
     }
 
@@ -154,12 +199,15 @@ class DraftInputBuffer
             return;
         }
 
+        $this->clearCollapsedPastePreview();
         $this->lines[$this->currentLineIndex] = $this->beforeCursor() . $text . $this->afterCursor();
         $this->cursorPosition += $this->length($text);
     }
 
     public function backspace(): bool
     {
+        $this->clearCollapsedPastePreview();
+
         if ($this->cursorPosition > 0) {
             $this->lines[$this->currentLineIndex] = $this->substring($this->currentLine(), 0, $this->cursorPosition - 1)
                 . $this->afterCursor();
@@ -184,6 +232,8 @@ class DraftInputBuffer
 
     public function delete(): bool
     {
+        $this->clearCollapsedPastePreview();
+
         if ($this->cursorPosition < $this->length($this->currentLine())) {
             $this->lines[$this->currentLineIndex] = $this->beforeCursor()
                 . $this->substring($this->currentLine(), $this->cursorPosition + 1);
@@ -208,8 +258,18 @@ class DraftInputBuffer
             return;
         }
 
+        $fullTextBefore = $this->text();
+        $absoluteOffset = $this->absoluteCursorOffset();
+        $prefix = $this->substring($fullTextBefore, 0, $absoluteOffset);
+        $suffix = $this->substring($fullTextBefore, $absoluteOffset);
+        $this->clearCollapsedPastePreview();
+
         if (! str_contains($normalized, "\n")) {
             $this->insert($normalized);
+
+            if ($this->shouldCollapsePastedText($normalized)) {
+                $this->collapsedPastePreview = $this->makeCollapsedPastePreview($normalized, $prefix, $suffix);
+            }
 
             return;
         }
@@ -224,10 +284,16 @@ class DraftInputBuffer
         array_splice($this->lines, $this->currentLineIndex, 1, $replacement);
         $this->currentLineIndex += count($replacement) - 1;
         $this->cursorPosition = $this->length($lastFragment);
+
+        if ($this->shouldCollapsePastedText($normalized)) {
+            $this->collapsedPastePreview = $this->makeCollapsedPastePreview($normalized, $prefix, $suffix);
+        }
     }
 
     public function commitContinuationLine(): bool
     {
+        $this->clearCollapsedPastePreview();
+
         if (! $this->isCursorAtEnd()) {
             return false;
         }
@@ -268,5 +334,41 @@ class DraftInputBuffer
         }
 
         return $length === null ? substr($text, $start) : substr($text, $start, $length);
+    }
+
+    private function shouldCollapsePastedText(string $text): bool
+    {
+        return $this->length($text) >= self::COLLAPSED_PASTE_THRESHOLD;
+    }
+
+    /**
+     * @return array{
+     *   prefix: string,
+     *   suffix: string,
+     *   char_count: int,
+     *   line_count: int,
+     *   byte_count: int
+     * }
+     */
+    private function makeCollapsedPastePreview(string $text, string $prefix, string $suffix): array
+    {
+        return [
+            'prefix' => $prefix,
+            'suffix' => $suffix,
+            'char_count' => $this->length($text),
+            'line_count' => substr_count($text, "\n"),
+            'byte_count' => strlen($text),
+        ];
+    }
+
+    private function absoluteCursorOffset(): int
+    {
+        $offset = 0;
+
+        for ($index = 0; $index < $this->currentLineIndex; $index++) {
+            $offset += $this->length($this->lines[$index] ?? '') + 1;
+        }
+
+        return $offset + $this->cursorPosition;
     }
 }

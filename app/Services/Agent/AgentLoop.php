@@ -2,7 +2,6 @@
 
 namespace App\Services\Agent;
 
-use App\Services\Api\ApiErrorException;
 use App\Services\Compact\ContextCompactor;
 use App\Services\Cost\CostTracker;
 use App\Services\Hooks\HookExecutor;
@@ -15,17 +14,28 @@ use App\Tools\ToolUseContext;
 class AgentLoop
 {
     private int $maxTurns = 50;
+
     private int $maxMalformedToolInputRetries = 4;
+
     private int $maxIncompleteResponseRetries = 2;
+
     private bool $aborted = false;
+
     private bool $sessionStarted = false;
+
     private int $totalInputTokens = 0;
+
     private int $totalOutputTokens = 0;
+
     private int $totalCacheCreationTokens = 0;
+
     private int $totalCacheReadTokens = 0;
+
     /** Tracks the most recent API call's input token count for auto-compact decisions. */
     private int $lastTurnInputTokens = 0;
+
     private bool $autoTitleGenerated = false;
+
     private ?string $workingDirectory = null;
 
     public function __construct(
@@ -54,6 +64,7 @@ class AgentLoop
     public function setWorkingDirectory(string $dir): void
     {
         $this->workingDirectory = $dir;
+        $this->sessionManager->setCurrentWorkingDirectory($dir);
     }
 
     public function abort(): void
@@ -69,7 +80,7 @@ class AgentLoop
     /**
      * Run the agent loop for a user message.
      *
-     * @param string|array $userInput Plain text, or array of content blocks for mixed text+image
+     * @param  string|array  $userInput  Plain text, or array of content blocks for mixed text+image
      * @return string The final assistant response text
      */
     public function run(
@@ -87,7 +98,7 @@ class AgentLoop
         ]);
 
         // Fire SessionStart hook on the very first user turn
-        if (!$this->sessionStarted) {
+        if (! $this->sessionStarted) {
             $this->sessionStarted = true;
 
             // Wire up tool result persistence storage
@@ -103,7 +114,7 @@ class AgentLoop
         $malformedToolInputRetries = 0;
         $incompleteResponseRetries = 0;
 
-        while ($turnCount < $this->maxTurns && !$this->aborted) {
+        while ($turnCount < $this->maxTurns && ! $this->aborted) {
             $turnCount++;
 
             if ($onTurnStart) {
@@ -133,7 +144,7 @@ class AgentLoop
             $context = new ToolUseContext(
                 workingDirectory: $this->workingDirectory ?? getcwd(),
                 sessionId: $this->sessionManager->getSessionId(),
-                shouldAbort: fn(): bool => $this->aborted,
+                shouldAbort: fn (): bool => $this->aborted,
             );
             $streamingExecutor->setContext($context, $onToolStart, $onToolComplete);
 
@@ -143,9 +154,8 @@ class AgentLoop
                     systemPrompt: $systemPrompt,
                     messages: $messages,
                     onTextDelta: $onTextDelta,
-                    onToolBlockComplete: fn(array $block, int $index) =>
-                        $this->aborted ? null : $streamingExecutor->onToolBlockReady($block, $index),
-                    shouldAbort: fn(): bool => $this->aborted,
+                    onToolBlockComplete: fn (array $block, int $index) => $this->aborted ? null : $streamingExecutor->onToolBlockReady($block, $index),
+                    shouldAbort: fn (): bool => $this->aborted,
                 );
 
                 if ($this->aborted) {
@@ -176,7 +186,8 @@ class AgentLoop
 
                 if ($this->costTracker->shouldStop()) {
                     $streamingExecutor->cleanup();
-                    return "(Cost limit reached: " . $this->costTracker->getSummary() . ")";
+
+                    return '(Cost limit reached: '.$this->costTracker->getSummary().')';
                 }
 
                 $assistantMessage = $processor->toAssistantMessage();
@@ -202,6 +213,7 @@ class AgentLoop
                             ),
                         );
                         $turnCount--;
+
                         continue;
                     }
 
@@ -212,6 +224,7 @@ class AgentLoop
                         'session_id' => $this->sessionManager->getSessionId(),
                         'turn' => $turnCount,
                     ]);
+
                     return $processor->getAccumulatedText();
                 }
 
@@ -236,14 +249,15 @@ class AgentLoop
                         );
                         $this->sessionManager->recordTurn($assistantMessage, $toolResults);
                         $turnCount--;
+
                         continue;
                     }
 
                     throw new \RuntimeException(
-                        'Model returned malformed tool input repeatedly: ' . implode(
+                        'Model returned malformed tool input repeatedly: '.implode(
                             '; ',
                             array_map(
-                                fn (array $failure): string => $failure['name'] . ': ' . $failure['error'],
+                                fn (array $failure): string => $failure['name'].': '.$failure['error'],
                                 $malformedToolUseFailures,
                             ),
                         ),
@@ -276,7 +290,7 @@ class AgentLoop
                 $this->sessionManager->recordTurn($assistantMessage, $toolResults);
 
                 // 10. Auto-generate session title after first turn
-                if (!$this->autoTitleGenerated && $this->sessionManager->getTitle() === null) {
+                if (! $this->autoTitleGenerated && $this->sessionManager->getTitle() === null) {
                     $this->autoTitleGenerated = true;
                     $firstInput = mb_substr($userInput, 0, 80);
                     $title = preg_replace('/\s+/', ' ', trim($firstInput));
@@ -291,7 +305,7 @@ class AgentLoop
         }
 
         if ($this->aborted) {
-            return "(aborted)";
+            return '(aborted)';
         }
 
         return "Reached maximum turn limit ({$this->maxTurns}). Stopping.";
@@ -355,7 +369,7 @@ class AgentLoop
     }
 
     /**
-     * @param array<int, array{id: string, name: string, input: array, raw_input?: string, input_json_error?: ?string}> $toolUseBlocks
+     * @param  array<int, array{id: string, name: string, input: array, raw_input?: string, input_json_error?: ?string}>  $toolUseBlocks
      * @return array<int, array{id: string, name: string, error: string}>
      */
     private function findMalformedToolUseFailures(array $toolUseBlocks, ToolUseContext $context): array
@@ -374,18 +388,20 @@ class AgentLoop
                 $failures[] = [
                     'id' => $block['id'],
                     'name' => $block['name'],
-                    'error' => $inputJsonError . ($rawInputSnippet !== null ? ' Raw input: ' . $rawInputSnippet : ''),
+                    'error' => $inputJsonError.($rawInputSnippet !== null ? ' Raw input: '.$rawInputSnippet : ''),
                 ];
+
                 continue;
             }
 
             $rawInput = $block['input'] ?? [];
-            if (!is_array($rawInput)) {
+            if (! is_array($rawInput)) {
                 $failures[] = [
                     'id' => $block['id'],
                     'name' => $block['name'],
                     'error' => 'Tool input must decode to an object.',
                 ];
+
                 continue;
             }
 
@@ -397,6 +413,7 @@ class AgentLoop
                     'name' => $block['name'],
                     'error' => $e->getMessage(),
                 ];
+
                 continue;
             } catch (\TypeError $e) {
                 $failures[] = [
@@ -404,6 +421,7 @@ class AgentLoop
                     'name' => $block['name'],
                     'error' => $e->getMessage(),
                 ];
+
                 continue;
             }
 
@@ -421,7 +439,7 @@ class AgentLoop
     }
 
     /**
-     * @param array<int, array{id: string, name: string, error: string}> $failures
+     * @param  array<int, array{id: string, name: string, error: string}>  $failures
      */
     private function sanitizeMalformedToolAssistantMessage(array $assistantMessage, array $failures): array
     {
@@ -437,11 +455,11 @@ class AgentLoop
             }
 
             $toolUseId = $block['id'] ?? null;
-            if (!is_string($toolUseId) || !isset($failedToolIds[$toolUseId])) {
+            if (! is_string($toolUseId) || ! isset($failedToolIds[$toolUseId])) {
                 continue;
             }
 
-            if (!is_array($block['input'] ?? null)) {
+            if (! is_array($block['input'] ?? null)) {
                 $block['input'] = [];
             }
 
@@ -454,7 +472,7 @@ class AgentLoop
     }
 
     /**
-     * @param array<int, array{id: string, name: string, error: string}> $failures
+     * @param  array<int, array{id: string, name: string, error: string}>  $failures
      * @return array<int, array{tool_use_id: string, content: string, is_error: bool}>
      */
     private function buildMalformedToolRetryResults(array $failures): array
@@ -504,7 +522,7 @@ class AgentLoop
     }
 
     /**
-     * @param array<int, array{id: string, name: string, error: string}> $failures
+     * @param  array<int, array{id: string, name: string, error: string}>  $failures
      */
     private function buildMalformedToolRetryInstruction(array $failures, int $retryCount): string
     {
@@ -563,7 +581,7 @@ class AgentLoop
         }
 
         if (mb_strlen($snippet) > 120) {
-            $snippet = mb_substr($snippet, 0, 120) . '...';
+            $snippet = mb_substr($snippet, 0, 120).'...';
         }
 
         return $snippet;
@@ -629,8 +647,7 @@ class AgentLoop
         ?string $stopReason,
         int $retryCount,
         bool $skipHistory = false,
-    ): string
-    {
+    ): string {
         $lines = [];
 
         if ($stopReason === 'max_tokens') {

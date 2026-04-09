@@ -53,6 +53,34 @@ class DraftInputBufferTest extends TestCase
         $this->assertSame(4, $buffer->cursorPosition());
     }
 
+    public function test_it_marks_large_pastes_for_collapsed_preview(): void
+    {
+        $buffer = new DraftInputBuffer('Explain: ');
+
+        $buffer->paste(str_repeat('x', 900));
+
+        $this->assertSame('Explain: ' . str_repeat('x', 900), $buffer->text());
+        $this->assertSame([
+            'prefix' => 'Explain: ',
+            'suffix' => '',
+            'char_count' => 900,
+            'line_count' => 0,
+            'byte_count' => 900,
+        ], $buffer->collapsedPastePreview());
+    }
+
+    public function test_it_clears_the_collapsed_paste_preview_after_follow_up_edits(): void
+    {
+        $buffer = new DraftInputBuffer('Explain: ');
+        $buffer->paste(str_repeat('x', 900));
+
+        $this->assertNotNull($buffer->collapsedPastePreview());
+
+        $buffer->moveLeft();
+
+        $this->assertNull($buffer->collapsedPastePreview());
+    }
+
     public function test_it_moves_between_lines_and_edits_a_multiline_draft(): void
     {
         $buffer = new DraftInputBuffer("first line\nsecond line");
