@@ -1924,6 +1924,13 @@ class HaoCodeCommand extends Command
 
         if (!empty($tools)) {
             $this->line('<fg=gray>  MCP: registered ' . count($tools) . ' tools</>');
+
+            // Register ToolSearch only when MCP tools exist — without MCP,
+            // all tools are already visible in the API payload and ToolSearch
+            // just wastes tokens (especially for non-Claude models).
+            if (! $registry->has('ToolSearch')) {
+                $registry->register(app(\App\Tools\ToolSearch\ToolSearchTool::class));
+            }
         }
     }
 
@@ -2087,31 +2094,50 @@ class HaoCodeCommand extends Command
     {
         $settings = app(SettingsManager::class);
         $args = trim($args);
-        $available = $this->availableModelChoices($settings);
+        $providerName = $settings->getActiveProviderName();
+        $providerConfig = $settings->getProviderConfig();
 
-        // Resolve model aliases
-        $aliases = [
-            'sonnet' => 'claude-sonnet-4-20250514',
-            'opus' => 'claude-opus-4-20250514',
-            'haiku' => 'claude-haiku-4-20250514',
-            'sonnet-3.5' => 'claude-3-5-sonnet-20241022',
-            'haiku-3.5' => 'claude-3-5-haiku-20241022',
-        ];
+        // Build aliases — only show Claude aliases when using a Claude-compatible endpoint
+        $aliases = $this->isClaudeCompatibleProvider($providerConfig)
+            ? [
+                'sonnet' => 'claude-sonnet-4-20250514',
+                'opus' => 'claude-opus-4-20250514',
+                'haiku' => 'claude-haiku-4-20250514',
+                'sonnet-3.5' => 'claude-3-5-sonnet-20241022',
+                'haiku-3.5' => 'claude-3-5-haiku-20241022',
+            ]
+            : [];
+
+        // Build model list relevant to the current provider
+        $available = $this->modelsForCurrentProvider($settings, $providerConfig);
 
         if ($args === '') {
             $lines = [
                 $this->formatter()->keyValue('Current', $settings->getResolvedModelIdentifier()),
-                $this->formatter()->keyValue('Provider', $this->formatSettingValue($settings->getActiveProviderName()), 'gray', 'gray'),
-                '',
-                '<fg=gray>Available models:</>',
+                $this->formatter()->keyValue('Provider', $this->formatSettingValue($providerName), 'gray', 'gray'),
             ];
-            foreach ($available as $model) {
-                $alias = array_search($model, $aliases, true);
-                $label = $alias !== false ? "<fg=cyan>{$model}</> <fg=gray>({$alias})</>" : "<fg=cyan>{$model}</>";
-                $lines[] = "  {$label}";
+
+            if ($available !== []) {
+                $lines[] = '';
+                $lines[] = '<fg=gray>Available models:</>';
+                foreach ($available as $model) {
+                    $alias = array_search($model, $aliases, true);
+                    $isCurrent = $model === $settings->getResolvedModelIdentifier();
+                    $marker = $isCurrent ? '<fg=green>✓</>' : ' ';
+                    $label = $alias !== false
+                        ? "<fg=cyan>{$model}</> <fg=gray>({$alias})</>"
+                        : "<fg=cyan>{$model}</>";
+                    $lines[] = "  {$marker} {$label}";
+                }
             }
+
+            if ($aliases !== []) {
+                $lines[] = '';
+                $lines[] = '<fg=gray>Aliases: '.implode(', ', array_keys($aliases)).'</>';
+            }
+
             $lines[] = '';
-            $lines[] = '<fg=gray>Aliases: '.implode(', ', array_keys($aliases)).'</>';
+            $lines[] = '<fg=gray>/model &lt;name&gt; to switch</>';
             $this->renderPanel('Models', $lines);
 
             return;
@@ -2123,14 +2149,45 @@ class HaoCodeCommand extends Command
         $display = $settings->getResolvedModelIdentifier();
         if ($resolved !== $args) {
             $this->line("<fg=green>Model set to:</> <fg=white>{$display}</> <fg=gray>(alias: {$args})</>");
-        } elseif (in_array($resolved, $available, true)) {
-            $this->line('<fg=green>Model set to:</> <fg=white>'.$display.'</>');
         } else {
-            $this->line("<fg=green>Model override set to:</> <fg=white>{$args}</>");
-            if ($available !== []) {
-                $this->line('<fg=gray>Known choices: '.implode(', ', $available).'</>');
-            }
+            $this->line("<fg=green>Model set to:</> <fg=white>{$display}</>");
         }
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function modelsForCurrentProvider(SettingsManager $settings, ?array $providerConfig): array
+    {
+        $baseUrl = strtolower($providerConfig['api_base_url'] ?? '');
+
+        // Kimi endpoint
+        if (str_contains($baseUrl, 'api.kimi.com/coding')) {
+            return ['kimi-for-coding'];
+        }
+
+        // Anthropic direct or standard proxy
+        if ($this->isClaudeCompatibleProvider($providerConfig)) {
+            return SettingsManager::getAvailableModels();
+        }
+
+        // Other providers — show the configured model if any
+        $model = $providerConfig['model'] ?? null;
+
+        return $model !== null ? [$model] : [];
+    }
+
+    private function isClaudeCompatibleProvider(?array $providerConfig): bool
+    {
+        if ($providerConfig === null) {
+            return true; // default is Anthropic
+        }
+
+        $baseUrl = strtolower($providerConfig['api_base_url'] ?? '');
+
+        return $baseUrl === ''
+            || str_contains($baseUrl, 'anthropic.com')
+            || str_contains($baseUrl, 'api.anthropic');
     }
 
     private function handleProvider(string $args = ''): void
@@ -2138,7 +2195,7 @@ class HaoCodeCommand extends Command
         $settings = app(SettingsManager::class);
         $providers = $settings->getConfiguredProviders();
         $tokens = $this->tokenizeArguments($args);
-        $subcommand = strtolower($tokens[0] ?? 'list');
+        $subcommand = strtolower($tokens[0] ?? '');
 
         if ($providers === []) {
             $paths = array_map(
@@ -2156,37 +2213,7 @@ class HaoCodeCommand extends Command
             return;
         }
 
-        if (count($tokens) === 1 && array_key_exists($subcommand, $providers)) {
-            $tokens = ['use', $subcommand];
-            $subcommand = 'use';
-        }
-
-        if (in_array($subcommand, ['list', 'ls', 'show'], true)) {
-            $current = $settings->getActiveProviderName();
-            $lines = [
-                $this->formatter()->keyValue('Current', $this->formatSettingValue($current)),
-            ];
-
-            foreach ($providers as $name => $provider) {
-                $marker = $name === $current ? '<fg=green>✓</>' : '<fg=gray>·</>';
-                $lines[] = "{$marker} <fg=yellow>{$name}</>";
-                $lines[] = $this->formatter()->keyValue('Model', $this->formatSettingValue($provider['model'] ?? null), 'gray', 'gray');
-                $lines[] = $this->formatter()->keyValue('Base URL', $this->formatSettingValue($provider['api_base_url'] ?? null), 'gray', 'gray');
-                $lines[] = $this->formatter()->keyValue('API key', ! empty($provider['api_key']) ? 'configured' : 'missing', 'gray', 'gray');
-                if ($name !== array_key_last($providers)) {
-                    $lines[] = '';
-                }
-            }
-
-            $lines[] = '';
-            $lines[] = '<fg=gray>Use /provider use &lt;name&gt; to switch for this session.</>';
-            $lines[] = '<fg=gray>Use /provider clear to fall back to default resolution.</>';
-
-            $this->renderPanel('Providers', $lines);
-
-            return;
-        }
-
+        // /provider clear — reset to default
         if (in_array($subcommand, ['clear', 'off', 'unset'], true)) {
             $settings->set('active_provider', null);
             $this->line('<fg=green>Provider override cleared.</> <fg=gray>Using default resolution.</>');
@@ -2194,6 +2221,14 @@ class HaoCodeCommand extends Command
             return;
         }
 
+        // /provider <name> — direct switch
+        if ($subcommand !== '' && array_key_exists($subcommand, $providers)) {
+            $this->switchProvider($settings, $providers, $subcommand);
+
+            return;
+        }
+
+        // /provider use <name> — explicit switch
         if (in_array($subcommand, ['use', 'set'], true)) {
             $name = $tokens[1] ?? null;
             if ($name === null || ! array_key_exists($name, $providers)) {
@@ -2202,20 +2237,99 @@ class HaoCodeCommand extends Command
                 return;
             }
 
-            $settings->set('active_provider', $name);
-            $settings->set('model', null);
-
-            $label = $providers[$name]['model'] !== null
-                ? $name.'/'.$providers[$name]['model']
-                : $name;
-
-            $this->line("<fg=green>Provider set to:</> <fg=white>{$name}</>");
-            $this->line("<fg=gray>Resolved model:</> <fg=white>{$label}</>");
+            $this->switchProvider($settings, $providers, $name);
 
             return;
         }
 
-        $this->line('<fg=red>Usage:</> <fg=white>/provider</>, <fg=white>/provider use &lt;name&gt;</>, <fg=white>/provider clear</>');
+        // /provider list — non-interactive listing
+        if (in_array($subcommand, ['list', 'ls', 'show'], true)) {
+            $this->showProviderList($settings, $providers);
+
+            return;
+        }
+
+        if ($subcommand !== '') {
+            $this->line('<fg=red>Unknown provider:</> <fg=white>'.$subcommand.'</>');
+            $this->line('<fg=gray>Available: '.implode(', ', array_keys($providers)).'</>');
+
+            return;
+        }
+
+        // /provider (no args) — interactive picker
+        $this->interactiveProviderPicker($settings, $providers);
+    }
+
+    private function switchProvider(SettingsManager $settings, array $providers, string $name): void
+    {
+        $settings->set('active_provider', $name);
+        $settings->set('model', null);
+
+        $provider = $providers[$name] ?? [];
+        $model = $provider['model'] ?? null;
+        $label = $model !== null ? $name.'/'.$model : $name;
+
+        $this->line("<fg=green>Switched to:</> <fg=white>{$label}</>");
+    }
+
+    private function showProviderList(SettingsManager $settings, array $providers): void
+    {
+        $current = $settings->getActiveProviderName();
+        $lines = [];
+
+        foreach ($providers as $name => $provider) {
+            $marker = $name === $current ? '<fg=green>✓</>' : ' ';
+            $model = $provider['model'] ?? '<fg=gray>default</>';
+            $lines[] = "{$marker} <fg=yellow>{$name}</> <fg=gray>·</> {$model}";
+        }
+
+        $lines[] = '';
+        $lines[] = '<fg=gray>/provider &lt;name&gt; to switch · /provider clear to reset</>';
+
+        $this->renderPanel('Providers', $lines);
+    }
+
+    private function interactiveProviderPicker(SettingsManager $settings, array $providers): void
+    {
+        $current = $settings->getActiveProviderName();
+        $names = array_keys($providers);
+
+        $this->line('');
+        foreach ($names as $index => $name) {
+            $number = $index + 1;
+            $provider = $providers[$name];
+            $model = $provider['model'] ?? 'default';
+            $marker = $name === $current ? '<fg=green>✓</>' : ' ';
+            $this->line("  {$marker} <fg=cyan>{$number}</>) <fg=yellow>{$name}</> <fg=gray>· {$model}</>");
+        }
+        $this->line('');
+        $this->output->write('  <fg=gray>Select [1-'.count($names).'] or Enter to cancel:</> ');
+
+        $handle = fopen('php://stdin', 'r');
+        if ($handle === false) {
+            return;
+        }
+
+        try {
+            $line = trim((string) fgets($handle));
+        } finally {
+            fclose($handle);
+        }
+
+        if ($line === '' || ! is_numeric($line)) {
+            $this->line('<fg=gray>Cancelled.</>');
+
+            return;
+        }
+
+        $choice = (int) $line;
+        if ($choice < 1 || $choice > count($names)) {
+            $this->line('<fg=red>Invalid choice.</>');
+
+            return;
+        }
+
+        $this->switchProvider($settings, $providers, $names[$choice - 1]);
     }
 
     private function handleDiff(): void
@@ -3806,6 +3920,7 @@ class HaoCodeCommand extends Command
                 return;
             }
             $this->recordTurnHudEvent('turn.completed', $this->summarizeTurnDetail($response));
+
             if (! $renderedLiveText && $response !== '') {
                 $this->line($markdownRenderer->render($response));
             }

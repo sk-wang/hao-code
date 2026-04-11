@@ -100,8 +100,7 @@ class ToolServiceProvider extends ServiceProvider
             $registry->register($app->make(TeamListTool::class));
             $registry->register($app->make(TeamDeleteTool::class));
 
-            // Tool search
-            $registry->register($app->make(ToolSearchTool::class));
+            // Tool search — registered lazily via connectMcpServers() only when MCP tools exist
 
             // MCP resources
             $registry->register($app->make(ListMcpResourcesTool::class));
