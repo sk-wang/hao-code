@@ -292,7 +292,19 @@ class AgentLoop
                 // 10. Auto-generate session title after first turn
                 if (! $this->autoTitleGenerated && $this->sessionManager->getTitle() === null) {
                     $this->autoTitleGenerated = true;
-                    $firstInput = mb_substr($userInput, 0, 80);
+                    if (is_string($userInput)) {
+                        $rawTitle = $userInput;
+                    } else {
+                        // Array of content blocks (e.g. text + image): extract text parts.
+                        // Each block is normally an array like ['type'=>'text','text'=>'...'],
+                        // but guard against bare strings that may appear in mixed inputs.
+                        $texts = array_filter(
+                            array_map(fn ($block) => is_string($block) ? $block : (is_array($block) ? ($block['text'] ?? null) : null), $userInput),
+                            fn ($t) => is_string($t) && $t !== '',
+                        );
+                        $rawTitle = implode(' ', $texts);
+                    }
+                    $firstInput = mb_substr($rawTitle, 0, 80);
                     $title = preg_replace('/\s+/', ' ', trim($firstInput));
                     if ($title !== '') {
                         $this->sessionManager->setTitle($title);
