@@ -81,7 +81,11 @@ class HaoCode
     }
 
     /**
-     * Execute a query and yield streaming Message objects.
+     * Execute a query and yield streaming Message objects in real time.
+     *
+     * Uses a PHP Fiber so each text delta / tool event is yielded to the caller
+     * as it arrives from the API, rather than being buffered until the full
+     * response completes.
      *
      * @return \Generator<int, Message>
      */
@@ -98,52 +102,80 @@ class HaoCode
         }
 
         $loop = self::createLoop($config);
+        $queue = new \SplQueue();
 
-        $messages = [];
-
-        $onText = function (string $delta) use (&$messages, $config) {
-            $messages[] = Message::text($delta);
+        // These callbacks are exclusively invoked from within the Fiber below.
+        // Fiber::getCurrent()?->suspend() uses the nullable operator as a defensive
+        // guard; in practice getCurrent() will always return the active Fiber here.
+        $onText = function (string $delta) use ($queue, $config): void {
+            $queue->enqueue(Message::text($delta));
             if ($config->onText) {
                 ($config->onText)($delta);
             }
+            \Fiber::getCurrent()?->suspend();
         };
 
-        $onToolStart = function (string $name, array $input) use (&$messages, $config) {
-            $messages[] = Message::toolStart($name, $input);
+        $onToolStart = function (string $name, array $input) use ($queue, $config): void {
+            $queue->enqueue(Message::toolStart($name, $input));
             if ($config->onToolStart) {
                 ($config->onToolStart)($name, $input);
             }
+            \Fiber::getCurrent()?->suspend();
         };
 
-        $onToolComplete = function (string $name, $result) use (&$messages, $config) {
-            $messages[] = Message::toolResult($name, $result->output, $result->isError);
+        $onToolComplete = function (string $name, $result) use ($queue, $config): void {
+            $queue->enqueue(Message::toolResult($name, $result->output, $result->isError));
             if ($config->onToolComplete) {
                 ($config->onToolComplete)($name, $result);
             }
+            \Fiber::getCurrent()?->suspend();
         };
 
-        try {
-            $response = $loop->run(
-                userInput: $prompt,
-                onTextDelta: $onText,
-                onToolStart: $onToolStart,
-                onToolComplete: $onToolComplete,
-                onTurnStart: $config->onTurnStart,
-            );
+        $response = null;
+        $thrownException = null;
 
-            foreach ($messages as $msg) {
-                yield $msg;
+        $fiber = new \Fiber(function () use ($loop, $prompt, $onText, $onToolStart, $onToolComplete, $config, &$response, &$thrownException): void {
+            try {
+                $response = $loop->run(
+                    userInput: $prompt,
+                    onTextDelta: $onText,
+                    onToolStart: $onToolStart,
+                    onToolComplete: $onToolComplete,
+                    onTurnStart: $config->onTurnStart,
+                );
+            } catch (\Throwable $e) {
+                $thrownException = $e;
             }
+        });
 
-            yield Message::result(
-                text: $response,
-                usage: self::extractUsage($loop),
-                cost: $loop->getEstimatedCost(),
-                sessionId: $loop->getSessionManager()->getSessionId(),
-            );
-        } catch (\Throwable $e) {
-            yield Message::error($e->getMessage());
+        $fiber->start();
+
+        while (! $fiber->isTerminated()) {
+            while (! $queue->isEmpty()) {
+                yield $queue->dequeue();
+            }
+            if (! $fiber->isTerminated()) {
+                $fiber->resume();
+            }
         }
+
+        // Drain any messages enqueued before the fiber's final termination
+        while (! $queue->isEmpty()) {
+            yield $queue->dequeue();
+        }
+
+        if ($thrownException !== null) {
+            yield Message::error($thrownException->getMessage());
+
+            return;
+        }
+
+        yield Message::result(
+            text: $response ?? '',
+            usage: self::extractUsage($loop),
+            cost: $loop->getEstimatedCost(),
+            sessionId: $loop->getSessionManager()->getSessionId(),
+        );
     }
 
     /**

@@ -82,7 +82,11 @@ class Conversation
     }
 
     /**
-     * Send a message and yield streaming Message objects.
+     * Send a message and yield streaming Message objects in real time.
+     *
+     * Uses a PHP Fiber so each text delta / tool event is yielded to the caller
+     * as it arrives from the API, rather than being buffered until the full
+     * response completes.
      *
      * @return \Generator<int, Message>
      */
@@ -94,56 +98,85 @@ class Conversation
 
         $this->turnCount++;
 
-        $messages = [];
+        $queue = new \SplQueue();
 
-        $onText = function (string $delta) use (&$messages) {
-            $messages[] = Message::text($delta);
+        // These callbacks are exclusively invoked from within the Fiber below.
+        // Fiber::getCurrent()?->suspend() uses the nullable operator as a defensive
+        // guard; in practice getCurrent() will always return the active Fiber here.
+        $onText = function (string $delta) use ($queue): void {
+            $queue->enqueue(Message::text($delta));
             if ($this->config->onText) {
                 ($this->config->onText)($delta);
             }
+            \Fiber::getCurrent()?->suspend();
         };
 
-        $onToolStart = function (string $name, array $input) use (&$messages) {
-            $messages[] = Message::toolStart($name, $input);
+        $onToolStart = function (string $name, array $input) use ($queue): void {
+            $queue->enqueue(Message::toolStart($name, $input));
             if ($this->config->onToolStart) {
                 ($this->config->onToolStart)($name, $input);
             }
+            \Fiber::getCurrent()?->suspend();
         };
 
-        $onToolComplete = function (string $name, $result) use (&$messages) {
-            $messages[] = Message::toolResult($name, $result->output, $result->isError);
+        $onToolComplete = function (string $name, $result) use ($queue): void {
+            $queue->enqueue(Message::toolResult($name, $result->output, $result->isError));
             if ($this->config->onToolComplete) {
                 ($this->config->onToolComplete)($name, $result);
             }
+            \Fiber::getCurrent()?->suspend();
         };
 
-        try {
-            $response = $this->loop->run(
-                userInput: $prompt,
-                onTextDelta: $onText,
-                onToolStart: $onToolStart,
-                onToolComplete: $onToolComplete,
-                onTurnStart: $this->config->onTurnStart,
-            );
+        $response = null;
+        $thrownException = null;
 
-            foreach ($messages as $msg) {
-                yield $msg;
+        $fiber = new \Fiber(function () use ($prompt, $onText, $onToolStart, $onToolComplete, &$response, &$thrownException): void {
+            try {
+                $response = $this->loop->run(
+                    userInput: $prompt,
+                    onTextDelta: $onText,
+                    onToolStart: $onToolStart,
+                    onToolComplete: $onToolComplete,
+                    onTurnStart: $this->config->onTurnStart,
+                );
+            } catch (\Throwable $e) {
+                $thrownException = $e;
             }
+        });
 
-            yield Message::result(
-                text: $response,
-                usage: [
-                    'input_tokens' => $this->loop->getTotalInputTokens(),
-                    'output_tokens' => $this->loop->getTotalOutputTokens(),
-                    'cache_creation_tokens' => $this->loop->getCacheCreationTokens(),
-                    'cache_read_tokens' => $this->loop->getCacheReadTokens(),
-                ],
-                cost: $this->loop->getEstimatedCost(),
-                sessionId: $this->loop->getSessionManager()->getSessionId(),
-            );
-        } catch (\Throwable $e) {
-            yield Message::error($e->getMessage());
+        $fiber->start();
+
+        while (! $fiber->isTerminated()) {
+            while (! $queue->isEmpty()) {
+                yield $queue->dequeue();
+            }
+            if (! $fiber->isTerminated()) {
+                $fiber->resume();
+            }
         }
+
+        // Drain any messages enqueued before the fiber's final termination
+        while (! $queue->isEmpty()) {
+            yield $queue->dequeue();
+        }
+
+        if ($thrownException !== null) {
+            yield Message::error($thrownException->getMessage());
+
+            return;
+        }
+
+        yield Message::result(
+            text: $response ?? '',
+            usage: [
+                'input_tokens' => $this->loop->getTotalInputTokens(),
+                'output_tokens' => $this->loop->getTotalOutputTokens(),
+                'cache_creation_tokens' => $this->loop->getCacheCreationTokens(),
+                'cache_read_tokens' => $this->loop->getCacheReadTokens(),
+            ],
+            cost: $this->loop->getEstimatedCost(),
+            sessionId: $this->loop->getSessionManager()->getSessionId(),
+        );
     }
 
     /**
