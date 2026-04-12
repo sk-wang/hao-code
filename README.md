@@ -1,33 +1,112 @@
 # Hao Code
 
-An interactive CLI coding agent built with Laravel for Anthropic-compatible endpoints.
+A PHP Agent SDK and interactive CLI for Anthropic-compatible APIs.
 
 [![PHP](https://img.shields.io/badge/PHP-%3E%3D8.2-777BB4?style=flat-square&logo=php&logoColor=white)](https://php.net)
 [![Laravel](https://img.shields.io/badge/Laravel-12-FF2D20?style=flat-square&logo=laravel&logoColor=white)](https://laravel.com)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 
-`REPL` · `Streaming` · `Sub-agents` · `Teams` · `Tasks` · `Hooks` · `Skills` · `Session HUD`
-
-## Preview
-
-![Hao Code terminal screenshot](docs/images/hao-code-terminal.png)
-
-## Highlights
-
-- **Interactive REPL** — history, multiline input, transcript browsing, slash-command autocomplete
-- **30+ built-in tools** — shell, files, search, LSP, web, cron, tasks, worktrees, notebooks
-- **Agent system** — background agents, parallel read-only tools via `pcntl_fork`, plan mode
-- **Team coordination** — create named teams of specialized agents, broadcast messaging, full lifecycle management
-- **Safety controls** — permission modes, hook system, cost tracking with warning/hard-stop thresholds
-- **Session management** — restore, branch, fork, context compaction
-- **PHP SDK** — `HaoCode::query()`, streaming, multi-turn conversations — use the agent as a library
-- **Extensible** — custom skills, multi-provider config, project/global settings
+`SDK` · `Streaming` · `Sub-agents` · `Teams` · `REPL` · `Hooks` · `Skills` · `Session HUD`
 
 ---
 
-## Quick Start
+## Why Another Agent SDK?
 
-### Global install
+There are plenty of AI coding CLIs — but **PHP agent SDKs barely exist**. If you're building in PHP/Laravel and want to embed an AI agent that can actually *do things* (read files, run commands, search code, coordinate sub-agents), your options are thin.
+
+Hao Code gives you a **fully-featured agent as a Composer package** — not a thin HTTP wrapper, but a real multi-turn agent with 30+ built-in tools, streaming, session persistence, custom tools/skills, cost tracking, and abort control.
+
+```bash
+composer require sk-wang/hao-code
+```
+
+```php
+use App\Sdk\{HaoCode, HaoCodeConfig};
+
+// One-shot
+$result = HaoCode::query('Explain this codebase');
+echo $result;        // response text
+echo $result->cost;  // $0.03
+
+// Streaming
+foreach (HaoCode::stream('Build a REST API') as $msg) {
+    if ($msg->type === 'text') echo $msg->text;
+}
+
+// Multi-turn
+$conv = HaoCode::conversation();
+$conv->send('Create a User model');
+$conv->send('Add email validation');
+$conv->close();
+
+// Structured output
+$data = HaoCode::structured('Classify this ticket', $jsonSchema);
+echo $data->category;  // 'shipping'
+
+// Custom tools — your PHP code, callable by the agent
+$result = HaoCode::query('Find order #123', new HaoCodeConfig(
+    tools: [new LookupOrderTool()],
+));
+```
+
+**[Full SDK Documentation →](docs/SDK.md)**
+
+<details>
+<summary><strong>SDK feature overview</strong></summary>
+
+| Feature | API |
+|---------|-----|
+| One-shot query | `HaoCode::query()` |
+| Streaming | `HaoCode::stream()` |
+| Multi-turn conversation | `HaoCode::conversation()` |
+| Session resume/continue | `HaoCode::resume()` / `HaoCode::continueLatest()` |
+| Structured JSON output | `HaoCode::structured()` |
+| Custom tools (PHP code) | `SdkTool` — 4 methods to implement |
+| Custom skills (prompt templates) | `SdkSkill` — named prompts with `$ARGUMENTS` |
+| Abort control | `AbortController` — cancel from outside |
+| Cost tracking | `$result->cost`, `$result->usage`, `maxBudgetUsd` |
+| Streaming callbacks | `onText`, `onToolStart`, `onToolComplete`, `onTurnStart` |
+| Multi-provider | Anthropic, ZAI, or any OpenAI-compatible endpoint |
+
+</details>
+
+<details>
+<summary><strong>Custom tool example — 30 lines of PHP</strong></summary>
+
+```php
+use App\Sdk\SdkTool;
+
+class LookupOrderTool extends SdkTool
+{
+    public function name(): string { return 'LookupOrder'; }
+    public function description(): string { return 'Look up an order by ID.'; }
+
+    public function parameters(): array
+    {
+        return ['order_id' => ['type' => 'string', 'description' => 'Order ID', 'required' => true]];
+    }
+
+    public function handle(array $input): string
+    {
+        return Order::findOrFail($input['order_id'])->toJson();
+    }
+}
+
+// Agent now has access to your database
+$result = HaoCode::query('Check order #12345 status', new HaoCodeConfig(
+    tools: [new LookupOrderTool()],
+));
+```
+
+</details>
+
+---
+
+## Also a CLI
+
+Install globally for an interactive coding agent in the terminal:
+
+![Hao Code terminal screenshot](docs/images/hao-code-terminal.png)
 
 ```bash
 composer global require sk-wang/hao-code
@@ -46,25 +125,6 @@ JSON
 ```
 
 Launch:
-
-```bash
-hao-code
-```
-
-### Local development
-
-```bash
-git clone https://github.com/sk-wang/hao-code.git
-cd hao-code
-composer install
-cp .env.example .env && php artisan key:generate
-echo "ANTHROPIC_API_KEY=your-api-key-here" >> .env
-php artisan hao-code
-```
-
----
-
-## Usage
 
 ```bash
 hao-code                                          # Interactive REPL
@@ -87,6 +147,21 @@ hao-code --resume=ID --fork-session --name="alt"  # Fork into new branch
 | `--system-prompt=` | Replace system prompt |
 | `--append-system-prompt=` | Append extra instructions |
 | `--permission-mode=` | Override permission mode |
+
+---
+
+## Built-in Tools
+
+The agent ships with 30+ tools available in both SDK and CLI:
+
+| Group | Tools |
+| --- | --- |
+| **Shell & Files** | Bash, Read, Edit, Write, Glob, Grep |
+| **Agents & Planning** | Agent, SendMessage, TodoWrite, EnterPlanMode, ExitPlanMode |
+| **Teams** | TeamCreate, TeamList, TeamDelete |
+| **Tasks & Automation** | TaskCreate/Get/List/Update/Stop, CronCreate/Delete/List, Sleep |
+| **Code Intelligence** | LspTool, NotebookEdit, EnterWorktree, ExitWorktree |
+| **Web & Interaction** | WebSearch, WebFetch, AskUserQuestion, ToolSearch, Skill, Config |
 
 ---
 
@@ -126,7 +201,7 @@ Auto-loaded project files: `HAOCODE.md`, `CLAUDE.md`, `.haocode/rules/*.md`, `.h
 
 ---
 
-## Slash Commands
+## Slash Commands (CLI)
 
 <details>
 <summary><strong>Session</strong> — /help /exit /clear /history /resume /branch /rewind /snapshot /transcript /search</summary>
@@ -143,19 +218,6 @@ Auto-loaded project files: `HAOCODE.md`, `CLAUDE.md`, `.haocode/rules/*.md`, `.h
 <details>
 <summary><strong>Planning</strong> — /plan /tasks /loop</summary>
 </details>
-
----
-
-## Built-in Tools
-
-| Group | Tools |
-| --- | --- |
-| **Shell & Files** | Bash, Read, Edit, Write, Glob, Grep |
-| **Agents & Planning** | Agent, SendMessage, TodoWrite, EnterPlanMode, ExitPlanMode |
-| **Teams** | TeamCreate, TeamList, TeamDelete |
-| **Tasks & Automation** | TaskCreate/Get/List/Update/Stop, CronCreate/Delete/List, Sleep |
-| **Code Intelligence** | LspTool, NotebookEdit, EnterWorktree, ExitWorktree |
-| **Web & Interaction** | WebSearch, WebFetch, AskUserQuestion, ToolSearch, Skill, Config |
 
 ---
 
@@ -222,60 +284,6 @@ SendMessage(to: "team:research", message: "All sections done, begin compilation"
 # Check status
 TeamList(name: "research")
 ```
-
----
-
-## PHP SDK
-
-Use hao-code as a library in any PHP/Laravel application. **[Full SDK Documentation →](docs/SDK.md)**
-
-Examples:
-- `examples/code-review-agent.php` — focused review workflow
-- `examples/support-ops-agent.php` — fuller workflow covering query, stream, conversation, resume, continue, and structured handoff
-
-```bash
-composer require sk-wang/hao-code
-```
-
-```php
-use App\Sdk\{HaoCode, HaoCodeConfig, SdkTool, SdkSkill};
-
-// One-shot query
-$result = HaoCode::query('Explain this codebase');
-echo $result;           // Stringable
-echo $result->cost;     // $0.03
-
-// Streaming
-foreach (HaoCode::stream('Build a REST API') as $msg) {
-    if ($msg->type === 'text') echo $msg->text;
-}
-
-// Multi-turn conversation
-$conv = HaoCode::conversation();
-$conv->send('Create a User model');
-$conv->send('Add email validation');
-$conv->close();
-
-// Resume session
-$conv = HaoCode::resume($sessionId);
-$conv = HaoCode::continueLatest();
-
-// Structured output
-$data = HaoCode::structured('Classify this ticket', $jsonSchema);
-echo $data->category;  // 'shipping'
-
-// Custom tools (executable PHP code)
-HaoCode::query('Find order #123', new HaoCodeConfig(
-    tools: [new LookupOrderTool()],
-));
-
-// Custom skills (prompt templates)
-HaoCode::query('Review auth.php', new HaoCodeConfig(
-    skills: [new SdkSkill(name: 'security-review', description: '...', prompt: '...')],
-));
-```
-
-See [docs/SDK.md](docs/SDK.md) for custom tool definitions, skill templates, abort control, cost tracking, and testing.
 
 ---
 
