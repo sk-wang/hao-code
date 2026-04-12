@@ -66,7 +66,7 @@ $result = HaoCode::query('Find order #123', new HaoCodeConfig(
 | Abort control | `AbortController` — cancel from outside |
 | Cost tracking | `$result->cost`, `$result->usage`, `maxBudgetUsd` |
 | Streaming callbacks | `onText`, `onToolStart`, `onToolComplete`, `onTurnStart` |
-| Multi-provider | Anthropic, ZAI, or any OpenAI-compatible endpoint |
+| Multi-provider | Anthropic, ZAI, or any Anthropic-compatible endpoint |
 
 </details>
 
