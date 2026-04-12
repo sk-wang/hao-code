@@ -205,7 +205,11 @@ DESC;
         fclose($stdoutHandle);
         fclose($stderrHandle);
 
-        $exitCode = proc_close($process);
+        // On PHP < 8.4, proc_get_status() reaps the child via waitpid(WNOHANG),
+        // so a subsequent proc_close() returns -1.  Capture the exit code from
+        // the status array while it is still available.
+        $exitCode = $status['exitcode'] ?? -1;
+        proc_close($process);
         @unlink($stdoutFile);
         @unlink($stderrFile);
 
