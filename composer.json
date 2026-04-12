@@ -1,7 +1,7 @@
 {
     "$schema": "https://getcomposer.org/schema.json",
     "name": "sk-wang/hao-code",
-    "version": "v0.2.4",
+    "version": "v0.2.5",
     "type": "library",
     "description": "Terminal-first AI coding agent and PHP SDK for Anthropic-compatible APIs.",
     "keywords": ["ai", "agent", "cli", "coding-agent", "sdk", "anthropic"],
